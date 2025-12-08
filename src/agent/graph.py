@@ -202,6 +202,7 @@ async def run_agent(state: ScribaState, config: RunnableConfig, runtime: Runtime
     response = await scriba_deep_agent.ainvoke(
         state,
         config=config,
+        parallel_tool_calls=False
     )
 
     return response

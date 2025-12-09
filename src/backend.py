@@ -310,69 +310,6 @@ class S3Backend(BackendProtocol):
             print(f"Error in glob_info: {e}")
             return []
 
-    def download_to_filesystem(self, file_path: str, url: str) -> WriteResult:
-        """
-        Download file from URL, convert to markdown using Docling, and save to S3.
-        
-        Args:
-            file_path: Target path in S3 (will auto-add .md extension)
-            url: Source URL to download from
-            
-        Returns:
-            WriteResult with success/error information
-        """
-        from docling.document_converter import DocumentConverter
-        
-        self._ensure_bucket_exists()
-        
-        # Auto-add .md extension if not present
-        file_path = self._auto_add_md_extension(file_path)
-        
-        # Validate markdown file
-        error = self._ensure_markdown_file(file_path)
-        if error:
-            return WriteResult(
-                error=error,
-                path=None,
-                files_update=None
-            )
-        
-        try:
-            # Convert document from URL to markdown using Docling
-            converter = DocumentConverter()
-            conversion_result = converter.convert(url)
-            document = conversion_result.document
-            
-            # Export to markdown format
-            markdown_content = document.export_to_markdown()
-            
-            # Save to S3
-            key = self._key(file_path)
-            self.s3_client.put_object(
-                Bucket=self.bucket,
-                Key=key,
-                Body=markdown_content.encode('utf-8'),
-                ContentType='text/markdown',
-                Metadata={
-                    'uploaded-by': 'agent',
-                    'source-url': url,
-                    'converted-from': 'url'
-                }
-            )
-            
-            return WriteResult(
-                error=None,
-                path=file_path,
-                files_update=None
-            )
-            
-        except Exception as e:
-            return WriteResult(
-                error=f"Error downloading and converting file from '{url}': {str(e)}",
-                path=None,
-                files_update=None
-            )
-    
     def write(self, file_path: str, content: str) -> WriteResult:
         """
         Create a new file (create-only semantics).
@@ -395,8 +332,6 @@ class S3Backend(BackendProtocol):
         
         try:
             key = self._key(file_path)
-            
-            # Check if file already exists
             try:
                 self.s3_client.head_object(Bucket=self.bucket, Key=key)
                 return WriteResult(
@@ -590,6 +525,15 @@ def get_s3_backend_from_env() -> S3Backend:
         region=os.getenv('S3_REGION', 'us-east-1')
     )
 
+def get_user_backend_sync(user_id: str, conversation_id: Optional[str] = None) -> S3Backend:
+    return S3Backend(
+        bucket=os.getenv('S3_BUCKET', 'scriba'),
+        prefix=f"{user_id}/conversations/{conversation_id}" if conversation_id and conversation_id != "" else f"{user_id}",
+        endpoint_url=os.getenv('S3_ENDPOINT_URL'),
+        access_key=os.getenv('S3_ACCESS_KEY'),
+        secret_key=os.getenv('S3_SECRET_KEY'),
+        region=os.getenv('S3_REGION', 'us-east-1')
+    )
 
 async def get_user_s3_backend(user_id: str, conversation_id: Optional[str] = None) -> S3Backend:
     """

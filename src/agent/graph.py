@@ -62,13 +62,14 @@ async def run_agent(state: SolvenState, config: RunnableConfig, runtime: Runtime
     
     # Get context from runtime
     user_config = config["configurable"].get("langgraph_auth_user")
+    print("User config:", user_config)
     user_id = user_config.get("user_data").get("id")
     conversation_id = config.get("metadata").get("thread_id")
 
     s3_backend = await get_user_s3_backend(user_id, conversation_id)
 
-    gmail_tools = get_composio_gmail_tools(user_id)
-    outlook_tools = get_composio_outlook_tools(user_id)
+    gmail_tools = get_composio_gmail_tools(user_id, conversation_id)
+    outlook_tools = get_composio_outlook_tools(user_id, conversation_id)
     
     scriba_deep_agent = create_agent(
         name="scriba",
@@ -103,6 +104,7 @@ async def run_agent(state: SolvenState, config: RunnableConfig, runtime: Runtime
                         tools=[consultar_por_referencia, consultar_por_coordenadas, consultar_por_direccion],
                         state_schema=SolvenState,
                     ),
+                    #TODO: crear agente de correo que gestione gmail y outlook subagents
                     SubAgent(
                         name="asistente_gmail",
                         description="agente para gestionar correo de gmail - listar, leer y enviar correos electrónicos",

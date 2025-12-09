@@ -112,7 +112,7 @@ def process_attachment(
 
         # Save converted markdown
         base_name = os.path.splitext(filename)[0]
-        markdown_filename = f"{base_name}.md"
+        markdown_filename = f"{toolkit}/{base_name}.md"
         print(f"[after_execute_modifier_save_attachment] Saving markdown to S3: {markdown_filename}")
         md_write = s3_backend.write(markdown_filename, markdown_content)
 

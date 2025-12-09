@@ -4,6 +4,9 @@
   "graphs": {
     "solven": "./src/agent/graph.py:graph"
   },
+  "auth" : {
+    "path": "./src/auth.py:auth"
+  },
   "env": ".env",
   "image_distro": "wolfi"
 }

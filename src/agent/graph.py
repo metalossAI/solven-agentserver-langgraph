@@ -7,6 +7,7 @@ load_dotenv()
  
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command, interrupt
+from langgraph.graph import MessagesState
 from langgraph.graph import StateGraph
 from langgraph.runtime import Runtime
 
@@ -34,7 +35,7 @@ from src.models import AppContext
 from src.agent.tools import get_composio_gmail_tools, get_composio_outlook_tools
 from src.catastro.tools import consultar_por_referencia, consultar_por_coordenadas, consultar_por_direccion
 
-class ScribaState(CopilotKitState):
+class SolvenState(MessagesState):
     """
     The state of the agent.
     """
@@ -55,34 +56,17 @@ async def get_context_item(context_items, item_name):
             if item.description == item_name:
                 return item.value
     return None
-
-async def build_runtime_context(
-    state: ScribaState,
-    config: RunnableConfig,
-    runtime: Runtime
-):
-    copilotkit_context = state.get("copilotkit", {}).get("context", [])
-    user_json = await get_context_item(copilotkit_context, "user")
-    user = json.loads(user_json) if user_json else None
-    user_id = user.get("id") if user else None
-    tenant_id = await get_context_item(copilotkit_context, "tenant")
-
-    # Set context as dictionary
-    runtime.context["user_id"] = user_id
-    runtime.context["tenant_id"] = tenant_id
-    runtime.context["thread_id"] = config.get("configurable", {}).get("thread_id")
-    
-    return state
     
 
-async def run_agent(state: ScribaState, config: RunnableConfig, runtime: Runtime):
+async def run_agent(state: SolvenState, config: RunnableConfig, runtime: Runtime):
     
     # Get context from runtime
-    user_id = runtime.context.get("user_id")
-    conversation_id = runtime.context.get("thread_id")
+    user_config = config["configurable"].get("langgraph_auth_user")
+    user_id = user_config.get("user_data").get("id")
+    conversation_id = config.get("metadata").get("thread_id")
 
     s3_backend = await get_user_s3_backend(user_id, conversation_id)
-    
+
     gmail_tools = get_composio_gmail_tools(user_id)
     outlook_tools = get_composio_outlook_tools(user_id)
     
@@ -117,7 +101,7 @@ async def run_agent(state: ScribaState, config: RunnableConfig, runtime: Runtime
                         system_prompt="Eres un asistente de busqueda de datos del catastro de España.",
                         model=llm,
                         tools=[consultar_por_referencia, consultar_por_coordenadas, consultar_por_direccion],
-                        state_schema=ScribaState,
+                        state_schema=SolvenState,
                     ),
                     SubAgent(
                         name="asistente_correo_electronico",
@@ -145,14 +129,14 @@ async def run_agent(state: ScribaState, config: RunnableConfig, runtime: Runtime
                                 ],
                             ),
                         ],
-                        state_schema=ScribaState,
+                        state_schema=SolvenState,
                     ),
                     SubAgent(
                         name="documento",
                         description="agente para gestionar documentos - listar, leer y enviar correos electrónicos",
                         system_prompt="Eres un asistente de email. Puedes listar emails, leer su contenido completo y enviar nuevos emails. Cuando leas emails, proporciona resúmenes claros. Cuando envíes emails, asegúrate de que sean profesionales y bien formateados.",
                         model=llm,
-                        state_schema=ScribaState,
+                        state_schema=SolvenState,
                         middleware=[
                             FilesystemMiddleware(
                                 system_prompt="Espacio de trabajo para crear, editar y gestionar documentos.",
@@ -195,7 +179,7 @@ async def run_agent(state: ScribaState, config: RunnableConfig, runtime: Runtime
                 system_prompt="Apunta siempre tareas pendientes y tacha las que esten completadas."
             ),
         ],
-        state_schema=ScribaState,
+        state_schema=SolvenState,
         context_schema=CopilotKitContext,
     )
     
@@ -208,13 +192,11 @@ async def run_agent(state: ScribaState, config: RunnableConfig, runtime: Runtime
     return response
 
 workflow = StateGraph(
-    ScribaState,   
+    SolvenState,   
 )
 
-workflow.add_node("build_runtime_context", build_runtime_context)
-workflow.set_entry_point("build_runtime_context")
+workflow.set_entry_point("run_agent")
 workflow.add_node("run_agent", run_agent)
-workflow.add_edge("build_runtime_context", "run_agent")
 workflow.add_edge("run_agent", "__end__")
 
 

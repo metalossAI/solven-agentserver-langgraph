@@ -23,6 +23,7 @@ dependencies = [
     "langchain-openai>=1.0.1",
     "langgraph>=1.0.2",
     "smithery>=0.4.4",
+    "supabase>=2.25.0",
 ]
 
 

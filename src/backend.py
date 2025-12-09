@@ -309,6 +309,69 @@ class S3Backend(BackendProtocol):
         except ClientError as e:
             print(f"Error in glob_info: {e}")
             return []
+
+    def download_to_filesystem(self, file_path: str, url: str) -> WriteResult:
+        """
+        Download file from URL, convert to markdown using Docling, and save to S3.
+        
+        Args:
+            file_path: Target path in S3 (will auto-add .md extension)
+            url: Source URL to download from
+            
+        Returns:
+            WriteResult with success/error information
+        """
+        from docling.document_converter import DocumentConverter
+        
+        self._ensure_bucket_exists()
+        
+        # Auto-add .md extension if not present
+        file_path = self._auto_add_md_extension(file_path)
+        
+        # Validate markdown file
+        error = self._ensure_markdown_file(file_path)
+        if error:
+            return WriteResult(
+                error=error,
+                path=None,
+                files_update=None
+            )
+        
+        try:
+            # Convert document from URL to markdown using Docling
+            converter = DocumentConverter()
+            conversion_result = converter.convert(url)
+            document = conversion_result.document
+            
+            # Export to markdown format
+            markdown_content = document.export_to_markdown()
+            
+            # Save to S3
+            key = self._key(file_path)
+            self.s3_client.put_object(
+                Bucket=self.bucket,
+                Key=key,
+                Body=markdown_content.encode('utf-8'),
+                ContentType='text/markdown',
+                Metadata={
+                    'uploaded-by': 'agent',
+                    'source-url': url,
+                    'converted-from': 'url'
+                }
+            )
+            
+            return WriteResult(
+                error=None,
+                path=file_path,
+                files_update=None
+            )
+            
+        except Exception as e:
+            return WriteResult(
+                error=f"Error downloading and converting file from '{url}': {str(e)}",
+                path=None,
+                files_update=None
+            )
     
     def write(self, file_path: str, content: str) -> WriteResult:
         """

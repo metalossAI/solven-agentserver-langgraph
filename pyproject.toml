@@ -17,6 +17,7 @@ dependencies = [
     "langchain>=1.0.3",
     "langchain-cloudflare>=0.1.9",
     "langchain-community>=0.4.1",
+    "langchain-docling>=2.0.0",
     "langchain-groq>=0.2.0",
     "langchain-ibm>=1.0.1",
     "langchain-mcp-adapters>=0.1.14",

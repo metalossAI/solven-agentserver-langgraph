@@ -23,6 +23,7 @@ def get_composio_outlook_tools(user_id):
         user_id=user_id,
         toolkits=["OUTLOOK"],
         modifiers=[
+            before_execute_modifier_outlook_fetch
         ]
     )
     return tools

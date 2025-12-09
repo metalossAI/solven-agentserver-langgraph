@@ -104,22 +104,30 @@ async def run_agent(state: SolvenState, config: RunnableConfig, runtime: Runtime
                         state_schema=SolvenState,
                     ),
                     SubAgent(
-                        name="asistente_correo_electronico",
-                        description="agente para gestionar correo electronico - listar, leer y enviar correos electrónicos",
-                        system_prompt="Eres un asistente de email. Puedes listar emails, leer su contenido completo y enviar nuevos emails. Cuando leas emails, proporciona resúmenes claros. Cuando envíes emails, asegúrate de que sean profesionales y bien formateados.",
+                        name="asistente_gmail",
+                        description="agente para gestionar correo de gmail - listar, leer y enviar correos electrónicos",
+                        system_prompt="Eres un asistente de Gmail. Puedes listar emails, leer su contenido completo y enviar nuevos emails. Cuando leas emails, proporciona resúmenes claros. Cuando envíes emails, asegúrate de que sean profesionales y bien formateados.",
                         model=llm,
-                        tools=gmail_tools + outlook_tools,
+                        tools=gmail_tools,
                         middleware=[
-                            FilesystemMiddleware(
-                                system_prompt="Espacio de trabajo para crear, editar y gestionar documentos.",
-                                backend=s3_backend
+                            ContextEditingMiddleware(
+                                edits=[
+                                    ClearToolUsesEdit(
+                                        trigger=30000,
+                                        keep=3,
+                                    ),
+                                ],
                             ),
-                            SummarizationMiddleware(
-                                model=llm,
-                                trigger=("tokens", 30000),
-                                max_tokens_before_summary=10000,
-                                messages_to_keep=5,
-                            ),
+                        ],
+                        state_schema=SolvenState,
+                    ),
+                    SubAgent(
+                        name="asistente_outlook",
+                        description="agente para gestionar correo de outlook - listar, leer y enviar correos electrónicos",
+                        system_prompt="Eres un asistente de Outlook. Puedes listar emails, leer su contenido completo y enviar nuevos emails. Cuando leas emails, proporciona resúmenes claros. Cuando envíes emails, asegúrate de que sean profesionales y bien formateados.",
+                        model=llm,
+                        tools=outlook_tools,
+                        middleware=[
                             ContextEditingMiddleware(
                                 edits=[
                                     ClearToolUsesEdit(
@@ -133,8 +141,8 @@ async def run_agent(state: SolvenState, config: RunnableConfig, runtime: Runtime
                     ),
                     SubAgent(
                         name="documento",
-                        description="agente para gestionar documentos - listar, leer y enviar correos electrónicos",
-                        system_prompt="Eres un asistente de email. Puedes listar emails, leer su contenido completo y enviar nuevos emails. Cuando leas emails, proporciona resúmenes claros. Cuando envíes emails, asegúrate de que sean profesionales y bien formateados.",
+                        description="agente para gestionar documentos - listar, leer y enviar documentos",
+                        system_prompt="Eres un asistente de documentos. Puedes listar documentos, leer su contenido completo y enviar nuevos documentos. Cuando leas documentos, proporciona resúmenes claros. Cuando envíes documentos, asegúrate de que sean profesionales y bien formateados.",
                         model=llm,
                         state_schema=SolvenState,
                         middleware=[

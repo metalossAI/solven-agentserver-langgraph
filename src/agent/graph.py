@@ -104,32 +104,96 @@ async def run_agent(state: SolvenState, config: RunnableConfig, runtime: Runtime
                         tools=[consultar_por_referencia, consultar_por_coordenadas, consultar_por_direccion],
                         state_schema=SolvenState,
                     ),
-                    #TODO: crear agente de correo que gestione gmail y outlook subagents
-                    SubAgent(
-                        name="asistente_gmail",
-                        description="agente para gestionar correo de gmail - listar, leer y enviar correos electrónicos",
-                        system_prompt="Eres un asistente de Gmail. Puedes listar emails, leer su contenido completo y enviar nuevos emails. Cuando leas emails, proporciona resúmenes claros. Cuando envíes emails, asegúrate de que sean profesionales y bien formateados.",
+					SubAgent(
+                        name="asistente_correo",
+                        description="Agente para gestionar los correos del usuario. Gestiona tant",
+                        system_prompt="""
+Eres un asistente maestro especializado en la gestión de correos electrónicos del usuario,
+encargado de coordinar y supervisar a agentes subordinados responsables de Gmail y Outlook.
+
+Tu objetivo es brindar una gestión unificada de todas las bandejas del usuario, incluyendo:
+- Listar y organizar correos de Gmail y Outlook.
+- Leer y resumir mensajes individuales de cualquiera de los servicios.
+- Enviar correos en nombre del usuario, escogiendo el servicio correcto según corresponda.
+
+REGLAS IMPORTANTES:
+- Debes delegar el trabajo en el subagente apropiado según la cuenta y el servicio.
+- Nunca ejecutes herramientas directamente. Solo tus subagentes pueden hacerlo.
+- Debes combinar y unificar respuestas de distintas bandejas en una sola presentación coherente.
+- Debes responder SIEMPRE tú al usuario. Los subagentes nunca deben responder al usuario.
+- No reveles qué subagente utilizaste ni detalles internos de coordinación.
+
+Tus resúmenes e interacciones deben ser:
+- Claros, profesionales, confiables y concisos.
+- Orientados a la acción cuando sea necesario.
+
+Tu función es ser el gestor global que integra, resume y entrega el resultado final al usuario.
+""",
                         model=llm,
-                        tools=gmail_tools,
                         middleware=[
-                            ContextEditingMiddleware(
-                                edits=[
-                                    ClearToolUsesEdit(
-                                        trigger=30000,
-                                        keep=3,
-                                    ),
-                                ],
-                            ),
-                        ],
-                        state_schema=SolvenState,
-                    ),
-                    SubAgent(
-                        name="asistente_outlook",
-                        description="agente para gestionar correo de outlook - listar, leer y enviar correos electrónicos",
-                        system_prompt="Eres un asistente de Outlook. Puedes listar emails, leer su contenido completo y enviar nuevos emails. Cuando leas emails, proporciona resúmenes claros. Cuando envíes emails, asegúrate de que sean profesionales y bien formateados.",
-                        model=llm,
-                        tools=outlook_tools,
-                        middleware=[
+                            SubAgentMiddleware(
+								default_model=llm,
+                                subagents=[
+                                    SubAgent(
+										name="asistente_gmail",
+										description="agente para gestionar correo de gmail - listar, leer y enviar correos electrónicos",
+										system_prompt="""
+Eres un asistente especializado en Gmail. Tu función es:
+- Listar emails asociados a la cuenta de Gmail del usuario.
+- Leer emails y devolver su contenido con resúmenes claros y fiables.
+- Enviar correos profesionales con el formato adecuado utilizando Gmail.
+
+REGLAS IMPORTANTES:
+- Solo debes ejecutar acciones relacionadas con Gmail.
+- Nunca debes responder directamente al usuario final; siempre devuelves la información al agente maestro para que la presente.
+- Entrega información objetiva y estructurada, evitando opiniones innecesarias.
+- Cuando resumas, destaca información clave, remitente, propósito del correo y acciones requeridas (si las hay).
+""",
+										model=llm,
+										tools=gmail_tools,
+										middleware=[
+											ContextEditingMiddleware(
+												edits=[
+													ClearToolUsesEdit(
+														trigger=30000,
+														keep=3,
+													),
+												],
+											),
+										],
+										state_schema=SolvenState,
+									),
+                                    SubAgent(
+										name="asistente_outlook",
+										description="agente para gestionar correo de outlook - listar, leer y enviar correos electrónicos",
+										system_prompt="""
+Eres un asistente especializado en Outlook. Tu función es:
+- Listar emails asociados a la cuenta de Outlook del usuario.
+- Leer emails y devolver su contenido con resúmenes claros y fiables.
+- Enviar correos profesionales con el formato adecuado utilizando Outlook.
+
+REGLAS IMPORTANTES:
+- Solo debes ejecutar acciones relacionadas con Outlook.
+- Nunca debes responder directamente al usuario final; siempre devuelves la información al agente maestro para que la presente.
+- Entrega información objetiva y estructurada, evitando opiniones innecesarias.
+- Cuando resumas, destaca información clave, remitente, propósito del correo y acciones requeridas (si las hay).
+""",
+										model=llm,
+										tools=outlook_tools,
+										middleware=[
+											ContextEditingMiddleware(
+												edits=[
+													ClearToolUsesEdit(
+														trigger=30000,
+														keep=3,
+													),
+												],
+											),
+										],
+										state_schema=SolvenState,
+									),
+								]
+							),
                             ContextEditingMiddleware(
                                 edits=[
                                     ClearToolUsesEdit(

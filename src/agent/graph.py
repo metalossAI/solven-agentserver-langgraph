@@ -11,8 +11,7 @@ from langgraph.graph import MessagesState
 from langgraph.graph import StateGraph
 from langgraph.runtime import Runtime
 
-from copilotkit import CopilotKitContext, LangGraphAGUIAgent, CopilotKitState
-from copilotkit.langchain import copilotkit_customize_config
+
 from copilotkit.langgraph import RunnableConfig, CopilotContextItem
 
 from collections.abc import Callable, Sequence
@@ -24,27 +23,18 @@ from langchain.agents.middleware import FilesystemFileSearchMiddleware
 from langchain.agents.middleware.context_editing import ContextEditingMiddleware, ClearToolUsesEdit
 from langchain.agents.middleware.summarization import SummarizationMiddleware
 from langchain.agents.middleware import InterruptOnConfig, TodoListMiddleware
-from langchain_mcp_adapters.client import MultiServerMCPClient
+
 
 from deepagents.middleware import FilesystemMiddleware
 from deepagents.middleware.subagents import SubAgent, SubAgentMiddleware
 from src.backend import get_user_s3_backend
 
 from src.llm import LLM as llm
-from src.models import AppContext
+from src.models import SolvenContext, SolvenState
 from src.agent.tools import get_composio_gmail_tools, get_composio_outlook_tools
+from src.agent.prompt import generate_prompt_template
+from src.agent_elasticsearch.agent import document_search_subagent
 from src.catastro.tools import consultar_por_referencia, consultar_por_coordenadas, consultar_por_direccion
-
-class SolvenState(MessagesState):
-    """
-    The state of the agent.
-    """
-    # Steps Update
-    steps: Optional[List[str]] = None
-    # Documento
-    document: Optional[str] = None
-    # Contenido
-    content: Optional[str] = None
 
 async def get_context_item(context_items, item_name):
     for item in context_items:
@@ -56,46 +46,37 @@ async def get_context_item(context_items, item_name):
             if item.description == item_name:
                 return item.value
     return None
-    
 
-async def run_agent(state: SolvenState, config: RunnableConfig, runtime: Runtime):
+async def run_agent(state: SolvenState, config: RunnableConfig, runtime: Runtime[SolvenContext]):
     
-    # Get context from runtime
+    # Get context from config
     user_config = config["configurable"].get("langgraph_auth_user")
-    print("User config:", user_config)
+    user_data = user_config.get("user_data")
     user_id = user_config.get("user_data").get("id")
+    tenant_id = user_config.get("user_data").get("company_id")
     conversation_id = config.get("metadata").get("thread_id")
 
     s3_backend = await get_user_s3_backend(user_id, conversation_id)
 
     gmail_tools = get_composio_gmail_tools(user_id, conversation_id)
     outlook_tools = get_composio_outlook_tools(user_id, conversation_id)
+
+    main_prompt = generate_prompt_template(
+        name=user_data.get("name"),
+        language="español",
+        profile=f"email: {user_data.get('email')} | role: {user_data.get('role')} | company: {user_data.get('company_name')}"
+    )
     
     scriba_deep_agent = create_agent(
         name="scriba",
         model=llm,
-        system_prompt='''
-        Eres un agente que se encarga orquestrar tareas para completar tareas que te encargue el usuario.
-        Reglas:
-        - Dirige el flujo de trabajo.
-        - Evita emoticonos, emojis y simbolos.
-        - Responde en el idioma en que se dirija el usuario.
-        - Si el usuario no especifica un idioma, responde en español.
-        Tarea:
-        - Lanzar subagentes especializados para completar los TO-DOs.
-        - Dirigir el flujo de trabajo
-        Objetivo: Ayudar a procesar tareas al usuario.
-        Subagentes:
-        - correo_electronico: Agente encargado de recabar informacion y realizar acciones en el correo.
-        ''',
+        system_prompt=main_prompt,
         middleware=[
-            FilesystemMiddleware(
-                system_prompt="Espacio de trabajo para crear, editar y gestionar documentos.",
-                backend=s3_backend
-            ),
             SubAgentMiddleware(
+                general_purpose_agent=True,
                 default_model=llm,
                 subagents=[
+                    document_search_subagent,
                     SubAgent(
                         name="asistente_busqueda_catastro",
                         description="agente para gestionar busquedas en el catastro",
@@ -206,9 +187,9 @@ REGLAS IMPORTANTES:
                         state_schema=SolvenState,
                     ),
                     SubAgent(
-                        name="documento",
-                        description="agente para gestionar documentos - listar, leer y enviar documentos",
-                        system_prompt="Eres un asistente de documentos. Puedes listar documentos, leer su contenido completo y enviar nuevos documentos. Cuando leas documentos, proporciona resúmenes claros. Cuando envíes documentos, asegúrate de que sean profesionales y bien formateados.",
+                        name="asistente_redactor",
+                        description="asistente para gestionar, leer, y redactar documentos genericos.",
+                        system_prompt="Eres un asistente de documentos. Puedes listar documentos, leer su contenido completo y redactar documentos.",
                         model=llm,
                         state_schema=SolvenState,
                         middleware=[
@@ -254,12 +235,20 @@ REGLAS IMPORTANTES:
             ),
         ],
         state_schema=SolvenState,
-        context_schema=CopilotKitContext,
+        context_schema=SolvenContext,
+    )
+    
+    # Create context for the agent
+    agent_context = SolvenContext(
+        user_id=user_id,
+        tenant_id=tenant_id,
+        thread_id=conversation_id
     )
     
     response = await scriba_deep_agent.ainvoke(
         state,
         config=config,
+        context=agent_context,
         parallel_tool_calls=False
     )
 
@@ -269,8 +258,8 @@ workflow = StateGraph(
     SolvenState,   
 )
 
-workflow.set_entry_point("run_agent")
 workflow.add_node("run_agent", run_agent)
+workflow.set_entry_point("run_agent")
 workflow.add_edge("run_agent", "__end__")
 
 

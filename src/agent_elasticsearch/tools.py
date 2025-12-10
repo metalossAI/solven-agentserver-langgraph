@@ -1,0 +1,90 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from langchain.tools import tool, ToolRuntime
+from langchain_elasticsearch import ElasticsearchStore, BM25Strategy, DenseVectorStrategy
+from src.embeddings import embeddings
+
+from src.models import SolvenContext
+from langchain_core.documents import Document
+from enum import Enum
+
+elasticBMSearch = ElasticsearchStore(
+    es_url=os.getenv("ELASTICSEARCH_ENDPOINT"),
+    es_api_key=os.getenv("ELASTICSEARCH_API_KEY"),
+    index_name="solven",
+    embedding=embeddings,
+    strategy=BM25Strategy()
+)
+
+elasticDVSearch = ElasticsearchStore(
+    es_url=os.getenv("ELASTICSEARCH_ENDPOINT"),
+    es_api_key=os.getenv("ELASTICSEARCH_API_KEY"),
+    index_name="solven",
+    embedding=embeddings,
+    strategy=DenseVectorStrategy(hybrid=True)
+)
+
+class SearchMode(Enum):
+    keyword = "keyword"
+    similarity = "similarity"
+
+class SearchScope(Enum):
+    tenant = "tenant"
+    user = "user"
+
+@tool
+async def buscar_documentos(
+    runtime: ToolRuntime[SolvenContext],
+    query: str,
+    strategy : SearchMode = SearchMode.similarity,
+    k : int = 5,
+    scope : SearchScope = SearchScope.tenant
+):
+    """
+    Busca documentos en la base de datos de documentos.
+
+    Args:
+        query (str): La consulta a buscar.
+        strategy (SearchMode: "keyword" | "similarity"): estrategia de busqueda keyword o similarity.
+        k (int): Número de resultados a devolver.
+        scope (SearchScope: "tenant" | "user"): scope de busqueda. Limitada a archivos del usuario o de la empresa.
+    """
+    top_k = k if k < 100 else 100
+    user_id = runtime.context.user_id
+    tenant_id = runtime.context.tenant_id
+
+    filter_query = {
+        "term": {
+            "metadata.tenant_id.keyword": tenant_id
+        }
+    }
+    
+    if scope == SearchScope.user:
+        filter_query = {
+            "term": {
+                "metadata.user_id.keyword": user_id
+            }
+        }
+    
+    search_results = []
+    if strategy == SearchMode.keyword:
+        search_results = elasticBMSearch.similarity_search(
+            query,
+            k=top_k,
+            filter=filter_query
+        )
+    else:
+        search_results = elasticDVSearch.similarity_search(
+            query,
+            k=top_k,
+            filter=filter_query
+        )
+
+    if search_results:
+        print("ES Search results: ", search_results)
+        return search_results
+    
+    return []    

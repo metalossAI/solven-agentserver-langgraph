@@ -19,9 +19,6 @@ openrter = ChatOpenAI(
     model="x-ai/grok-4.1-fast",
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
-	model_kwargs={
-		"parallel_tool_calls" : False,
-	}
 )
 
 groq_qwen = ChatGroq(

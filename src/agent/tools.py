@@ -1,6 +1,9 @@
 
 from typing import Callable, List
 import os
+from dotenv import load_dotenv
+load_dotenv()
+
 import tempfile
 import requests
 import asyncio
@@ -9,6 +12,29 @@ from composio.types import ToolExecuteParams, ToolExecutionResponse
 from composio_langchain import LangchainProvider
 from docling.document_converter import DocumentConverter
 from src.backend import get_user_backend_sync
+
+def get_composio_elasticsearch_tools(user_id, tenant_id):
+    composio = Composio(provider=LangchainProvider())
+    tenant_filtering_modifier = create_before_execute_modifier_elasticsearch(user_id, tenant_id)
+    tools = None
+    conn_request = composio.connected_accounts.initiate(
+            user_id=user_id,
+            auth_config_id=os.getenv("COMPOSIO_AUTH_CONFIG_ELASTICSEARCH"),
+            config={
+                "auth_scheme": "API_KEY",
+                "val": {"generic_api_key": os.getenv("ELASTICSEARCH_API_KEY")}
+            }
+        )
+    if conn_request.status_code != 200:
+        raise Exception("Error connecting to Elasticsearch")
+    tools = composio.tools.get(
+        user_id=user_id,
+        toolkits=["ELASTICSEARCH"],
+        modifiers=[
+            tenant_filtering_modifier
+        ]
+    )
+    return tools
 
 def get_composio_gmail_tools(user_id, thread_id):
     """Synchronous version for running in thread pool"""
@@ -124,3 +150,27 @@ def process_attachment(
         response["data"]["error"] = str(e)
 
     return response
+
+def create_before_execute_modifier_elasticsearch(user_id: str, tenant_id: str):
+    
+    @before_execute(tools=["ELASTICSEARCH_QUERY_INDEX"])
+    def before_execute_modifier_elasticsearch(
+        tool: str,
+        toolkit: str,
+        params: ToolExecuteParams,
+    ) -> ToolExecuteParams:
+        
+        filters = [
+            {
+                "metadata.tenant_id.keyword": tenant_id
+            },
+        ]
+
+        params["arguments"]["term_filters"] = filters
+        current_size = params["arguments"]["size"]
+        updated_size = min(current_size, 250)
+        params["arguments"]["size"] = updated_size
+
+        return params
+
+    return before_execute_modifier_elasticsearch

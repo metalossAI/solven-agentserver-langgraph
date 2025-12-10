@@ -47,9 +47,9 @@ async def buscar_documentos(
     Busca documentos en la base de datos de documentos.
 
     Args:
-        query (str): La consulta a buscar.
-        strategy (SearchMode: "keyword" | "similarity"): estrategia de busqueda keyword o similarity.
-        k (int): Número de resultados a devolver.
+        query (str): La consulta a buscar. Palabra clave o texto.
+        strategy (SearchMode: "keyword" | "similarity"): estrategia de busqueda por palabra clave o similitud (similarity).
+        k (int): Número de resultados a devolver. No mas de 100.
         scope (SearchScope: "tenant" | "user"): scope de busqueda. Limitada a archivos del usuario o de la empresa.
     """
     top_k = k if k < 100 else 100
@@ -65,7 +65,7 @@ async def buscar_documentos(
     if scope == SearchScope.user:
         filter_query = {
             "term": {
-                "metadata.user_id.keyword": user_id
+                "metadata.uploaded-by.keyword": user_id
             }
         }
     

@@ -32,21 +32,12 @@ from src.backend import get_user_s3_backend
 
 from src.llm import LLM as llm
 from src.models import SolvenContext, SolvenState
-from src.agent.tools import get_composio_gmail_tools, get_composio_outlook_tools
 from src.agent.prompt import generate_prompt_template
 from src.agent_elasticsearch.agent import doc_search_agent
-from src.catastro.tools import busqueda_catastro	
+from src.agent_email.agent import generate_email_subagent
+from src.agent_email.tools import get_composio_outlook_tools
+from src.catastro.tools import busqueda_catastro
 
-async def get_context_item(context_items, item_name):
-	for item in context_items:
-		# Handle both dict and object formats
-		if isinstance(item, dict):
-			if item.get('description') == item_name:
-				return item.get('value')
-		elif hasattr(item, 'description') and hasattr(item, 'value'):
-			if item.description == item_name:
-				return item.value
-	return None
 
 async def run_agent(state: SolvenState, config: RunnableConfig, runtime: Runtime[SolvenContext]):
 	
@@ -59,16 +50,15 @@ async def run_agent(state: SolvenState, config: RunnableConfig, runtime: Runtime
 
 	s3_backend = await get_user_s3_backend(user_id, conversation_id)
 
-	gmail_tools = get_composio_gmail_tools(user_id, conversation_id)
-	outlook_tools = get_composio_outlook_tools(user_id, conversation_id)
 
 	main_prompt = generate_prompt_template(
-		date=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
 		name=user_data.get("name"),
+		profile=f"email: {user_data.get('email')} | role: {user_data.get('role')} | company: {user_data.get('company_name')}",
 		language="español",
-		profile=f"email: {user_data.get('email')} | role: {user_data.get('role')} | company: {user_data.get('company_name')}"
 	)
 	
+	email_agent = await generate_email_subagent(user_id, conversation_id)
+
 	scriba_deep_agent = create_agent(
 		name="scriba",
 		model=llm,
@@ -80,113 +70,13 @@ async def run_agent(state: SolvenState, config: RunnableConfig, runtime: Runtime
 				default_model=llm,
 				subagents=[
 					doc_search_agent,
+					email_agent,
 					SubAgent(
 						name="asistente_busqueda_catastro",
 						description="agente para gestionar busquedas en el catastro",
 						system_prompt="Eres un asistente de busqueda de datos del catastro de España.",
 						model=llm,
 						tools=[busqueda_catastro],
-						state_schema=SolvenState,
-					),
-					SubAgent(
-						name="asistente_correo",
-						description="Agente para gestionar los correos del usuario. Gestiona tant",
-						system_prompt="""
-Eres un asistente maestro especializado en la gestión de correos electrónicos del usuario,
-encargado de coordinar y supervisar a agentes subordinados responsables de Gmail y Outlook.
-
-Tu objetivo es brindar una gestión unificada de todas las bandejas del usuario, incluyendo:
-- Listar y organizar correos de Gmail y Outlook.
-- Leer y resumir mensajes individuales de cualquiera de los servicios.
-- Enviar correos en nombre del usuario, escogiendo el servicio correcto según corresponda.
-
-REGLAS IMPORTANTES:
-- Debes delegar el trabajo en el subagente apropiado según la cuenta y el servicio.
-- Nunca ejecutes herramientas directamente. Solo tus subagentes pueden hacerlo.
-- Debes combinar y unificar respuestas de distintas bandejas en una sola presentación coherente.
-- Debes responder SIEMPRE tú al usuario. Los subagentes nunca deben responder al usuario.
-- No reveles qué subagente utilizaste ni detalles internos de coordinación.
-
-Tus resúmenes e interacciones deben ser:
-- Claros, profesionales, confiables y concisos.
-- Orientados a la acción cuando sea necesario.
-
-Tu función es ser el gestor global que integra, resume y entrega el resultado final al usuario.
-""",
-						model=llm,
-						middleware=[
-							SubAgentMiddleware(
-								default_model=llm,
-								subagents=[
-									SubAgent(
-										name="asistente_gmail",
-										description="agente para gestionar correo de gmail - listar, leer y enviar correos electrónicos",
-										system_prompt="""
-Eres un asistente especializado en Gmail. Tu función es:
-- Listar emails asociados a la cuenta de Gmail del usuario.
-- Leer emails y devolver su contenido con resúmenes claros y fiables.
-- Enviar correos profesionales con el formato adecuado utilizando Gmail.
-
-REGLAS IMPORTANTES:
-- Solo debes ejecutar acciones relacionadas con Gmail.
-- Nunca debes responder directamente al usuario final; siempre devuelves la información al agente maestro para que la presente.
-- Entrega información objetiva y estructurada, evitando opiniones innecesarias.
-- Cuando resumas, destaca información clave, remitente, propósito del correo y acciones requeridas (si las hay).
-""",
-										model=llm,
-										tools=gmail_tools,
-										middleware=[
-											ContextEditingMiddleware(
-												edits=[
-													ClearToolUsesEdit(
-														trigger=30000,
-														keep=3,
-													),
-												],
-											),
-										],
-										state_schema=SolvenState,
-									),
-									SubAgent(
-										name="asistente_outlook",
-										description="agente para gestionar correo de outlook - listar, leer y enviar correos electrónicos",
-										system_prompt="""
-Eres un asistente especializado en Outlook. Tu función es:
-- Listar emails asociados a la cuenta de Outlook del usuario.
-- Leer emails y devolver su contenido con resúmenes claros y fiables.
-- Enviar correos profesionales con el formato adecuado utilizando Outlook.
-
-REGLAS IMPORTANTES:
-- Solo debes ejecutar acciones relacionadas con Outlook.
-- Nunca debes responder directamente al usuario final; siempre devuelves la información al agente maestro para que la presente.
-- Entrega información objetiva y estructurada, evitando opiniones innecesarias.
-- Cuando resumas, destaca información clave, remitente, propósito del correo y acciones requeridas (si las hay).
-""",
-										model=llm,
-										tools=outlook_tools,
-										middleware=[
-											ContextEditingMiddleware(
-												edits=[
-													ClearToolUsesEdit(
-														trigger=30000,
-														keep=3,
-													),
-												],
-											),
-										],
-										state_schema=SolvenState,
-									),
-								]
-							),
-							ContextEditingMiddleware(
-								edits=[
-									ClearToolUsesEdit(
-										trigger=30000,
-										keep=3,
-									),
-								],
-							),
-						],
 						state_schema=SolvenState,
 					),
 					SubAgent(
@@ -257,7 +147,7 @@ REGLAS IMPORTANTES:
 	return response
 
 workflow = StateGraph(
-	SolvenState,   
+	state_schema=SolvenState,
 )
 
 workflow.add_node("run_agent", run_agent)

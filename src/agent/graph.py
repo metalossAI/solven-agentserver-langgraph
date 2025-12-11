@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+from datetime import datetime
 from dotenv import load_dotenv
 from numpy import tri
 load_dotenv()
@@ -10,7 +11,7 @@ from langgraph.types import Command, interrupt
 from langgraph.graph import MessagesState
 from langgraph.graph import StateGraph
 from langgraph.runtime import Runtime
-
+from langgraph.graph.ui import push_ui_message
 
 from copilotkit.langgraph import RunnableConfig, CopilotContextItem
 
@@ -62,6 +63,7 @@ async def run_agent(state: SolvenState, config: RunnableConfig, runtime: Runtime
 	outlook_tools = get_composio_outlook_tools(user_id, conversation_id)
 
 	main_prompt = generate_prompt_template(
+		date=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
 		name=user_data.get("name"),
 		language="español",
 		profile=f"email: {user_data.get('email')} | role: {user_data.get('role')} | company: {user_data.get('company_name')}"

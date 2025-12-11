@@ -1,0 +1,2961 @@
+{
+    "openapi": "3.0.0",
+    "paths": {
+        "/api/callejero/provincias": {
+            "get": {
+                "description": "Devuelve todas las provincias con sus códigos oficiales del catastro.",
+                "operationId": "CallejeroController_getProvincias",
+                "parameters": [],
+                "responses": {
+                    "200": {
+                        "description": "Listado de provincias obtenido exitosamente",
+                        "schema": {
+                            "example": {
+                                "numeroProvincias": 48,
+                                "provincias": [
+                                    {
+                                        "nombre": "A CORUÑA",
+                                        "codigoProvinciaIne": "15"
+                                    },
+                                    {
+                                        "nombre": "ALACANT",
+                                        "codigoProvinciaIne": "03"
+                                    },
+                                    {
+                                        "nombre": "ALBACETE",
+                                        "codigoProvinciaIne": "02"
+                                    },
+                                    {
+                                        "nombre": "ALMERIA",
+                                        "codigoProvinciaIne": "04"
+                                    },
+                                    {
+                                        "nombre": "ASTURIAS",
+                                        "codigoProvinciaIne": "33"
+                                    }
+                                ],
+                                "errores": []
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ProvinciasResponse"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "API Key no proporcionada o inválida",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 401,
+                                        "message": "API Key no válida",
+                                        "error": "Unauthorized"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Suscripción inactiva, límite de consultas alcanzado o periodo de prueba finalizado",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 403,
+                                        "message": "Has alcanzado el límite mensual de 100 consultas",
+                                        "error": "Forbidden"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Se ha excedido el límite de rate limiting",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 429,
+                                        "message": "Se ha excedido el límite de solicitudes",
+                                        "error": "Too Many Requests"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "api-key": [
+                            "API Key requerida en el header X-API-KEY"
+                        ]
+                    }
+                ],
+                "summary": "Obtener listado completo de provincias españolas",
+                "tags": [
+                    "Catastro - Callejero"
+                ]
+            }
+        },
+        "/api/callejero/municipios": {
+            "get": {
+                "description": "Devuelve todos los municipios pertenecientes a una provincia determinada.",
+                "operationId": "CallejeroController_getMunicipios",
+                "parameters": [
+                    {
+                        "name": "provincia",
+                        "required": true,
+                        "in": "query",
+                        "description": "Provincia ",
+                        "schema": {
+                            "example": "Madrid",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "municipio",
+                        "required": false,
+                        "in": "query",
+                        "description": "Municipio (opcional, para búsqueda específica)",
+                        "schema": {
+                            "example": "Madrid",
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Listado de municipios obtenido exitosamente",
+                        "schema": {
+                            "example": {
+                                "numeroMunicipios": 179,
+                                "municipios": [
+                                    {
+                                        "codigoDelegacion": "28",
+                                        "codigoProvinciaIne": "28",
+                                        "codigoMunicipioMeh": "2",
+                                        "codigoMunicipioIne": "2",
+                                        "nombreMunicipio": "AJALVIR"
+                                    },
+                                    {
+                                        "codigoDelegacion": "28",
+                                        "codigoProvinciaIne": "28",
+                                        "codigoMunicipioMeh": "3",
+                                        "codigoMunicipioIne": "3",
+                                        "nombreMunicipio": "ALAMEDA DEL VALLE"
+                                    },
+                                    {
+                                        "codigoDelegacion": "28",
+                                        "codigoProvinciaIne": "28",
+                                        "codigoMunicipioMeh": "5",
+                                        "codigoMunicipioIne": "5",
+                                        "nombreMunicipio": "ALCALA DE HENARES"
+                                    },
+                                    {
+                                        "codigoDelegacion": "28",
+                                        "codigoProvinciaIne": "28",
+                                        "codigoMunicipioMeh": "6",
+                                        "codigoMunicipioIne": "6",
+                                        "nombreMunicipio": "ALCOBENDAS"
+                                    },
+                                    {
+                                        "codigoDelegacion": "28",
+                                        "codigoProvinciaIne": "28",
+                                        "codigoMunicipioMeh": "900",
+                                        "codigoMunicipioIne": "79",
+                                        "nombreMunicipio": "MADRID"
+                                    }
+                                ],
+                                "errores": []
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/MunicipiosResponse"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Código de provincia no proporcionado o inválido",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 400,
+                                        "message": "El código de provincia es requerido",
+                                        "error": "Bad Request"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "API Key no proporcionada o inválida",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 401,
+                                        "message": "API Key no válida",
+                                        "error": "Unauthorized"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Suscripción inactiva, límite de consultas alcanzado o periodo de prueba finalizado",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 403,
+                                        "message": "Has alcanzado el límite mensual de 100 consultas",
+                                        "error": "Forbidden"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Se ha excedido el límite de rate limiting",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 429,
+                                        "message": "Se ha excedido el límite de solicitudes",
+                                        "error": "Too Many Requests"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "api-key": [
+                            "API Key requerida en el header X-API-KEY"
+                        ]
+                    }
+                ],
+                "summary": "Obtener municipios de una provincia específica",
+                "tags": [
+                    "Catastro - Callejero"
+                ]
+            }
+        },
+        "/api/callejero/vias": {
+            "get": {
+                "description": "Devuelve las vías (calles, avenidas, plazas, etc.) de un municipio.",
+                "operationId": "CallejeroController_getVias",
+                "parameters": [
+                    {
+                        "name": "provincia",
+                        "required": true,
+                        "in": "query",
+                        "description": "Provincia ",
+                        "schema": {
+                            "example": "Madrid",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "municipio",
+                        "required": true,
+                        "in": "query",
+                        "description": "Municipio ",
+                        "schema": {
+                            "example": "Madrid",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "tipoVia",
+                        "required": false,
+                        "in": "query",
+                        "description": "Tipo de vía (opcional). Ejemplos: CL=CALLE, AV=AVENIDA, PZ=PLAZA, PS=PASEO",
+                        "schema": {
+                            "$ref": "#/components/schemas/TipoVia"
+                        }
+                    },
+                    {
+                        "name": "nombreVia",
+                        "required": false,
+                        "in": "query",
+                        "description": "Nombre de vía (opcional, para búsqueda específica) *Si no se incluye la respuesta puede tardar más en devolverse. Se recomienda usar al menos 3 caracteres*.",
+                        "schema": {
+                            "example": "GRAN",
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Listado de vías obtenido exitosamente",
+                        "schema": {
+                            "example": {
+                                "numeroVias": 29,
+                                "vias": [
+                                    {
+                                        "codigoMunicipioIne": "79",
+                                        "codigoProvinciaIne": "28",
+                                        "codigoVia": "938",
+                                        "nombreVia": "CABEZA GRANDE",
+                                        "tipoVia": "CL"
+                                    },
+                                    {
+                                        "codigoMunicipioIne": "79",
+                                        "codigoProvinciaIne": "28",
+                                        "codigoVia": "46552",
+                                        "nombreVia": "CONCEJAL VICTORINO GRANIZ",
+                                        "tipoVia": "CL"
+                                    },
+                                    {
+                                        "codigoMunicipioIne": "79",
+                                        "codigoProvinciaIne": "28",
+                                        "codigoVia": "10858",
+                                        "nombreVia": "EMIGRANTES",
+                                        "tipoVia": "CL"
+                                    },
+                                    {
+                                        "codigoMunicipioIne": "79",
+                                        "codigoProvinciaIne": "28",
+                                        "codigoVia": "1969",
+                                        "nombreVia": "ENRIQUE GRANADOS",
+                                        "tipoVia": "CL"
+                                    },
+                                    {
+                                        "codigoMunicipioIne": "79",
+                                        "codigoProvinciaIne": "28",
+                                        "codigoVia": "3097",
+                                        "nombreVia": "GRAN VIA",
+                                        "tipoVia": "CL"
+                                    }
+                                ],
+                                "errores": []
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ViasResponse"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Códigos de provincia o municipio no proporcionados o inválidos",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 400,
+                                        "message": "Los códigos de provincia y municipio son requeridos",
+                                        "error": "Bad Request"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "API Key no proporcionada o inválida",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 401,
+                                        "message": "API Key no válida",
+                                        "error": "Unauthorized"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Suscripción inactiva, límite de consultas alcanzado o periodo de prueba finalizado",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 403,
+                                        "message": "Has alcanzado el límite mensual de 100 consultas",
+                                        "error": "Forbidden"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Se ha excedido el límite de rate limiting",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 429,
+                                        "message": "Se ha excedido el límite de solicitudes",
+                                        "error": "Too Many Requests"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "api-key": [
+                            "API Key requerida en el header X-API-KEY"
+                        ]
+                    }
+                ],
+                "summary": "Obtener vías (calles) de un municipio específico",
+                "tags": [
+                    "Catastro - Callejero"
+                ]
+            }
+        },
+        "/api/callejero/numeros": {
+            "get": {
+                "description": "Devuelve los números (portales) con sus referencias catastrales de una vía específica.",
+                "operationId": "CallejeroController_getNumeros",
+                "parameters": [
+                    {
+                        "name": "provincia",
+                        "required": true,
+                        "in": "query",
+                        "description": "Provincia ",
+                        "schema": {
+                            "example": "Madrid",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "municipio",
+                        "required": true,
+                        "in": "query",
+                        "description": "Municipio ",
+                        "schema": {
+                            "example": "Madrid",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "tipoVia",
+                        "required": true,
+                        "in": "query",
+                        "description": "Tipo de vía ",
+                        "schema": {
+                            "$ref": "#/components/schemas/TipoVia"
+                        }
+                    },
+                    {
+                        "name": "nombreVia",
+                        "required": true,
+                        "in": "query",
+                        "description": "Nombre exacto de la vía ",
+                        "schema": {
+                            "example": "GRAN VÍA",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "numero",
+                        "required": true,
+                        "in": "query",
+                        "description": "Número específico a consultar",
+                        "schema": {
+                            "example": "81",
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Listado de números obtenido exitosamente",
+                        "schema": {
+                            "example": {
+                                "numeroNumeros": 4,
+                                "numeros": [
+                                    {
+                                        "numero": "28",
+                                        "pc1": "4699901",
+                                        "pc2": "VK4749H"
+                                    },
+                                    {
+                                        "numero": "29",
+                                        "pc1": "5001102",
+                                        "pc2": "VK4850A"
+                                    },
+                                    {
+                                        "numero": "30",
+                                        "pc1": "4799120",
+                                        "pc2": "VK4749H"
+                                    },
+                                    {
+                                        "numero": "31",
+                                        "pc1": "5001102",
+                                        "pc2": "VK4850A"
+                                    }
+                                ],
+                                "errores": [
+                                    {
+                                        "codigo": "43",
+                                        "descripcion": "EL NUMERO NO EXISTE."
+                                    }
+                                ]
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/NumerosResponse"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Parámetros requeridos no proporcionados o inválidos",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 400,
+                                        "message": "Todos los parámetros son requeridos: provincia, municipio, tipoVia, via, numero",
+                                        "error": "Bad Request"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "API Key no proporcionada o inválida",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 401,
+                                        "message": "API Key no válida",
+                                        "error": "Unauthorized"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Suscripción inactiva, límite de consultas alcanzado o periodo de prueba finalizado",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 403,
+                                        "message": "Has alcanzado el límite mensual de 100 consultas",
+                                        "error": "Forbidden"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Se ha excedido el límite de rate limiting",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 429,
+                                        "message": "Se ha excedido el límite de solicitudes",
+                                        "error": "Too Many Requests"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "api-key": [
+                            "API Key requerida en el header X-API-KEY"
+                        ]
+                    }
+                ],
+                "summary": "Obtener números de una vía específica",
+                "tags": [
+                    "Catastro - Callejero"
+                ]
+            }
+        },
+        "/api/callejero/inmueble-localizacion": {
+            "get": {
+                "description": "Devuelve información detallada de inmuebles (viviendas, locales, etc.) basada en la dirección.",
+                "operationId": "CallejeroController_getInmuebleByLocation",
+                "parameters": [
+                    {
+                        "name": "provincia",
+                        "required": true,
+                        "in": "query",
+                        "description": "Provincia ",
+                        "schema": {
+                            "example": "Madrid",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "municipio",
+                        "required": true,
+                        "in": "query",
+                        "description": "Municipio ",
+                        "schema": {
+                            "example": "Madrid",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "tipoVia",
+                        "required": true,
+                        "in": "query",
+                        "description": "Tipo de vía ",
+                        "schema": {
+                            "$ref": "#/components/schemas/TipoVia"
+                        }
+                    },
+                    {
+                        "name": "nombreVia",
+                        "required": true,
+                        "in": "query",
+                        "description": "Nombre exacto de la vía ",
+                        "schema": {
+                            "example": "GRAN VÍA",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "numero",
+                        "required": true,
+                        "in": "query",
+                        "description": "Número de portal ",
+                        "schema": {
+                            "example": "1",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "bloque",
+                        "required": false,
+                        "in": "query",
+                        "description": "Bloque del inmueble (opcional)",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "escalera",
+                        "required": false,
+                        "in": "query",
+                        "description": "Escalera del inmueble (opcional)",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "planta",
+                        "required": false,
+                        "in": "query",
+                        "description": "Planta del inmueble (opcional)",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "puerta",
+                        "required": false,
+                        "in": "query",
+                        "description": "Puerta del inmueble (opcional)",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Información de inmuebles obtenida exitosamente",
+                        "schema": {
+                            "example": {
+                                "numeroInmuebles": 1,
+                                "inmuebles": [
+                                    {
+                                        "tipoBien": "UR",
+                                        "referenciaCatastral": {
+                                            "referenciaCatastral": "0847106VK4704F0006FI",
+                                            "pc1": "0847106",
+                                            "pc2": "VK4704F",
+                                            "car": "0006",
+                                            "cc1": "F",
+                                            "cc2": "I"
+                                        },
+                                        "direccion": {
+                                            "codigoProvinciaIne": "28",
+                                            "codigoMunicipioIne": "79",
+                                            "nombreProvincia": "MADRID",
+                                            "nombreMunicipio": "MADRID",
+                                            "codigoPostal": "28013",
+                                            "tipoVia": "CL",
+                                            "nombreVia": "GRAN VIA",
+                                            "numero": "1",
+                                            "planta": "01",
+                                            "puerta": "IZ",
+                                            "direccionCompleta": "CL GRAN VIA 1 Pl:01 Pt:IZ 28013 MADRID (MADRID)"
+                                        },
+                                        "datosEconomicos": {
+                                            "uso": "Comercial",
+                                            "superficieConstruida": "445",
+                                            "coeficienteParticipacion": "6,350000",
+                                            "añoConstruccion": "1907"
+                                        },
+                                        "unidadesConstructivas": [
+                                            {
+                                                "uso": "OCIO HOSTEL.",
+                                                "planta": "00",
+                                                "puerta": "3B",
+                                                "superficieTotal": "25",
+                                                "tipologiaConstructiva": "HOSTELERIA-RESTAURACION"
+                                            },
+                                            {
+                                                "uso": "OCIO HOSTEL.",
+                                                "planta": "01",
+                                                "puerta": "IZ",
+                                                "superficieTotal": "375",
+                                                "tipologiaConstructiva": "HOSTELERIA-RESTAURACION"
+                                            },
+                                            {
+                                                "uso": "ELEMENTOS COMUNES",
+                                                "superficieTotal": "45"
+                                            }
+                                        ],
+                                        "subparcelas": []
+                                    }
+                                ],
+                                "errores": []
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InmueblesResponse"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Parámetros requeridos no proporcionados o inválidos",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 400,
+                                        "message": "Los parámetros provincia, municipio, tipoVia, via , calle y numero son requeridos",
+                                        "error": "Bad Request"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "API Key no proporcionada o inválida",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 401,
+                                        "message": "API Key no válida",
+                                        "error": "Unauthorized"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Suscripción inactiva, límite de consultas alcanzado o periodo de prueba finalizado",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 403,
+                                        "message": "Has alcanzado el límite mensual de 100 consultas",
+                                        "error": "Forbidden"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Se ha excedido el límite de rate limiting",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 429,
+                                        "message": "Se ha excedido el límite de solicitudes",
+                                        "error": "Too Many Requests"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "api-key": [
+                            "API Key requerida en el header X-API-KEY"
+                        ]
+                    }
+                ],
+                "summary": "Obtener información de inmuebles",
+                "tags": [
+                    "Catastro - Callejero"
+                ]
+            }
+        },
+        "/api/callejero/inmueble-rc": {
+            "get": {
+                "description": "Devuelve información detallada de un inmueble específico utilizando su Referencia Catastral (RC).",
+                "operationId": "CallejeroController_getInmuebleByRefCat",
+                "parameters": [
+                    {
+                        "name": "rc",
+                        "required": true,
+                        "in": "query",
+                        "description": "Referencia Catastral del inmueble (20 caracteres alfanuméricos)",
+                        "schema": {
+                            "minLength": 14,
+                            "maxLength": 20,
+                            "example": "9872023VH5797S0001WX",
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Información del inmueble obtenida exitosamente",
+                        "schema": {
+                            "example": {
+                                "numeroInmuebles": 1,
+                                "inmuebles": [
+                                    {
+                                        "tipoBien": "UR",
+                                        "referenciaCatastral": {
+                                            "referenciaCatastral": "2749704YJ0624N0001DI",
+                                            "pc1": "2749704",
+                                            "pc2": "YJ0624N",
+                                            "car": "0001",
+                                            "cc1": "D",
+                                            "cc2": "I"
+                                        },
+                                        "direccion": {
+                                            "codigoProvinciaIne": "46",
+                                            "codigoMunicipioIne": "136",
+                                            "nombreProvincia": "VALENCIA",
+                                            "nombreMunicipio": "GODELLETA",
+                                            "codigoPostal": "46388",
+                                            "tipoVia": "CL",
+                                            "nombreVia": "GUAYANA-MOJONERA",
+                                            "numero": "3",
+                                            "escalera": "T",
+                                            "planta": "OD",
+                                            "puerta": "OS",
+                                            "direccionCompleta": "CL GUAYANA-MOJONERA 3 46388 GODELLETA (VALENCIA)"
+                                        },
+                                        "datosEconomicos": {
+                                            "uso": "Residencial",
+                                            "superficieConstruida": "94",
+                                            "coeficienteParticipacion": "100,000000",
+                                            "añoConstruccion": "1976"
+                                        },
+                                        "unidadesConstructivas": [
+                                            {
+                                                "uso": "VIVIENDA",
+                                                "escalera": "1",
+                                                "planta": "00",
+                                                "puerta": "00",
+                                                "superficieTotal": "58",
+                                                "tipologiaConstructiva": "VIVIENDA UNIFAMILIAR"
+                                            },
+                                            {
+                                                "uso": "ALMACEN",
+                                                "escalera": "1",
+                                                "planta": "00",
+                                                "superficieTotal": "19",
+                                                "tipologiaConstructiva": "ANEJOS DE VIVIENDA Y LOCALES EN ESTRUCTURA"
+                                            },
+                                            {
+                                                "uso": "APARCAMIENTO",
+                                                "escalera": "1",
+                                                "planta": "00",
+                                                "superficieTotal": "17",
+                                                "tipologiaConstructiva": "ANEJOS DE VIVIENDA Y LOCALES EN ESTRUCTURA"
+                                            }
+                                        ],
+                                        "subparcelas": []
+                                    }
+                                ],
+                                "errores": []
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InmueblesResponse"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Referencia catastral no proporcionada o inválida",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 400,
+                                        "message": "La referencia catastral es requerida y debe tener entre 14 y 20 caracteres",
+                                        "error": "Bad Request"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "API Key no proporcionada o inválida",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 401,
+                                        "message": "API Key no válida",
+                                        "error": "Unauthorized"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Suscripción inactiva, límite de consultas alcanzado o periodo de prueba finalizado",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 403,
+                                        "message": "Has alcanzado el límite mensual de 100 consultas",
+                                        "error": "Forbidden"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Se ha excedido el límite de rate limiting",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 429,
+                                        "message": "Se ha excedido el límite de solicitudes",
+                                        "error": "Too Many Requests"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "api-key": [
+                            "API Key requerida en el header X-API-KEY"
+                        ]
+                    }
+                ],
+                "summary": "Obtener información de un inmueble por Referencia Catastral",
+                "tags": [
+                    "Catastro - Callejero"
+                ]
+            }
+        },
+        "/api/callejero-codigos/provincias": {
+            "get": {
+                "description": "Devuelve todas las provincias con sus códigos oficiales del catastro.",
+                "operationId": "CallejeroCodigosController_getProvincias",
+                "parameters": [],
+                "responses": {
+                    "200": {
+                        "description": "Listado de provincias obtenido exitosamente",
+                        "schema": {
+                            "example": {
+                                "numeroProvincias": 48,
+                                "provincias": [
+                                    {
+                                        "nombre": "A CORUÑA",
+                                        "codigoProvinciaIne": "15"
+                                    },
+                                    {
+                                        "nombre": "ALACANT",
+                                        "codigoProvinciaIne": "03"
+                                    },
+                                    {
+                                        "nombre": "ALBACETE",
+                                        "codigoProvinciaIne": "02"
+                                    },
+                                    {
+                                        "nombre": "ALMERIA",
+                                        "codigoProvinciaIne": "04"
+                                    },
+                                    {
+                                        "nombre": "ASTURIAS",
+                                        "codigoProvinciaIne": "33"
+                                    }
+                                ],
+                                "errores": []
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ProvinciasResponse"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "API Key no proporcionada o inválida",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 401,
+                                        "message": "API Key no válida",
+                                        "error": "Unauthorized"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Suscripción inactiva, límite de consultas alcanzado o periodo de prueba finalizado",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 403,
+                                        "message": "Has alcanzado el límite mensual de 100 consultas",
+                                        "error": "Forbidden"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Se ha excedido el límite de rate limiting",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 429,
+                                        "message": "Se ha excedido el límite de solicitudes",
+                                        "error": "Too Many Requests"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "api-key": [
+                            "API Key requerida en el header X-API-KEY"
+                        ]
+                    }
+                ],
+                "summary": "Obtener listado completo de provincias españolas (por códigos)",
+                "tags": [
+                    "Catastro - Callejero por códigos"
+                ]
+            }
+        },
+        "/api/callejero-codigos/municipios": {
+            "get": {
+                "description": "Devuelve todos los municipios pertenecientes a una provincia determinada usando códigos.",
+                "operationId": "CallejeroCodigosController_getMunicipios",
+                "parameters": [
+                    {
+                        "name": "codigoProvinciaIne",
+                        "required": true,
+                        "in": "query",
+                        "description": "Código de la provincia",
+                        "schema": {
+                            "example": "28",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "codigoMunicipioMeh",
+                        "required": false,
+                        "in": "query",
+                        "description": "Código del municipio del catastro segun MEH (opcional, para búsqueda específica)",
+                        "schema": {
+                            "example": "900",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "codigoMunicipioIne",
+                        "required": false,
+                        "in": "query",
+                        "description": "Código del municipio del catastro segun INE (opcional, para búsqueda específica)",
+                        "schema": {
+                            "example": "28",
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Listado de municipios obtenido exitosamente",
+                        "schema": {
+                            "example": {
+                                "numeroMunicipios": 179,
+                                "municipios": [
+                                    {
+                                        "codigoDelegacion": "28",
+                                        "codigoProvinciIne": "28",
+                                        "codigoMunicipioMeh": "2",
+                                        "codigoMunicipioIne": "2",
+                                        "nombreMunicipio": "AJALVIR"
+                                    },
+                                    {
+                                        "codigoDelegacion": "28",
+                                        "codigoProvinciaIne": "28",
+                                        "codigoMunicipioMeh": "3",
+                                        "codigoMunicipioIne": "3",
+                                        "nombreMunicipio": "ALAMEDA DEL VALLE"
+                                    },
+                                    {
+                                        "codigoDelegacion": "28",
+                                        "codigoProvinciaIne": "28",
+                                        "codigoMunicipioMeh": "5",
+                                        "codigoMunicipioIne": "5",
+                                        "nombreMunicipio": "ALCALA DE HENARES"
+                                    },
+                                    {
+                                        "codigoDelegacion": "28",
+                                        "codigoProvinciaIne": "28",
+                                        "codigoMunicipioMeh": "6",
+                                        "codigoMunicipioIne": "6",
+                                        "nombreMunicipio": "ALCOBENDAS"
+                                    },
+                                    {
+                                        "codigoDelegacion": "28",
+                                        "codigoProvinciaIne": "28",
+                                        "codigoMunicipioMeh": "900",
+                                        "codigoMunicipioIne": "79",
+                                        "nombreMunicipio": "MADRID"
+                                    }
+                                ],
+                                "errores": []
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/MunicipiosResponse"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Código de provincia no proporcionado o inválido",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 400,
+                                        "message": "El código de provincia es requerido",
+                                        "error": "Bad Request"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "API Key no proporcionada o inválida",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 401,
+                                        "message": "API Key no válida",
+                                        "error": "Unauthorized"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Suscripción inactiva, límite de consultas alcanzado o periodo de prueba finalizado",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 403,
+                                        "message": "Has alcanzado el límite mensual de 100 consultas",
+                                        "error": "Forbidden"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Se ha excedido el límite de rate limiting",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 429,
+                                        "message": "Se ha excedido el límite de solicitudes",
+                                        "error": "Too Many Requests"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "api-key": [
+                            "API Key requerida en el header X-API-KEY"
+                        ]
+                    }
+                ],
+                "summary": "Obtener municipios de una provincia específica (por códigos)",
+                "tags": [
+                    "Catastro - Callejero por códigos"
+                ]
+            }
+        },
+        "/api/callejero-codigos/vias": {
+            "get": {
+                "description": "Devuelve las vías (calles, avenidas, plazas, etc.) de un municipio usando códigos.",
+                "operationId": "CallejeroCodigosController_getVias",
+                "parameters": [
+                    {
+                        "name": "codigoProvinciaIne",
+                        "required": true,
+                        "in": "query",
+                        "description": "Código de la provincia",
+                        "schema": {
+                            "example": "28",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "codigoMunicipioMeh",
+                        "required": false,
+                        "in": "query",
+                        "description": "Código del municipio del catastro segun MEH",
+                        "schema": {
+                            "example": "900",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "codigoMunicipioIne",
+                        "required": false,
+                        "in": "query",
+                        "description": "Código del municipio del catastro segun INE",
+                        "schema": {
+                            "example": "28",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "codigoVia",
+                        "required": false,
+                        "in": "query",
+                        "description": "Código de vía (opcional, para búsqueda específica) *Si no se incluye la respuesta puede tardar más en devolverse. Se recomienda incluir o el endpoint por nombre de vía con 3 caracteres o más*.",
+                        "schema": {
+                            "example": "3097",
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Listado de vías obtenido exitosamente",
+                        "schema": {
+                            "example": {
+                                "numeroVias": 1,
+                                "vias": [
+                                    {
+                                        "codigoMunicipioIne": "",
+                                        "codigoProvinciaIne": "",
+                                        "codigoVia": "3097",
+                                        "nombreVia": "GRAN VIA",
+                                        "tipoVia": "CL"
+                                    }
+                                ],
+                                "errores": []
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ViasResponse"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Códigos de provincia o municipio no proporcionados o inválidos",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 400,
+                                        "message": "Los códigos de provincia y municipio son requeridos",
+                                        "error": "Bad Request"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "API Key no proporcionada o inválida",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 401,
+                                        "message": "API Key no válida",
+                                        "error": "Unauthorized"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Suscripción inactiva, límite de consultas alcanzado o periodo de prueba finalizado",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 403,
+                                        "message": "Has alcanzado el límite mensual de 100 consultas",
+                                        "error": "Forbidden"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Se ha excedido el límite de rate limiting",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 429,
+                                        "message": "Se ha excedido el límite de solicitudes",
+                                        "error": "Too Many Requests"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "api-key": [
+                            "API Key requerida en el header X-API-KEY"
+                        ]
+                    }
+                ],
+                "summary": "Obtener vías (calles) de un municipio específico (por códigos)",
+                "tags": [
+                    "Catastro - Callejero por códigos"
+                ]
+            }
+        },
+        "/api/callejero-codigos/numeros": {
+            "get": {
+                "description": "Devuelve los números (portales) con sus referencias catastrales de una vía específica usando códigos.",
+                "operationId": "CallejeroCodigosController_getNumeros",
+                "parameters": [
+                    {
+                        "name": "codigoProvinciaIne",
+                        "required": true,
+                        "in": "query",
+                        "description": "Código de la provincia ",
+                        "schema": {
+                            "example": "28",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "codigoMunicipioMeh",
+                        "required": false,
+                        "in": "query",
+                        "description": "Código del municipio del catastro segun MEH",
+                        "schema": {
+                            "example": "900",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "codigoMunicipioIne",
+                        "required": false,
+                        "in": "query",
+                        "description": "Código del municipio del catastro segun INE",
+                        "schema": {
+                            "example": "28",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "codigoVia",
+                        "required": true,
+                        "in": "query",
+                        "description": "Código de vía ",
+                        "schema": {
+                            "example": "3097",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "numero",
+                        "required": true,
+                        "in": "query",
+                        "description": "Número específico a consultar",
+                        "schema": {
+                            "example": "81",
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Listado de números obtenido exitosamente",
+                        "schema": {
+                            "example": {
+                                "numeroNumeros": 3,
+                                "numeros": [
+                                    {
+                                        "numero": "76",
+                                        "pc1": "9952109",
+                                        "pc2": "VK3795B"
+                                    },
+                                    {
+                                        "numero": "78",
+                                        "pc1": "9952110",
+                                        "pc2": "VK3795B"
+                                    },
+                                    {
+                                        "numero": "80",
+                                        "pc1": "9952101",
+                                        "pc2": "VK3795B"
+                                    }
+                                ],
+                                "errores": [
+                                    {
+                                        "codigo": "43",
+                                        "descripcion": "EL NUMERO NO EXISTE."
+                                    }
+                                ]
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/NumerosResponse"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Parámetros requeridos no proporcionados o inválidos",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 400,
+                                        "message": "Todos los parámetros son requeridos: codigoProvincia, codigoMunicipio, codigoVia, numero",
+                                        "error": "Bad Request"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "API Key no proporcionada o inválida",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 401,
+                                        "message": "API Key no válida",
+                                        "error": "Unauthorized"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Suscripción inactiva, límite de consultas alcanzado o periodo de prueba finalizado",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 403,
+                                        "message": "Has alcanzado el límite mensual de 100 consultas",
+                                        "error": "Forbidden"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Se ha excedido el límite de rate limiting",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 429,
+                                        "message": "Se ha excedido el límite de solicitudes",
+                                        "error": "Too Many Requests"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "api-key": [
+                            "API Key requerida en el header X-API-KEY"
+                        ]
+                    }
+                ],
+                "summary": "Obtener números de una vía específica (por códigos)",
+                "tags": [
+                    "Catastro - Callejero por códigos"
+                ]
+            }
+        },
+        "/api/callejero-codigos/inmuebles": {
+            "get": {
+                "description": "Devuelve información detallada de inmuebles (viviendas, locales, etc.) usando códigos.",
+                "operationId": "CallejeroCodigosController_getInmuebles",
+                "parameters": [
+                    {
+                        "name": "codigoProvinciaIne",
+                        "required": true,
+                        "in": "query",
+                        "description": "Código de la provincia",
+                        "schema": {
+                            "example": "28",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "codigoMunicipioMeh",
+                        "required": false,
+                        "in": "query",
+                        "description": "Código del municipio del catastro segun MEH",
+                        "schema": {
+                            "example": "900",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "codigoMunicipioIne",
+                        "required": false,
+                        "in": "query",
+                        "description": "Código del municipio del catastro segun INE",
+                        "schema": {
+                            "example": "28",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "codigoVia",
+                        "required": true,
+                        "in": "query",
+                        "description": "Código de vía",
+                        "schema": {
+                            "example": "3097",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "numero",
+                        "required": true,
+                        "in": "query",
+                        "description": "Número de portal",
+                        "schema": {
+                            "example": "80",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "bloque",
+                        "required": false,
+                        "in": "query",
+                        "description": "Bloque del inmueble (opcional)",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "escalera",
+                        "required": false,
+                        "in": "query",
+                        "description": "Escalera del inmueble (opcional)",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "planta",
+                        "required": false,
+                        "in": "query",
+                        "description": "Planta del inmueble (opcional)",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "puerta",
+                        "required": false,
+                        "in": "query",
+                        "description": "Puerta del inmueble (opcional)",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Información de inmuebles obtenida exitosamente",
+                        "schema": {
+                            "example": {
+                                "numeroInmuebles": 1,
+                                "inmuebles": [
+                                    {
+                                        "tipoBien": "UR",
+                                        "referenciaCatastral": {
+                                            "referenciaCatastral": "9952101VK3795B0002GO",
+                                            "pc1": "9952101",
+                                            "pc2": "VK3795B",
+                                            "car": "0002",
+                                            "cc1": "G",
+                                            "cc2": "O"
+                                        },
+                                        "direccion": {
+                                            "codigoProvinciaIne": "28",
+                                            "codigoMunicipioIne": "79",
+                                            "nombreProvincia": "MADRID",
+                                            "nombreMunicipio": "MADRID",
+                                            "codigoPostal": "28013",
+                                            "tipoVia": "CL",
+                                            "nombreVia": "GRAN VIA",
+                                            "numero": "80",
+                                            "planta": "00",
+                                            "puerta": "01",
+                                            "direccionCompleta": "CL GRAN VIA 80 Pl:00 Pt:01 28013 MADRID (MADRID)"
+                                        },
+                                        "datosEconomicos": {
+                                            "uso": "Ocio y Hosteleria",
+                                            "superficieConstruida": "512",
+                                            "coeficienteParticipacion": "2,350000",
+                                            "añoConstruccion": "2015"
+                                        },
+                                        "unidadesConstructivas": [
+                                            {
+                                                "uso": "HOTELERO",
+                                                "planta": "00",
+                                                "puerta": "1A",
+                                                "superficieTotal": "115",
+                                                "tipologiaConstructiva": "HOTELERO"
+                                            },
+                                            {
+                                                "uso": "HOTELERO",
+                                                "planta": "-1",
+                                                "puerta": "1A",
+                                                "superficieTotal": "367",
+                                                "tipologiaConstructiva": "HOTELERO"
+                                            },
+                                            {
+                                                "uso": "HOTELERO",
+                                                "planta": "00",
+                                                "puerta": "1A1",
+                                                "superficieTotal": "30",
+                                                "tipologiaConstructiva": "HOTELERO"
+                                            }
+                                        ],
+                                        "subparcelas": []
+                                    }
+                                ],
+                                "errores": []
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InmueblesResponse"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Parámetros requeridos no proporcionados o inválidos",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 400,
+                                        "message": "Los parámetros codigoProvinciaIne, codigoMunicipio, codigoVia y numero son requeridos",
+                                        "error": "Bad Request"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "API Key no proporcionada o inválida",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 401,
+                                        "message": "API Key no válida",
+                                        "error": "Unauthorized"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Suscripción inactiva, límite de consultas alcanzado o periodo de prueba finalizado",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 403,
+                                        "message": "Has alcanzado el límite mensual de 100 consultas",
+                                        "error": "Forbidden"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Se ha excedido el límite de rate limiting",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 429,
+                                        "message": "Se ha excedido el límite de solicitudes",
+                                        "error": "Too Many Requests"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "api-key": [
+                            "API Key requerida en el header X-API-KEY"
+                        ]
+                    }
+                ],
+                "summary": "Obtener información de inmuebles (por códigos)",
+                "tags": [
+                    "Catastro - Callejero por códigos"
+                ]
+            }
+        },
+        "/api/coordenadas/rc-por-coordenadas": {
+            "get": {
+                "description": "Devuelve la referencia catastral correspondiente a unas coordenadas geográficas específicas.",
+                "operationId": "CoordenadasController_getRcByCoordinates",
+                "parameters": [
+                    {
+                        "name": "x",
+                        "required": true,
+                        "in": "query",
+                        "description": "Longitud (coordenada X)",
+                        "schema": {
+                            "example": "-3.463283",
+                            "type": "number"
+                        }
+                    },
+                    {
+                        "name": "y",
+                        "required": true,
+                        "in": "query",
+                        "description": "Latitud (coordenada Y)",
+                        "schema": {
+                            "example": "38.640143",
+                            "type": "number"
+                        }
+                    },
+                    {
+                        "name": "srs",
+                        "required": false,
+                        "in": "query",
+                        "description": "Sistema de referencia espacial (opcional)",
+                        "schema": {
+                            "example": "EPSG:4326",
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Referencia catastral obtenida exitosamente",
+                        "schema": {
+                            "example": {
+                                "numeroReferencias": 1,
+                                "referencias": [
+                                    {
+                                        "pc1": "9872023",
+                                        "pc2": "VH5797S",
+                                        "referenciaCatastral": "9872023VH5797S",
+                                        "direccion": "CL GLORIA 51 SANTA CRUZ DE MUDELA (CIUDAD REAL)"
+                                    }
+                                ],
+                                "errores": []
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/CoordenadasResponse"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Coordenadas no proporcionadas o inválidas",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 400,
+                                        "message": "Las coordenadas x e y son requeridas",
+                                        "error": "Bad Request"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "API Key no proporcionada o inválida",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 401,
+                                        "message": "API Key no válida",
+                                        "error": "Unauthorized"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Suscripción inactiva, límite de consultas alcanzado o periodo de prueba finalizado",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 403,
+                                        "message": "Has alcanzado el límite mensual de 100 consultas",
+                                        "error": "Forbidden"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Se ha excedido el límite de rate limiting",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 429,
+                                        "message": "Se ha excedido el límite de solicitudes",
+                                        "error": "Too Many Requests"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "api-key": [
+                            "API Key requerida en el header X-API-KEY"
+                        ]
+                    }
+                ],
+                "summary": "Obtener referencia catastral a partir de coordenadas geográficas",
+                "tags": [
+                    "Catastro - Consulta de Coordenadas"
+                ]
+            }
+        },
+        "/api/coordenadas/coordenadas-por-rc": {
+            "get": {
+                "description": "Devuelve las coordenadas geográficas correspondientes a una referencia catastral específica.",
+                "operationId": "CoordenadasController_getCoordenadasByRc",
+                "parameters": [
+                    {
+                        "name": "rc",
+                        "required": true,
+                        "in": "query",
+                        "description": "Referencia catastral de 14 posiciones",
+                        "schema": {
+                            "example": "9872023VH5797S",
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "srs",
+                        "required": false,
+                        "in": "query",
+                        "description": "Sistema de referencia espacial (opcional)",
+                        "schema": {
+                            "example": "EPSG:4326",
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Coordenadas obtenidas exitosamente",
+                        "schema": {
+                            "example": {
+                                "numeroCoordenadas": 1,
+                                "coordenadas": [
+                                    {
+                                        "longitud": "-3.46328353028033",
+                                        "latitud": "38.6401434830887",
+                                        "sistemaReferencia": "EPSG:4326",
+                                        "pc1": "9872023",
+                                        "pc2": "VH5797S",
+                                        "referenciaCatastral": "9872023VH5797S",
+                                        "direccion": "CL GLORIA 51 SANTA CRUZ DE MUDELA (CIUDAD REAL)"
+                                    }
+                                ],
+                                "errores": []
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/CoordenadasPorRcResponse"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Referencia catastral no proporcionada o inválida",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 400,
+                                        "message": "La referencia catastral debe tener 14 posiciones",
+                                        "error": "Bad Request"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "API Key no proporcionada o inválida",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 401,
+                                        "message": "API Key no válida",
+                                        "error": "Unauthorized"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Suscripción inactiva, límite de consultas alcanzado o periodo de prueba finalizado",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 403,
+                                        "message": "Has alcanzado el límite mensual de 100 consultas",
+                                        "error": "Forbidden"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Se ha excedido el límite de rate limiting",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "example": {
+                                        "statusCode": 429,
+                                        "message": "Se ha excedido el límite de solicitudes",
+                                        "error": "Too Many Requests"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "api-key": [
+                            "API Key requerida en el header X-API-KEY"
+                        ]
+                    }
+                ],
+                "summary": "Obtener coordenadas geográficas a partir de una referencia catastral",
+                "tags": [
+                    "Catastro - Consulta de Coordenadas"
+                ]
+            }
+        }
+    },
+    "info": {
+        "title": "CatastroAPI",
+        "description": "API para consultar información del Catastro",
+        "version": "2.2.1",
+        "contact": {}
+    },
+    "tags": [],
+    "servers": [
+        {
+            "url": "https://api.catastro-api.es",
+            "description": "CatastroAPI"
+        }
+    ],
+    "components": {
+        "securitySchemes": {
+            "api-key": {
+                "type": "apiKey",
+                "in": "header",
+                "name": "x-api-key",
+                "description": "API Key para acceder a los endpoints del catastro (formato: ctr_...)"
+            }
+        },
+        "schemas": {
+            "ProvinciaDto": {
+                "type": "object",
+                "properties": {
+                    "nombre": {
+                        "type": "string",
+                        "description": "Nombre de la provincia",
+                        "example": "MADRID"
+                    },
+                    "codigoProvinciaIne": {
+                        "type": "string",
+                        "description": "Código de provincia",
+                        "example": "28"
+                    }
+                },
+                "required": [
+                    "nombre",
+                    "codigoProvinciaIne"
+                ]
+            },
+            "ErrorDto": {
+                "type": "object",
+                "properties": {
+                    "codigo": {
+                        "type": "string",
+                        "description": "Código del error",
+                        "example": "43"
+                    },
+                    "descripcion": {
+                        "type": "string",
+                        "description": "Descripción del error",
+                        "example": "EL MUNICIPIO NO EXISTE."
+                    }
+                },
+                "required": [
+                    "codigo",
+                    "descripcion"
+                ]
+            },
+            "ProvinciasResponse": {
+                "type": "object",
+                "properties": {
+                    "numeroProvincias": {
+                        "type": "number",
+                        "description": "Número total de provincias",
+                        "example": 48
+                    },
+                    "provincias": {
+                        "description": "Listado de provincias",
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/ProvinciaDto"
+                        }
+                    },
+                    "errores": {
+                        "description": "Listado de errores [] si no hay errores",
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/ErrorDto"
+                        }
+                    }
+                },
+                "required": [
+                    "numeroProvincias",
+                    "provincias",
+                    "errores"
+                ]
+            },
+            "MunicipioDto": {
+                "type": "object",
+                "properties": {
+                    "codigoDelegacion": {
+                        "type": "string",
+                        "description": "Código de delegación",
+                        "example": "28"
+                    },
+                    "codigoProvinciaIne": {
+                        "type": "string",
+                        "description": "Código de provincia",
+                        "example": "28"
+                    },
+                    "codigoMunicipioMeh": {
+                        "type": "string",
+                        "description": "Código de municipio del catastro segun MEH",
+                        "example": "079"
+                    },
+                    "codigoMunicipioIne": {
+                        "type": "string",
+                        "description": "Código de municipio",
+                        "example": "079"
+                    },
+                    "nombreMunicipio": {
+                        "type": "string",
+                        "description": "Nombre del municipio",
+                        "example": "MADRID"
+                    }
+                },
+                "required": [
+                    "codigoDelegacion",
+                    "codigoProvinciaIne",
+                    "codigoMunicipioMeh",
+                    "codigoMunicipioIne",
+                    "nombreMunicipio"
+                ]
+            },
+            "MunicipiosResponse": {
+                "type": "object",
+                "properties": {
+                    "numeroMunicipios": {
+                        "type": "number",
+                        "description": "Número total de municipios",
+                        "example": 179
+                    },
+                    "municipios": {
+                        "description": "Listado de municipios",
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/MunicipioDto"
+                        }
+                    },
+                    "errores": {
+                        "description": "Listado de errores [] si no hay errores",
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/ErrorDto"
+                        }
+                    }
+                },
+                "required": [
+                    "numeroMunicipios",
+                    "municipios",
+                    "errores"
+                ]
+            },
+            "TipoVia": {
+                "type": "string",
+                "enum": [
+                    "AC",
+                    "AG",
+                    "AL",
+                    "AN",
+                    "AR",
+                    "AU",
+                    "AV",
+                    "AY",
+                    "BJ",
+                    "BL",
+                    "BO",
+                    "BQ",
+                    "BR",
+                    "CA",
+                    "CG",
+                    "CH",
+                    "CI",
+                    "CJ",
+                    "CL",
+                    "CM",
+                    "CN",
+                    "CO",
+                    "CP",
+                    "CR",
+                    "CS",
+                    "CT",
+                    "CU",
+                    "CY",
+                    "CZ",
+                    "DE",
+                    "DP",
+                    "DS",
+                    "ED",
+                    "EM",
+                    "EN",
+                    "EP",
+                    "ER",
+                    "ES",
+                    "EX",
+                    "FC",
+                    "FN",
+                    "GL",
+                    "GR",
+                    "GV",
+                    "HT",
+                    "JR",
+                    "LA",
+                    "LD",
+                    "LG",
+                    "MA",
+                    "MC",
+                    "ML",
+                    "MN",
+                    "MS",
+                    "MT",
+                    "MZ",
+                    "PB",
+                    "PC",
+                    "PD",
+                    "PI",
+                    "PJ",
+                    "PL",
+                    "PM",
+                    "PQ",
+                    "PR",
+                    "PS",
+                    "PT",
+                    "PU",
+                    "PZ",
+                    "QT",
+                    "RA",
+                    "RB",
+                    "RC",
+                    "RD",
+                    "RM",
+                    "RP",
+                    "RR",
+                    "RU",
+                    "SA",
+                    "SC",
+                    "SD",
+                    "SL",
+                    "SN",
+                    "SU",
+                    "TN",
+                    "TO",
+                    "TR",
+                    "UR",
+                    "VA",
+                    "VD",
+                    "VI",
+                    "VL",
+                    "VR"
+                ],
+                "description": "Tipo de vía según nomenclatura del Catastro.\n\nValores disponibles:\n\n- AC: ACCESO\n- AG: AGREGADO\n- AL: ALDEA, ALAMEDA\n- AN: ANDADOR\n- AR: AREA, ARRABAL\n- AU: AUTOPISTA\n- AV: AVENIDA\n- AY: ARROYO\n- BJ: BAJADA\n- BL: BLOQUE\n- BO: BARRIO\n- BQ: BARRANQUIL\n- BR: BARRANCO\n- CA: CAÑADA\n- CG: COLEGIO, CIGARRAL\n- CH: CHALET\n- CI: CINTURON\n- CJ: CALLEJA, CALLEJON\n- CL: CALLE\n- CM: CAMINO, CARMEN\n- CN: COLONIA\n- CO: CONCEJO, COLEGIO\n- CP: CAMPA, CAMPO\n- CR: CARRETERA, CARRERA\n- CS: CASERIO\n- CT: CUESTA, COSTANILLA\n- CU: CONJUNTO\n- CY: CALEYA\n- CZ: CALLIZO\n- DE: DETRÁS\n- DP: DIPUTACION\n- DS: DISEMINADOS\n- ED: EDIFICIOS\n- EM: EXTRAMUROS\n- EN: ENTRADA, ENSANCHE\n- EP: ESPALDA\n- ER: EXTRARRADIO\n- ES: ESCALINATA\n- EX: EXPLANADA\n- FC: FERROCARRIL\n- FN: FINCA\n- GL: GLORIETA\n- GR: GRUPO\n- GV: GRAN VIA\n- HT: HUERTA, HUERTO\n- JR: JARDINES\n- LA: LAGO\n- LD: LADO, LADERA\n- LG: LUGAR\n- MA: MALECON\n- MC: MERCADO\n- ML: MUELLE\n- MN: MUNICIPIO\n- MS: MASIAS\n- MT: MONTE\n- MZ: MANZANA\n- PB: POBLADO\n- PC: PLACETA\n- PD: PARTIDA\n- PI: PARTICULAR\n- PJ: PASAJE, PASADIZO\n- PL: POLIGONO\n- PM: PARAMO\n- PQ: PARROQUIA, PARQUE\n- PR: PROLONGACION, CONTINUAC.\n- PS: PASEO\n- PT: PUENTE\n- PU: PASADIZO\n- PZ: PLAZA\n- QT: QUINTA\n- RA: RACONADA\n- RB: RAMBLA\n- RC: RINCON, RINCONA\n- RD: RONDA\n- RM: RAMAL\n- RP: RAMPA\n- RR: RIERA\n- RU: RUA\n- SA: SALIDA\n- SC: SECTOR\n- SD: SENDA\n- SL: SOLAR\n- SN: SALON\n- SU: SUBIDA\n- TN: TERRENOS\n- TO: TORRENTE\n- TR: TRAVESIA\n- UR: URBANIZACION\n- VA: VALLE\n- VD: VIADUCTO\n- VI: VIA\n- VL: VIAL\n- VR: VEREDA",
+                "example": "CL"
+            },
+            "ViaDto": {
+                "type": "object",
+                "properties": {
+                    "codigoMunicipioIne": {
+                        "type": "string",
+                        "description": "Código de municipio INE (no proporcionado si se introduce el código de vía en el query)",
+                        "example": "079"
+                    },
+                    "codigoProvinciaIne": {
+                        "type": "string",
+                        "description": "Código de provincia INE (no proporcionado si se introduce el código de vía en el query)",
+                        "example": "28"
+                    },
+                    "codigoVia": {
+                        "type": "string",
+                        "description": "Código de la vía",
+                        "example": "8"
+                    },
+                    "nombreVia": {
+                        "type": "string",
+                        "description": "Nombre de la vía",
+                        "example": "GRAN VÍA"
+                    },
+                    "tipoVia": {
+                        "description": "Tipo de vía",
+                        "example": "CL",
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/TipoVia"
+                            }
+                        ]
+                    }
+                },
+                "required": [
+                    "codigoMunicipioIne",
+                    "codigoProvinciaIne",
+                    "codigoVia",
+                    "nombreVia",
+                    "tipoVia"
+                ]
+            },
+            "ViasResponse": {
+                "type": "object",
+                "properties": {
+                    "numeroVias": {
+                        "type": "number",
+                        "description": "Número total de vías",
+                        "example": 29
+                    },
+                    "vias": {
+                        "description": "Listado de vías",
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/ViaDto"
+                        }
+                    },
+                    "errores": {
+                        "description": "Listado de errores [] si no hay errores",
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/ErrorDto"
+                        }
+                    }
+                },
+                "required": [
+                    "numeroVias",
+                    "vias",
+                    "errores"
+                ]
+            },
+            "NumeroDto": {
+                "type": "object",
+                "properties": {
+                    "numero": {
+                        "type": "string",
+                        "description": "Número del portal",
+                        "example": "15"
+                    },
+                    "numeroDuplicado": {
+                        "type": "string",
+                        "description": "Número duplicado si existe",
+                        "example": "A"
+                    },
+                    "pc1": {
+                        "type": "string",
+                        "description": "Primer fragmento de la referencia catastral",
+                        "example": "5748408"
+                    },
+                    "pc2": {
+                        "type": "string",
+                        "description": "Segundo fragmento de la referencia catastral",
+                        "example": "TG3454N"
+                    }
+                },
+                "required": [
+                    "numero",
+                    "pc1",
+                    "pc2"
+                ]
+            },
+            "NumerosResponse": {
+                "type": "object",
+                "properties": {
+                    "numeroNumeros": {
+                        "type": "number",
+                        "description": "Número total de números",
+                        "example": 4
+                    },
+                    "numeros": {
+                        "description": "Listado de números",
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/NumeroDto"
+                        }
+                    },
+                    "errores": {
+                        "description": "Listado de errores [] si no hay errores",
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/ErrorDto"
+                        }
+                    }
+                },
+                "required": [
+                    "numeroNumeros",
+                    "numeros",
+                    "errores"
+                ]
+            },
+            "ReferenciaCatastralDto": {
+                "type": "object",
+                "properties": {
+                    "referenciaCatastral": {
+                        "type": "string",
+                        "description": "Referencia catastral completa",
+                        "example": "0847106VK4704F0006FI"
+                    },
+                    "pc1": {
+                        "type": "string",
+                        "description": "Primer fragmento de la referencia catastral",
+                        "example": "0847106"
+                    },
+                    "pc2": {
+                        "type": "string",
+                        "description": "Segundo fragmento de la referencia catastral",
+                        "example": "VK4704F"
+                    },
+                    "car": {
+                        "type": "string",
+                        "description": "Código de carga",
+                        "example": "0006"
+                    },
+                    "cc1": {
+                        "type": "string",
+                        "description": "Primer dígito de control",
+                        "example": "F"
+                    },
+                    "cc2": {
+                        "type": "string",
+                        "description": "Segundo dígito de control",
+                        "example": "I"
+                    }
+                },
+                "required": [
+                    "referenciaCatastral",
+                    "pc1",
+                    "pc2",
+                    "car",
+                    "cc1",
+                    "cc2"
+                ]
+            },
+            "DireccionDto": {
+                "type": "object",
+                "properties": {
+                    "codigoProvinciaIne": {
+                        "type": "string",
+                        "description": "Código de provincia INE",
+                        "example": "28"
+                    },
+                    "codigoMunicipioIne": {
+                        "type": "string",
+                        "description": "Código de municipio INE",
+                        "example": "79"
+                    },
+                    "nombreProvincia": {
+                        "type": "string",
+                        "description": "Nombre de la provincia",
+                        "example": "MADRID"
+                    },
+                    "nombreMunicipio": {
+                        "type": "string",
+                        "description": "Nombre del municipio",
+                        "example": "MADRID"
+                    },
+                    "codigoPostal": {
+                        "type": "string",
+                        "description": "Código postal",
+                        "example": "28013"
+                    },
+                    "tipoVia": {
+                        "description": "Tipo de vía",
+                        "example": "CL",
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/TipoVia"
+                            }
+                        ]
+                    },
+                    "nombreVia": {
+                        "type": "string",
+                        "description": "Nombre de la vía",
+                        "example": "GRAN VÍA"
+                    },
+                    "numero": {
+                        "type": "string",
+                        "description": "Número de portal",
+                        "example": "15"
+                    },
+                    "bloque": {
+                        "type": "string",
+                        "description": "Bloque",
+                        "example": "A"
+                    },
+                    "escalera": {
+                        "type": "string",
+                        "description": "Escalera",
+                        "example": "1"
+                    },
+                    "planta": {
+                        "type": "string",
+                        "description": "Planta",
+                        "example": "2"
+                    },
+                    "puerta": {
+                        "type": "string",
+                        "description": "Puerta",
+                        "example": "A"
+                    },
+                    "direccionCompleta": {
+                        "type": "string",
+                        "description": "Dirección completa como texto",
+                        "example": "CL GRAN VIA 1 Pl:01 Pt:IZ 28013 MADRID (MADRID)"
+                    }
+                },
+                "required": [
+                    "codigoProvinciaIne",
+                    "codigoMunicipioIne",
+                    "nombreProvincia",
+                    "nombreMunicipio",
+                    "codigoPostal",
+                    "tipoVia",
+                    "nombreVia",
+                    "numero",
+                    "bloque",
+                    "escalera",
+                    "planta",
+                    "puerta",
+                    "direccionCompleta"
+                ]
+            },
+            "DatosEconomicosDto": {
+                "type": "object",
+                "properties": {
+                    "uso": {
+                        "type": "string",
+                        "description": "Uso del inmueble",
+                        "example": "Comercial",
+                        "nullable": true
+                    },
+                    "superficieConstruida": {
+                        "type": "string",
+                        "description": "Superficie construida en m²",
+                        "example": "445"
+                    },
+                    "coeficienteParticipacion": {
+                        "type": "string",
+                        "description": "Coeficiente de participación",
+                        "example": "6,350000"
+                    },
+                    "añoConstruccion": {
+                        "type": "string",
+                        "description": "Año de construcción",
+                        "example": "1907"
+                    }
+                },
+                "required": [
+                    "uso",
+                    "superficieConstruida",
+                    "coeficienteParticipacion",
+                    "añoConstruccion"
+                ]
+            },
+            "UnidadConstructivaDto": {
+                "type": "object",
+                "properties": {
+                    "uso": {
+                        "type": "string",
+                        "description": "Uso o denominación de la unidad constructiva",
+                        "example": "OCIO HOSTEL."
+                    },
+                    "bloque": {
+                        "type": "string",
+                        "description": "Bloque de la unidad constructiva",
+                        "example": "A"
+                    },
+                    "escalera": {
+                        "type": "string",
+                        "description": "Escalera de la unidad constructiva",
+                        "example": "1"
+                    },
+                    "planta": {
+                        "type": "string",
+                        "description": "Planta de la unidad constructiva",
+                        "example": "01"
+                    },
+                    "puerta": {
+                        "type": "string",
+                        "description": "Puerta de la unidad constructiva",
+                        "example": "IZ"
+                    },
+                    "superficieTotal": {
+                        "type": "string",
+                        "description": "Superficie total de la unidad constructiva en m²",
+                        "example": "375"
+                    },
+                    "tipologiaConstructiva": {
+                        "type": "string",
+                        "description": "Tipología constructiva",
+                        "example": "HOSTELERIA-RESTAURACION"
+                    }
+                },
+                "required": [
+                    "uso",
+                    "bloque",
+                    "escalera",
+                    "planta",
+                    "puerta",
+                    "superficieTotal",
+                    "tipologiaConstructiva"
+                ]
+            },
+            "SubparcelaDto": {
+                "type": "object",
+                "properties": {
+                    "codigoSubparcela": {
+                        "type": "string",
+                        "description": "Código de subparcela",
+                        "example": "001"
+                    },
+                    "calificacionCatastral": {
+                        "type": "string",
+                        "description": "Calificación catastral",
+                        "example": "R"
+                    },
+                    "claseCultivo": {
+                        "type": "string",
+                        "description": "Denominación de la clase de cultivo",
+                        "example": "OLIVAR"
+                    },
+                    "intensidadProductiva": {
+                        "type": "string",
+                        "description": "Intensidad productiva",
+                        "example": "0.8"
+                    },
+                    "superficieSubparcela": {
+                        "type": "string",
+                        "description": "Superficie de la subparcela en m²",
+                        "example": "2500"
+                    }
+                },
+                "required": [
+                    "codigoSubparcela",
+                    "calificacionCatastral",
+                    "claseCultivo",
+                    "intensidadProductiva",
+                    "superficieSubparcela"
+                ]
+            },
+            "LocalizacionRusticaDto": {
+                "type": "object",
+                "properties": {
+                    "codigoMunicipioAgregado": {
+                        "type": "string",
+                        "description": "Código de municipio agregado",
+                        "example": "123"
+                    },
+                    "codigoZonaConcentracion": {
+                        "type": "string",
+                        "description": "Código de zona de concentración",
+                        "example": "456"
+                    },
+                    "codigoPoligono": {
+                        "type": "string",
+                        "description": "Código de polígono",
+                        "example": "001"
+                    },
+                    "codigoParcela": {
+                        "type": "string",
+                        "description": "Código de parcela",
+                        "example": "002"
+                    },
+                    "nombreParaje": {
+                        "type": "string",
+                        "description": "Nombre del paraje",
+                        "example": "EL CERRAL"
+                    },
+                    "codigoParaje": {
+                        "type": "string",
+                        "description": "Código del paraje",
+                        "example": "789"
+                    }
+                },
+                "required": [
+                    "codigoMunicipioAgregado",
+                    "codigoZonaConcentracion",
+                    "codigoPoligono",
+                    "codigoParcela",
+                    "nombreParaje",
+                    "codigoParaje"
+                ]
+            },
+            "InmuebleDto": {
+                "type": "object",
+                "properties": {
+                    "tipoBien": {
+                        "type": "string",
+                        "description": "Tipo de bien",
+                        "example": "UR",
+                        "enum": [
+                            "UR",
+                            "RU"
+                        ]
+                    },
+                    "referenciaCatastral": {
+                        "description": "Referencia catastral",
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/ReferenciaCatastralDto"
+                            }
+                        ]
+                    },
+                    "direccion": {
+                        "description": "Dirección del inmueble",
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/DireccionDto"
+                            }
+                        ]
+                    },
+                    "datosEconomicos": {
+                        "description": "Datos económicos del inmueble",
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/DatosEconomicosDto"
+                            }
+                        ]
+                    },
+                    "unidadesConstructivas": {
+                        "description": "Lista de unidades constructivas (solo cuando la respuesta no es una lista de candidatos y para inmuebles urbanos)",
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/UnidadConstructivaDto"
+                        }
+                    },
+                    "subparcelas": {
+                        "description": "Lista de subparcelas (solo cuando la respuesta no es una lista de candidatos y para inmuebles rústicos)",
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/SubparcelaDto"
+                        }
+                    },
+                    "localizacionRustica": {
+                        "description": "Localización rústica (solo cuando la respuesta no es una lista de candidatos y para inmuebles rústicos)",
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/LocalizacionRusticaDto"
+                            }
+                        ]
+                    }
+                },
+                "required": [
+                    "tipoBien",
+                    "referenciaCatastral",
+                    "direccion"
+                ]
+            },
+            "InmueblesResponse": {
+                "type": "object",
+                "properties": {
+                    "numeroInmuebles": {
+                        "type": "number",
+                        "description": "Número total de inmuebles encontrados",
+                        "example": 1
+                    },
+                    "inmuebles": {
+                        "description": "Listado de inmuebles",
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/InmuebleDto"
+                        }
+                    },
+                    "errores": {
+                        "description": "Listado de errores [] si no hay errores",
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/ErrorDto"
+                        }
+                    }
+                },
+                "required": [
+                    "numeroInmuebles",
+                    "inmuebles",
+                    "errores"
+                ]
+            },
+            "ReferenciaCoordenadasDto": {
+                "type": "object",
+                "properties": {
+                    "pc1": {
+                        "type": "string",
+                        "description": "Primera parte de la referencia catastral (posiciones 1-7)",
+                        "example": "9872023"
+                    },
+                    "pc2": {
+                        "type": "string",
+                        "description": "Segunda parte de la referencia catastral (posiciones 8-14)",
+                        "example": "VH5797S"
+                    },
+                    "referenciaCatastral": {
+                        "type": "string",
+                        "description": "Referencia catastral completa",
+                        "example": "9872023VH5797S"
+                    },
+                    "direccion": {
+                        "type": "string",
+                        "description": "Descripción de la dirección",
+                        "example": "CL GLORIA 51 SANTA CRUZ DE MUDELA (CIUDAD REAL)"
+                    }
+                },
+                "required": [
+                    "pc1",
+                    "pc2",
+                    "referenciaCatastral",
+                    "direccion"
+                ]
+            },
+            "CoordenadasResponse": {
+                "type": "object",
+                "properties": {
+                    "numeroReferencias": {
+                        "type": "number",
+                        "description": "Número total de referencias catastrales encontradas",
+                        "example": 1
+                    },
+                    "referencias": {
+                        "description": "Listado de referencias catastrales",
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/ReferenciaCoordenadasDto"
+                        }
+                    },
+                    "errores": {
+                        "description": "Listado de errores [] si no hay errores",
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/ErrorDto"
+                        }
+                    }
+                },
+                "required": [
+                    "numeroReferencias",
+                    "referencias",
+                    "errores"
+                ]
+            },
+            "CoordenadaDto": {
+                "type": "object",
+                "properties": {
+                    "longitud": {
+                        "type": "string",
+                        "description": "Coordenada X (longitud)",
+                        "example": "-3.46328353028033"
+                    },
+                    "latitud": {
+                        "type": "string",
+                        "description": "Coordenada Y (latitud)",
+                        "example": "38.6401434830887"
+                    },
+                    "sistemaReferencia": {
+                        "type": "string",
+                        "description": "Sistema de referencia espacial",
+                        "example": "EPSG:4326"
+                    },
+                    "pc1": {
+                        "type": "string",
+                        "description": "Primera parte de la referencia catastral (posiciones 1-7)",
+                        "example": "9872023"
+                    },
+                    "pc2": {
+                        "type": "string",
+                        "description": "Segunda parte de la referencia catastral (posiciones 8-14)",
+                        "example": "VH5797S"
+                    },
+                    "referenciaCatastral": {
+                        "type": "string",
+                        "description": "Referencia catastral completa",
+                        "example": "9872023VH5797S"
+                    },
+                    "direccion": {
+                        "type": "string",
+                        "description": "Descripción de la dirección",
+                        "example": "CL GLORIA 51 SANTA CRUZ DE MUDELA (CIUDAD REAL)"
+                    }
+                },
+                "required": [
+                    "longitud",
+                    "latitud",
+                    "sistemaReferencia",
+                    "pc1",
+                    "pc2",
+                    "referenciaCatastral",
+                    "direccion"
+                ]
+            },
+            "CoordenadasPorRcResponse": {
+                "type": "object",
+                "properties": {
+                    "numeroCoordenadas": {
+                        "type": "number",
+                        "description": "Número total de coordenadas encontradas",
+                        "example": 1
+                    },
+                    "coordenadas": {
+                        "description": "Listado de coordenadas",
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/CoordenadaDto"
+                        }
+                    },
+                    "errores": {
+                        "description": "Listado de errores [] si no hay errores",
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/ErrorDto"
+                        }
+                    }
+                },
+                "required": [
+                    "numeroCoordenadas",
+                    "coordenadas",
+                    "errores"
+                ]
+            }
+        }
+    },
+    "security": [
+        {
+            "apiKey": []
+        }
+    ]
+}

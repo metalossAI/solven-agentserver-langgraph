@@ -15,8 +15,14 @@ granite_llm = ChatWatsonx(
     project_id="1f803e27-a263-42e6-a21b-db988a4f9b40",
 )
 
-openrter = ChatOpenAI(
+xai_grok_4_fast = ChatOpenAI(
     model="x-ai/grok-4.1-fast",
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+)
+
+mistralai_ministral_3b_2512 = ChatOpenAI(
+    model="mistralai/ministral-3b-2512",
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
@@ -29,6 +35,6 @@ groq_qwen = ChatGroq(
 	}
 )
 
-LLM = openrter
+LLM = xai_grok_4_fast
 
 __all__ = ["LLM"]

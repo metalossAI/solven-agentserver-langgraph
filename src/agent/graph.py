@@ -24,8 +24,8 @@ from langchain.agents.middleware.context_editing import ContextEditingMiddleware
 from langchain.agents.middleware.summarization import SummarizationMiddleware
 from langchain.agents.middleware import InterruptOnConfig, TodoListMiddleware
 
-
 from deepagents.middleware import FilesystemMiddleware
+from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from deepagents.middleware.subagents import SubAgent, SubAgentMiddleware
 from src.backend import get_user_s3_backend
 
@@ -34,7 +34,7 @@ from src.models import SolvenContext, SolvenState
 from src.agent.tools import get_composio_gmail_tools, get_composio_outlook_tools
 from src.agent.prompt import generate_prompt_template
 from src.agent_elasticsearch.agent import doc_search_agent
-from src.catastro.tools import consultar_por_referencia, consultar_por_coordenadas, consultar_por_direccion
+from src.catastro.tools import busqueda_catastro	
 
 async def get_context_item(context_items, item_name):
 	for item in context_items:
@@ -72,6 +72,7 @@ async def run_agent(state: SolvenState, config: RunnableConfig, runtime: Runtime
 		model=llm,
 		system_prompt=main_prompt,
 		middleware=[
+			PatchToolCallsMiddleware(),
 			SubAgentMiddleware(
 				general_purpose_agent=True,
 				default_model=llm,
@@ -82,7 +83,7 @@ async def run_agent(state: SolvenState, config: RunnableConfig, runtime: Runtime
 						description="agente para gestionar busquedas en el catastro",
 						system_prompt="Eres un asistente de busqueda de datos del catastro de España.",
 						model=llm,
-						tools=[consultar_por_referencia, consultar_por_coordenadas, consultar_por_direccion],
+						tools=[busqueda_catastro],
 						state_schema=SolvenState,
 					),
 					SubAgent(

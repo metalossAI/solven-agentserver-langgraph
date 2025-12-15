@@ -7,7 +7,7 @@ from langchain.tools import tool, ToolRuntime
 from langchain_elasticsearch import ElasticsearchStore, BM25Strategy, DenseVectorStrategy
 from src.embeddings import embeddings
 
-from src.models import SolvenContext
+from src.models import AppContext
 from langchain_core.documents import Document
 from enum import Enum
 
@@ -37,7 +37,7 @@ class SearchScope(Enum):
 
 @tool
 async def buscar_documentos(
-    runtime: ToolRuntime[SolvenContext],
+    runtime: ToolRuntime[AppContext],
     query: str,
     strategy : SearchMode = SearchMode.similarity,
     k : int = 5,

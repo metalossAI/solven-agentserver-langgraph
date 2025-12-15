@@ -1,6 +1,7 @@
 import os
 import httpx
 from dotenv import load_dotenv
+from langgraph.graph.state import RunnableConfig
 from supabase import create_async_client
 from langgraph_sdk import Auth
 
@@ -53,4 +54,22 @@ async def authenticate(headers: dict) -> Auth.types.MinimalUserDict:
         raise  # Re-raise auth exceptions
     except Exception as e:
         raise Auth.exceptions.HTTPException(status_code=401, detail=str(e))
+
+def get_user_from_config(config : RunnableConfig):
+    """Extract user information from the runtime for ticket creation."""
+    # Get context from config
+    user_config = config["configurable"].get("langgraph_auth_user")
+    user_data = user_config.get("user_data")
+    user_id = user_config.get("user_data").get("id")
+    tenant_id = user_config.get("user_data").get("company_id")
+    conversation_id = config.get("metadata").get("thread_id")
+    
+    # Return user information for ticket creation
+    return {
+        "id": user_id,
+        "name": user_data.get("name") if user_data else "Unknown User",
+        "email": user_data.get("email") if user_data else None,
+        "company_id": tenant_id,
+        "conversation_id": conversation_id
+    }
     

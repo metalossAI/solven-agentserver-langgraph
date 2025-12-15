@@ -4,7 +4,7 @@ from langchain.agents.middleware import (
     ModelResponse,
 )
 from typing import Any, Dict
-from src.models import SolvenState, SolvenContext
+from src.models import SolvenState, AppContext
 from langgraph.runtime import Runtime
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.graph.ui import push_ui_message

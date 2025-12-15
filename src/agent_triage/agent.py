@@ -3,7 +3,6 @@ import json
 import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
-from numpy import tri
 load_dotenv()
  
 from langgraph.checkpoint.memory import MemorySaver
@@ -14,7 +13,7 @@ from langgraph.runtime import Runtime
 from langgraph.store.base import BaseStore
 from langgraph.graph.ui import push_ui_message
 
-from copilotkit.langgraph import RunnableConfig, CopilotContextItem
+from langgraph.graph.state import RunnableConfig
 
 from collections.abc import Callable, Sequence
 from typing import Any, Optional, List, TypedDict
@@ -32,20 +31,20 @@ from src.backend import get_user_s3_backend
 
 from src.llm import LLM as llm
 from src.embeddings import embeddings
+from src.utils import build_context_from_config
 
-from src.models import AppContext, SolvenState
+from src.agent_triage.models import InputTriageState, OutputTriageState, TriageState, TriageContext
+from src.agent_triage.tools import crear_ticket    
+
 from src.agent.prompt import generate_prompt_template
 from src.agent_elasticsearch.agent import doc_search_agent
-from src.agent_email.agent import generate_email_subagent
-from src.agent_email.tools import get_composio_outlook_tools
-from src.agent_catastro.agent import subagent as catastro_subagent
-from src.agent_catastro.tools import busqueda_catastro
+
+from src.agent_email.tools import get_composio_outlook_tools, get_composio_gmail_tools
 
 
 async def run_agent(
-	state : SolvenState,
+	state : TriageState,
 	config : RunnableConfig,
-	runtime :  Runtime[AppContext],
 	store : BaseStore
 ):
 	
@@ -56,35 +55,20 @@ async def run_agent(
 	tenant_id = user_config.get("user_data").get("company_id")
 	conversation_id = config.get("metadata").get("thread_id")
 
-	s3_backend = await get_user_s3_backend(user_id, conversation_id)
+	gmail_tools = get_composio_gmail_tools()
+	outlook_tools = get_composio_outlook_tools()
 
-
-	main_prompt = generate_prompt_template(
-		name=user_data.get("name"),
-		profile=f"email: {user_data.get('email')} | role: {user_data.get('role')} | company: {user_data.get('company_name')}",
-		language="español",
-	)
-	
-	email_agent = await generate_email_subagent(user_id, conversation_id)
-
-	main_agent = create_deep_agent(
+	main_agent = create_agent(
 		model=llm,
-		system_prompt=main_prompt,
-		subagents=[
-			doc_search_agent,
-			email_agent,
-			catastro_subagent,
-		],
-		store=store,
-		backend=s3_backend,
-		context_schema=AppContext,
+		tools=[gmail_tools, outlook_tools],
+		state_schema=TriageState,
+		context_schema=TriageContext,
 	)
 	
 	# Create context for the agent
-	agent_context = AppContext(
+	agent_context = TriageContext(
 		user_id=user_id,
-		tenant_id=tenant_id,
-		thread_id=conversation_id
+		tenant_id=tenant_id
 	)
 
 	response = await main_agent.ainvoke(
@@ -96,7 +80,7 @@ async def run_agent(
 	return response
 
 workflow = StateGraph(
-	state_schema=SolvenState,
+	state_schema=TriageState,
 )
 
 workflow.add_node("run_agent", run_agent)
@@ -104,6 +88,16 @@ workflow.set_entry_point("run_agent")
 workflow.add_edge("run_agent", "__end__")
 
 
-graph = workflow.compile(
-	name="scriba",
+graph = create_agent(
+    model=llm,
+    tools=[
+        crear_ticket,
+    ],
+    system_prompt="eres un agente de triage debes crear un ticket para cada evento que recibas",
+    state_schema=TriageState,
+    context_schema=TriageContext,
 )
+
+#workflow.compile(
+#	name="triage",
+#)

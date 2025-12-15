@@ -30,6 +30,7 @@ from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from deepagents.middleware.subagents import SubAgent, SubAgentMiddleware
 
 from src.llm import LLM as llm
+from src.backend import get_user_s3_backend
 from src.models import SolvenState
 from src.agent_email.prompt import generate_email_prompt_template
 from src.agent_email.tools import get_composio_gmail_tools, get_composio_outlook_tools
@@ -39,6 +40,8 @@ async def generate_email_subagent(user_id, thread_id):
 	prompt = generate_email_prompt_template(user_id)
 	gmail_tools = get_composio_gmail_tools(user_id, thread_id)
 	outlook_tools = get_composio_outlook_tools(user_id, thread_id)
+
+	s3_backend = await get_user_s3_backend(user_id, thread_id)
 
 	email_agent = SubAgent(
 		name="asistente_correo",
@@ -56,6 +59,9 @@ async def generate_email_subagent(user_id, thread_id):
 						model=llm,
 						tools=gmail_tools,
 						middleware=[
+							FilesystemMiddleware(
+								backend=s3_backend
+							),
 							ContextEditingMiddleware(
 								edits=[
 									ClearToolUsesEdit(
@@ -74,6 +80,9 @@ async def generate_email_subagent(user_id, thread_id):
 						model=llm,
 						tools=outlook_tools,
 						middleware=[
+							FilesystemMiddleware(
+								backend=s3_backend
+							),
 							ContextEditingMiddleware(
 								edits=[
 									ClearToolUsesEdit(

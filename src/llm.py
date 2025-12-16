@@ -27,6 +27,12 @@ mistralai_ministral_3b_2512 = ChatOpenAI(
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 
+openai_oss_120b = ChatOpenAI(
+    model="openai/gpt-oss-120b",
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+)
+
 groq_qwen = ChatGroq(
 	model="llama-3.1-8b-instant",
 	max_tokens=50000,

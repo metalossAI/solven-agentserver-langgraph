@@ -19,15 +19,7 @@ from collections.abc import Callable, Sequence
 from typing import Any, Optional, List, TypedDict
 
 from langchain.agents import create_agent
-from langchain.agents.middleware.context_editing import ContextEditingMiddleware, ClearToolUsesEdit
-from langchain.agents.middleware.summarization import SummarizationMiddleware
-from langchain.agents.middleware import InterruptOnConfig, TodoListMiddleware
-
-from deepagents import create_deep_agent
-from deepagents.middleware import FilesystemMiddleware
-from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
-from deepagents.middleware.subagents import SubAgent, SubAgentMiddleware
-from src.backend import get_user_s3_backend
+from langchain.agents.middleware.tool_call_limit import ToolCallLimitMiddleware
 
 from src.llm import LLM as llm
 from src.embeddings import embeddings
@@ -45,18 +37,15 @@ from src.agent_email.tools import get_composio_outlook_tools, get_composio_gmail
 async def run_agent(
 	state : TriageState,
 	config : RunnableConfig,
+	context : TriageContext,
 	store : BaseStore
 ):
 	
-	# Get context from config
-	user_config = config["configurable"].get("langgraph_auth_user")
-	user_data = user_config.get("user_data")
-	user_id = user_config.get("user_data").get("id")
-	tenant_id = user_config.get("user_data").get("company_id")
-	conversation_id = config.get("metadata").get("thread_id")
+	user_id = context.user_id
+	tenant_id = context.tenant_id
 
-	gmail_tools = get_composio_gmail_tools()
-	outlook_tools = get_composio_outlook_tools()
+	gmail_tools = get_composio_gmail_tools(user_id, "tickets")
+	outlook_tools = get_composio_outlook_tools(user_id, "tickets")
 
 	main_agent = create_agent(
 		model=llm,
@@ -68,7 +57,6 @@ async def run_agent(
 	# Create context for the agent
 	agent_context = TriageContext(
 		user_id=user_id,
-		tenant_id=tenant_id
 	)
 
 	response = await main_agent.ainvoke(
@@ -93,7 +81,10 @@ graph = create_agent(
     tools=[
         crear_ticket,
     ],
-    system_prompt="eres un agente de triage debes crear un ticket para cada evento que recibas",
+	middleware=[
+		ToolCallLimitMiddleware(tool_name="crear_ticket", run_limit=1)
+	],
+    system_prompt="Eres un agente de triage para solicitudes legales; sintetiza cada evento de solicitud en un ticket", 
     state_schema=TriageState,
     context_schema=TriageContext,
 )

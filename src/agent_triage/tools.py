@@ -13,28 +13,31 @@ def crear_ticket(titulo: str , description : str, runtime: ToolRuntime) -> str:
     - titulo: titulo del ticket
     - description: descripción detallada del ticket
     """
-    # Here you would implement the actual ticket creation logic
-    # using the runtime to access the document store
-    context = build_context_from_config(runtime.config)
-    print("context", context)
-    # Here you would implement the actual ticket creation logic
-    # using the runtime to access the document store
-    context = build_context_from_config(runtime.config)
-    print("context", context)
 
-    user_id = context.user_id
-    ticket: Ticket = Ticket(
-        id = str(uuid.uuid4()),
-        title=title,
-        description=description,
-        status="open",
-        related_threads=[],
-        updated_at=datetime.now().isoformat(),
-    )
+    user_id = runtime.context.user_id
+    ticket_id = str(uuid.uuid4())
+    
+    ticket_data = {
+        "id": ticket_id,
+        "title": titulo,
+        "description": description,
+        "assigned_to": str(user_id),
+        "status": "open",
+        "related_threads": [],
+        "updated_at": datetime.now().isoformat(),
+    }
+    
+    # Store ticket as individual item with namespace (user_id, "tickets")
+    namespace = (str(user_id), "tickets")
+    runtime.store.put(namespace, ticket_id, ticket_data)
+    
+    print(f"Ticket created with ID {ticket_id} for user {user_id}", flush=True)
+    
+    # Verify storage by searching
+    tickets = runtime.store.search(namespace)
+    print(f"Total tickets for user {user_id}: {len(list(tickets))}", flush=True)
 
-    runtime.store.put((user_id, "tickets"), "all", ticket)
-
-    return f"Ticket created with ID {ticket.id} for user {context.get('user_id', 'unknown')}"
+    return f"Ticket creado con id {ticket_id} asignado al usuario {user_id}"
 
 @tool
 def patch_ticket(runtime : ToolRuntime) -> str :
@@ -44,8 +47,7 @@ def patch_ticket(runtime : ToolRuntime) -> str :
     Args:
     - runtime: contexto de ejecución con configuración del usuario
     """
-    context = build_context_from_config(runtime.config)
-    print("patch context", context)
+    user_id = runtime.context.user_id
     # Here you would implement the actual ticket patching logic
     # using the runtime to access the document store
     # For now, just return a placeholder message

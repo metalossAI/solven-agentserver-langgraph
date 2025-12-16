@@ -16,7 +16,7 @@ def get_composio_gmail_tools(user_id, thread_id):
     """Synchronous version for running in thread pool"""
     # Create modifier factory with captured context
     save_attachment_modifier = create_save_attachment_modifier(user_id, thread_id)
-
+    print("USERID FOR COMPOSIO TOOLS: ", user_id)
     composio = Composio(provider=LangchainProvider())
     tools = composio.tools.get(
         user_id=user_id,

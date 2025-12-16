@@ -14,7 +14,7 @@ from langgraph.runtime import Runtime
 from langgraph.store.base import BaseStore
 from langgraph.graph.ui import push_ui_message
 
-from copilotkit.langgraph import RunnableConfig, CopilotContextItem
+from langgraph.graph.state import RunnableConfig
 
 from collections.abc import Callable, Sequence
 from typing import Any, Optional, List, TypedDict
@@ -36,10 +36,9 @@ from src.embeddings import embeddings
 from src.models import AppContext, SolvenState
 from src.agent.prompt import generate_prompt_template
 from src.agent_elasticsearch.agent import doc_search_agent
-from src.agent_email.agent import generate_email_subagent
+from src.agent_email.agent import generate_gmail_subagent, generate_outlook_subagent
 from src.agent_email.tools import get_composio_outlook_tools
 from src.agent_catastro.agent import subagent as catastro_subagent
-from src.agent_catastro.tools import busqueda_catastro
 
 
 async def run_agent(
@@ -55,24 +54,29 @@ async def run_agent(
 	user_id = user_config.get("user_data").get("id")
 	tenant_id = user_config.get("user_data").get("company_id")
 	conversation_id = config.get("metadata").get("thread_id")
+	thread_title = config.get("metadata").get("title")
+	thread_description = config.get("metadata").get("description")
 
 	s3_backend = await get_user_s3_backend(user_id, conversation_id)
-
 
 	main_prompt = generate_prompt_template(
 		name=user_data.get("name"),
 		profile=f"email: {user_data.get('email')} | role: {user_data.get('role')} | company: {user_data.get('company_name')}",
 		language="español",
+		context_title=thread_title,
+		context_description=thread_description,
 	)
 	
-	email_agent = await generate_email_subagent(user_id, conversation_id)
+	gmail_agent = await generate_gmail_subagent(s3_backend, user_id, conversation_id)
+	outlook_agent = await generate_outlook_subagent(s3_backend, user_id, conversation_id)
 
 	main_agent = create_deep_agent(
 		model=llm,
 		system_prompt=main_prompt,
 		subagents=[
 			doc_search_agent,
-			email_agent,
+			gmail_agent,
+			outlook_agent,
 			catastro_subagent,
 		],
 		store=store,

@@ -18,6 +18,7 @@ class AppContext:
     thread_id: Optional[str]
     user_id: str
     tenant_id: str
+    initial_context: Optional[dict] = None
 
 # Store Models to ensure orderd long term memory
 class Event(BaseModel):

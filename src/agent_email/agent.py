@@ -35,76 +35,29 @@ from src.models import SolvenState
 from src.agent_email.prompt import generate_email_prompt_template
 from src.agent_email.tools import get_composio_gmail_tools, get_composio_outlook_tools
 
-async def generate_email_subagent(user_id, thread_id):
-
-	prompt = generate_email_prompt_template(user_id)
-	gmail_tools = get_composio_gmail_tools(user_id, thread_id)
+async def generate_outlook_subagent(backend, user_id, thread_id):
 	outlook_tools = get_composio_outlook_tools(user_id, thread_id)
-
-	s3_backend = await get_user_s3_backend(user_id, thread_id)
-
-	email_agent = SubAgent(
-		name="asistente_correo",
-		description="Agente para gestionar las distintas bandejas de correos del usuario.",
-		system_prompt=prompt,
+	outlook_subagent = SubAgent(
+		name="asistente_outlook",
+		description="agente para gestionar correo de outlook - listar, leer y enviar correos electrónicos",
+		system_prompt="",
 		model=llm,
-		middleware=[
-			SubAgentMiddleware(
-				default_model=llm,
-				subagents=[
-					SubAgent(
-						name="asistente_gmail",
-						description="agente para gestionar correo de gmail - listar, leer y enviar correos electrónicos",
-						system_prompt="",
-						model=llm,
-						tools=gmail_tools,
-						middleware=[
-							FilesystemMiddleware(
-								backend=s3_backend
-							),
-							ContextEditingMiddleware(
-								edits=[
-									ClearToolUsesEdit(
-										trigger=30000,
-										keep=3,
-									),
-								],
-							),
-						],
-						state_schema=SolvenState,
-					),
-					SubAgent(
-						name="asistente_outlook",
-						description="agente para gestionar correo de outlook - listar, leer y enviar correos electrónicos",
-						system_prompt="",
-						model=llm,
-						tools=outlook_tools,
-						middleware=[
-							FilesystemMiddleware(
-								backend=s3_backend
-							),
-							ContextEditingMiddleware(
-								edits=[
-									ClearToolUsesEdit(
-										trigger=30000,
-										keep=3,
-									),
-								],
-							),
-						],
-						state_schema=SolvenState,
-					),
-				]),
-				ContextEditingMiddleware(
-					edits=[
-						ClearToolUsesEdit(
-							trigger=30000,
-							keep=3,
-						),
-					],
-				),
-			],
-			state_schema=SolvenState,
-		)
+		tools=outlook_tools,
+		state_schema=SolvenState,
+	)
+	return outlook_subagent
 
-	return email_agent
+async def generate_gmail_subagent(backend, user_id, thread_id):
+
+	gmail_tools = get_composio_gmail_tools(user_id, thread_id)
+
+	gmail_agent = SubAgent(
+		name="asistente_gmail",
+		description="agente para gestionar correo de gmail - listar, leer y enviar correos electrónicos",
+		system_prompt="",
+		model=llm,
+		tools=gmail_tools,
+		state_schema=SolvenState,
+	)
+	
+	return gmail_agent

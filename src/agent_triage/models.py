@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field
 from typing import TypedDict, Optional, Literal, List
 from dataclasses import dataclass
 from datetime import datetime
+from langgraph.graph import MessagesState
 
 @dataclass
 class TriageContext:
@@ -17,7 +18,7 @@ class Ticket(BaseModel):
     status: Literal["open", "closed"] = "open"
     updated_at: datetime = Field(default_factory=datetime.now)
 
-class InputTriageState(TypedDict):
+class InputTriageState(MessagesState):
     gmail_triage_event: dict
     outlook_triage_event: dict
 

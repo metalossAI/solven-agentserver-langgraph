@@ -19,15 +19,33 @@ async def authenticate(headers: dict) -> Auth.types.MinimalUserDict:
     """Validate JWT tokens and extract user information."""
     
     supabase = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-    # Get the API key and decode if it's bytes
-    api_key = headers.get(b"x-api-key")
-    
+
+    def _get_header(name: str):
+        return headers.get(name) or headers.get(name.lower()) or headers.get(name.upper()) or headers.get(name.encode())
+
+    def _normalize_key(value):
+        if value is None:
+            return None
+        if isinstance(value, bytes):
+            value = value.decode("utf-8")
+        if not isinstance(value, str):
+            value = str(value)
+        value = value.strip()
+        if value.lower().startswith("bearer "):
+            value = value[7:].strip()
+        return value
+
+    api_key = _normalize_key(_get_header("x-api-key") or _get_header("authorization"))
+
     if not api_key:
         raise Auth.exceptions.HTTPException(status_code=401, detail="Missing API key header")
     
-    # Decode bytes to string
-    if isinstance(api_key, bytes):
-        api_key = api_key.decode('utf-8')
+    if (os.getenv("LANGGRAPH_API_KEY") == api_key):
+        return {
+            "identity": "webhook",
+            "is_authenticated": True,
+            "user_data": None,
+        }
     
     try:
         # Verify token with Supabase

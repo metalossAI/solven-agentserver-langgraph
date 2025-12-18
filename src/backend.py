@@ -4,6 +4,7 @@ Implements the BackendProtocol for virtual filesystem operations.
 """
 import os
 import re
+import yaml
 from datetime import datetime
 from typing import Optional, Union
 from fnmatch import fnmatch
@@ -658,12 +659,49 @@ class S3Backend(BackendProtocol):
             print(f"Error loading skills: {e}")
             return []
     
-    async def load_all_skills_formatted(self) -> str:
+    def _parse_skill_frontmatter(self, content: str) -> dict:
+        """
+        Parse YAML frontmatter from skill content.
+        
+        Args:
+            content: Full content of SKILL.md file
+            
+        Returns:
+            Dictionary with 'name' and 'description' from frontmatter, or empty dict if not found
+        """
+        try:
+            # Check if content starts with ---
+            if not content.startswith('---'):
+                return {}
+            
+            # Find the closing ---
+            end_idx = content.find('---', 3)
+            if end_idx == -1:
+                return {}
+            
+            # Extract and parse YAML
+            frontmatter = content[3:end_idx].strip()
+            metadata = yaml.safe_load(frontmatter)
+            
+            return {
+                'name': metadata.get('name', ''),
+                'description': metadata.get('description', '')
+            }
+        except Exception as e:
+            print(f"Error parsing frontmatter: {e}")
+            return {}
+    
+    async def load_all_skills_formatted(self, category: Optional[str] = None) -> str:
         """
         Load all skills organized by categories and subcategories in a formatted string.
+        Reads SKILL.md frontmatter to extract name and description for each skill.
+        
+        Args:
+            category: Optional category to filter skills (e.g., 'escrituras'). 
+                      If provided, only shows skills from that category.
         
         Returns:
-            Formatted string with all skills organized by category
+            Formatted string with skills organized by category, including descriptions
         """
         if not self.user_id:
             return "No user ID available"
@@ -671,7 +709,46 @@ class S3Backend(BackendProtocol):
         skills_prefix = f"{self.user_id}/skills/"
         
         try:
-            # List all categories
+            # If category is specified, only list that category
+            if category:
+                category_prefix = f"{skills_prefix}{category}/"
+                
+                # List skills in this specific category
+                category_response = self.s3_client.list_objects_v2(
+                    Bucket=self.bucket,
+                    Prefix=category_prefix,
+                    Delimiter='/'
+                )
+                
+                if 'CommonPrefixes' not in category_response:
+                    return f"No skills found in category '{category}'"
+                
+                result = f"📚 Habilidades disponibles en **{category.upper()}**:\n\n"
+                
+                for skill_prefix in category_response['CommonPrefixes']:
+                    skill_path = skill_prefix['Prefix'].replace(skills_prefix, '').rstrip('/')
+                    skill_name = skill_path.split('/')[-1]
+                    
+                    # Try to load SKILL.md and parse frontmatter
+                    skill_file_key = f"{skill_prefix['Prefix']}SKILL.md"
+                    try:
+                        response = self.s3_client.get_object(Bucket=self.bucket, Key=skill_file_key)
+                        content = response['Body'].read().decode('utf-8')
+                        metadata = self._parse_skill_frontmatter(content)
+                        
+                        if metadata.get('description'):
+                            result += f"   └─ **{skill_name}** (`{skill_path}`)\n"
+                            result += f"      {metadata['description']}\n\n"
+                        else:
+                            result += f"   └─ {skill_name} (`{skill_path}`)\n"
+                    except Exception as e:
+                        # If we can't read the file, just show the skill name
+                        result += f"   └─ {skill_name} (`{skill_path}`)\n"
+                
+                result += "\n💡 Para cargar una habilidad, usa: `load_skill('categoria/nombre_habilidad')`"
+                return result
+            
+            # Otherwise, list all categories
             response = self.s3_client.list_objects_v2(
                 Bucket=self.bucket,
                 Prefix=skills_prefix,
@@ -695,16 +772,31 @@ class S3Backend(BackendProtocol):
                 )
                 
                 if 'CommonPrefixes' in category_response:
-                    result += f"📁 **{category_name.upper()}**\n"
+                    result += f"**{category_name.upper()}**\n"
                     
                     for skill_prefix in category_response['CommonPrefixes']:
                         skill_path = skill_prefix['Prefix'].replace(skills_prefix, '').rstrip('/')
                         skill_name = skill_path.split('/')[-1]
-                        result += f"   └─ {skill_name} (`{skill_path}`)\n"
+                        
+                        # Try to load SKILL.md and parse frontmatter
+                        skill_file_key = f"{skill_prefix['Prefix']}SKILL.md"
+                        try:
+                            response = self.s3_client.get_object(Bucket=self.bucket, Key=skill_file_key)
+                            content = response['Body'].read().decode('utf-8')
+                            metadata = self._parse_skill_frontmatter(content)
+                            
+                            if metadata.get('description'):
+                                result += f"   └─ **{skill_name}** (`{skill_path}`)\n"
+                                result += f"      {metadata['description']}\n\n"
+                            else:
+                                result += f"   └─ {skill_name} (`{skill_path}`)\n"
+                        except Exception as e:
+                            # If we can't read the file, just show the skill name
+                            result += f"   └─ {skill_name} (`{skill_path}`)\n"
                     
                     result += "\n"
             
-            result += "\n💡 Para cargar una habilidad, usa: `load_skill('categoria/nombre_habilidad')`"
+            result += "\nPara cargar una habilidad, usa: `load_skill('categoria/nombre_habilidad')`"
             return result
             
         except ClientError as e:

@@ -21,6 +21,13 @@ xai_grok_4_fast = ChatOpenAI(
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 
+xai_grok_4_fast_SO =ChatOpenAI(
+    model="x-ai/grok-4.1-fast",
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+    streaming=False,
+)
+
 mistralai_ministral_3b_2512 = ChatOpenAI(
     model="mistralai/ministral-3b-2512",
     base_url="https://openrouter.ai/api/v1",
@@ -40,6 +47,8 @@ groq_qwen = ChatGroq(
 		"parallel_tool_calls" : False,
 	}
 )
+
+LLM_SO = xai_grok_4_fast_SO
 
 LLM = xai_grok_4_fast
 

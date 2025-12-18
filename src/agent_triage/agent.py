@@ -28,7 +28,7 @@ from src.utils import build_context_from_config
 from src.agent_triage.models import InputTriageState, OutputTriageState, TriageState, TriageContext
 from src.agent_triage.tools import crear_ticket    
 
-from src.agent.prompt import generate_prompt_template
+from src.agent_triage.prompt import main_prompt
 from src.agent_elasticsearch.agent import doc_search_agent
 
 from src.agent_email.tools import get_composio_outlook_tools, get_composio_gmail_tools
@@ -84,7 +84,7 @@ graph = create_agent(
 	middleware=[
 		ToolCallLimitMiddleware(tool_name="crear_ticket", run_limit=1)
 	],
-    system_prompt="Eres un agente de triage para solicitudes legales; sintetiza cada evento de solicitud en un ticket", 
+    system_prompt=main_prompt.format(), 
     state_schema=TriageState,
     context_schema=TriageContext,
 )

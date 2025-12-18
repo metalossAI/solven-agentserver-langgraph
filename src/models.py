@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from pydantic import BaseModel, Field
 from typing import Optional, List, Sequence, Annotated, Any
 from langgraph.graph import MessagesState
@@ -12,12 +11,25 @@ class SolvenState(MessagesState):
     """
     ui: Annotated[Sequence[AnyUIMessage], ui_message_reducer]
 
+class Thread(BaseModel):
+    id : str
+    title : Optional[str] = None
+    description : Optional[str] = None
 
-@dataclass
-class AppContext:
-    thread_id: Optional[str]
-    user_id: str
-    tenant_id: str
+class User(BaseModel):
+    id : str
+    name : str
+    email : str
+    role : str
+    company_id : str
+
+class AppContext(BaseModel):
+    model_config = {"arbitrary_types_allowed": True}
+    
+    thread: Optional[Thread] = None
+    user: Optional[User] = None
+    tenant_id: Optional[str] = None
+    backend : Optional[Any] = None  # S3Backend - using Any to avoid schema issues
     initial_context: Optional[dict] = None
 
 # Store Models to ensure orderd long term memory
@@ -52,3 +64,9 @@ class Ticket(BaseModel):
     related_threads: Optional[List[str]] = None
     status: Literal["open", "closed"] = "open"
     updated_at: datetime = Field(default_factory=datetime.now)
+
+class Skill(BaseModel):
+    category : Literal["escrituras", "atencion"]
+
+class SkillResponse(BaseModel):
+    skills: List[Skill]

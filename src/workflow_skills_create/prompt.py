@@ -5,5 +5,6 @@ from langchain_core.prompts import ChatPromptTemplate
 from datetime import datetime
 load_dotenv()
 
+
 client = Client()
-main_prompt : ChatPromptTemplate = client.pull_prompt("solven-triage-solicitudes")
+prompt : ChatPromptTemplate = client.pull_prompt("solven-skills-create")

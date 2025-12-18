@@ -70,6 +70,9 @@ async def buscar_documentos(
         }
     
     search_results = []
+    # rank_window_size must be >= k (size) for RRF hybrid search
+    rank_window_size = max(top_k, 10)
+    
     if strategy == SearchMode.keyword:
         search_results = elasticBMSearch.similarity_search(
             query,
@@ -80,7 +83,8 @@ async def buscar_documentos(
         search_results = elasticDVSearch.similarity_search(
             query,
             k=top_k,
-            filter=filter_query
+            filter=filter_query,
+            rank_window_size=rank_window_size
         )
 
     if search_results:

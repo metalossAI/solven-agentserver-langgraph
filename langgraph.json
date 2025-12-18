@@ -3,7 +3,8 @@
   "dependencies": ["."],
   "graphs": {
     "solven": "./src/agent/graph.py:graph",
-    "ticket_triage": "./src/agent_triage/agent.py:graph"
+    "ticket_triage": "./src/agent_triage/agent.py:graph",
+    "skills_create": "./src/workflow_skills_create/workflow.py:agent"
   },
   "auth" : {
     "path": "./src/auth.py:auth"

@@ -60,6 +60,7 @@ async def authenticate(headers: dict) -> Auth.types.MinimalUserDict:
             user_response = await supabase.table("users").select("*").eq("supabase_id", auth_user.user.id).execute()
             if user_response.data and len(user_response.data) > 0:
                 user_data = user_response.data[0]
+                print("user_data",user_data)
         except Exception as db_error:
             pass
         

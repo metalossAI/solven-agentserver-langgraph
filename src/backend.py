@@ -40,13 +40,13 @@ class S3Backend(BackendProtocol):
         region: str = "us-east-1",
         scope: str = "write",
         user_id: Optional[str] = None,
-        conversation_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
         skills_prefix: Optional[str] = None
     ):
         self.bucket = bucket
         self.prefix = prefix.rstrip("/")
         self.user_id = user_id
-        self.conversation_id = conversation_id
+        self.thread_id = thread_id
         
         # Validate and set scope
         if scope not in ['read', 'write']:
@@ -55,14 +55,16 @@ class S3Backend(BackendProtocol):
         
         # Mount points: virtual path -> S3 prefix
         self.mounts = {}
+        
+        # Workspace mount - thread-specific for shared access
+        if thread_id:
+            self.mounts["/workspace"] = f"threads/{thread_id}"
+        elif user_id:
+            # Fallback to user workspace if no thread_id
+            self.mounts["/workspace"] = f"{self.prefix}/workspace" if self.prefix else f"{user_id}/workspace"
+        
+        # Skills mount - read-only user skills (user-specific)
         if user_id:
-            # Workspace mount - conversation-specific or user-level
-            if conversation_id:
-                self.mounts["/workspace"] = f"{self.prefix}/conversations/{conversation_id}" if self.prefix else f"{user_id}/conversations/{conversation_id}"
-            else:
-                self.mounts["/workspace"] = f"{self.prefix}/workspace" if self.prefix else f"{user_id}/workspace"
-            
-            # Skills mount - read-only user skills
             if skills_prefix:
                 self.mounts["/skills"] = skills_prefix
             else:
@@ -902,30 +904,30 @@ def get_user_backend_sync(user_id: str, conversation_id: Optional[str] = None, s
         conversation_id=conversation_id
     )
 
-async def get_user_s3_backend(user_id: str, conversation_id: Optional[str] = None, scope: str = "write") -> S3Backend:
+async def get_user_s3_backend(user_id: str, thread_id: Optional[str] = None, scope: str = "write") -> S3Backend:
     """
-    Create S3Backend scoped to a specific user and optionally a conversation.
-    Exposes /workspace for conversation files and /skills for user skills (read-only).
+    Create S3Backend scoped to a specific user and optionally a thread.
+    Exposes /workspace for thread files (shared) and /skills for user skills (read-only).
     
     Args:
-        user_id: User ID to scope the backend to
-        conversation_id: Optional conversation ID for further scoping
+        user_id: User ID for skills access
+        thread_id: Optional thread ID for shared workspace scoping
         scope: Permission scope - 'read' (read-only) or 'write' (read+write). Default: 'write'
     
     Returns:
         S3Backend instance with appropriate prefix, scope, and mount points
-        - /workspace -> {user_id}/conversations/{conversation_id}
-        - /skills -> {user_id}/skills (read-only)
+        - /workspace -> threads/{thread_id} (shared across users)
+        - /skills -> {user_id}/skills (user-specific, read-only)
     """
     
     return S3Backend(
         bucket=os.getenv('S3_BUCKET', 'scriba'),
-        prefix=user_id,
+        prefix="",  # No user prefix for shared threads
         endpoint_url=os.getenv('S3_ENDPOINT_URL'),
         access_key=os.getenv('S3_ACCESS_KEY'),
         secret_key=os.getenv('S3_SECRET_KEY'),
         region=os.getenv('S3_REGION', 'us-east-1'),
         scope=scope,
         user_id=user_id,
-        conversation_id=conversation_id
+        thread_id=thread_id
     )

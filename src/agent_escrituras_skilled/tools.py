@@ -7,62 +7,57 @@ from src.backend import S3Backend
 
 @tool
 async def list_skills(runtime: ToolRuntime[AppContext]) -> str:
-    """
-    List available skills in the 'escrituras' domain.
-    
+    """Lista las habilidades disponibles del dominio "escrituras".
+
     Returns:
-        Formatted string with escrituras skills
+        Cadena formateada con las habilidades de escrituras
     """
     backend : S3Backend = runtime.context.backend
     if not backend:
-        return "Error: No backend available"
+        return "Error: No hay backend disponible"
     
     # Filter to only show escrituras skills
     return await backend.load_all_skills_formatted(category='escrituras')
 
 @tool
 async def load_skill(runtime: ToolRuntime[AppContext], skill_path: str) -> Command:
-    """
-    Load a specific skill to use for the current task.
-    This will inject the skill's instructions into the system prompt.
-    
+    """Carga una habilidad específica para usar en la tarea actual.
+
+    Esto inyectará las instrucciones de la habilidad en el prompt del sistema.
+
     Args:
-        skill_path: Path to the skill in format 'category/skill_name' (e.g., 'escrituras/compraventa')
-    
+        skill_path: Ruta de la habilidad en formato 'categoria/nombre_habilidad' (p. ej., 'escrituras/compraventa')
+
     Returns:
-        Command object that updates state and returns message
+        Objeto Command que actualiza el estado y devuelve un mensaje
     """
-    print(f"[load_skill] Tool called with skill_path: {skill_path}")
+    print(f"[load_skill] Herramienta llamada con skill_path: {skill_path}")
     
     backend : S3Backend = runtime.context.backend
     if not backend:
-        print(f"[load_skill] ❌ No backend available")
+        print(f"[load_skill] ❌ No hay backend disponible")
         return Command(
             update={
                 "messages": [ToolMessage(
-                    content="Error: No backend available",
+                    content="Error: No hay backend disponible",
                     tool_call_id=runtime.tool_call_id
                 )]
             }
         )
     
     # Load the skill content using backend method
-    print(f"[load_skill] Loading skill content from S3...")
+    print(f"[load_skill] Cargando contenido de la habilidad desde S3...")
     content = await backend.load_skill_content(skill_path)
     
     if not content:
-        print(f"[load_skill] ❌ Could not load skill content")
         return Command(
             update={
                 "messages": [ToolMessage(
-                    content=f"Error: Could not load skill '{skill_path}'. Make sure it exists and has a SKILL.md file.",
+                    content=f"Error: No se pudo cargar la habilidad '{skill_path}'",
                     tool_call_id=runtime.tool_call_id
                 )]
             }
         )
-    
-    print(f"[load_skill] ✅ Skill content loaded ({len(content)} chars)")
-    print(f"[load_skill] ✅ Returning skill instructions in ToolMessage")
     
     # Return Command to update state and inject skill instructions into conversation
     return Command(

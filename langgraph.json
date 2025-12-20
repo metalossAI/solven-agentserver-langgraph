@@ -4,7 +4,8 @@
   "graphs": {
     "solven": "./src/agent/graph.py:graph",
     "ticket_triage": "./src/agent_triage/agent.py:graph",
-    "skills_create": "./src/workflow_skills_create/workflow.py:agent"
+    "skills_create": "./src/workflow_skills_create/workflow.py:agent",
+    "customer_chat": "./src/agent_customer_chat/agent.py:agent"
   },
   "auth" : {
     "path": "./src/auth.py:auth"

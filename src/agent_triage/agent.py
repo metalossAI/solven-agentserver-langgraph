@@ -26,7 +26,7 @@ from src.embeddings import embeddings
 from src.utils import build_context_from_config
 
 from src.agent_triage.models import InputTriageState, OutputTriageState, TriageState, TriageContext
-from src.agent_triage.tools import crear_ticket    
+from src.agent_triage.tools import crear_ticket, patch_ticket, listar_tickets    
 
 from src.agent_triage.prompt import main_prompt
 from src.agent_elasticsearch.agent import doc_search_agent
@@ -80,6 +80,8 @@ graph = create_agent(
     model=llm,
     tools=[
         crear_ticket,
+        patch_ticket,
+        listar_tickets,
     ],
 	middleware=[
 		ToolCallLimitMiddleware(tool_name="crear_ticket", run_limit=1)

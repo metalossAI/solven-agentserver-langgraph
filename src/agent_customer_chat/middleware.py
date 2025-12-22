@@ -1,8 +1,26 @@
 from langchain.agents.middleware import AgentMiddleware, ModelRequest
+from langchain.agents.middleware import dynamic_prompt, ModelRequest
+from backend import S3Backend
 from src.agent_escrituras_skilled.models import SkillsState
 from src.models import AppContext
 from typing import Any
+
 from langchain_core.messages import AIMessage
+
+@dynamic_prompt
+async  def SkillsMiddleware(request: ModelRequest) -> str:
+    """
+    Middleware that loads skills frontmatter
+    """
+
+    current_skill = getattr(request.state, 'current_skill', None)
+    backend : S3Backend = request.runtime.context.backend
+    if current_skill:
+        return backend.load_skill_content(request.state.get("current_skill"))
+
+    frontmatters = await backend.load_skills_frontmatter(category="atención_al_cliente")
+
+    return frontmatters
 
 class EnsureSkillLoadedMiddleware(AgentMiddleware[AppContext]):
     """
@@ -22,8 +40,8 @@ class EnsureSkillLoadedMiddleware(AgentMiddleware[AppContext]):
             last_message = messages[-1].content if hasattr(messages[-1], 'content') else ""            
             if not current_skill:
                 return AIMessage(
-                    content="Para generar documentos legales, primero debo cargar la habilidad apropiada. "
-                    "Déjame ver qué habilidades están disponibles.",
+                    content="Para atender a un cliente primero debo cargar la habilidad apropiada. "
+                    "Déjame ver qué información está disponible.",
                     tool_calls=[{
                         "name": "list_skills",
                         "args": {},

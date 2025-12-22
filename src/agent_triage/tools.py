@@ -1,5 +1,4 @@
 from langchain.tools import tool, ToolRuntime
-from src.utils import build_context_from_config
 from src.agent_triage.models import Ticket
 import uuid
 from datetime import datetime

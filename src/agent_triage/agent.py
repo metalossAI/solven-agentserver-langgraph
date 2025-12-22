@@ -23,7 +23,6 @@ from langchain.agents.middleware.tool_call_limit import ToolCallLimitMiddleware
 
 from src.llm import LLM as llm
 from src.embeddings import embeddings
-from src.utils import build_context_from_config
 
 from src.agent_triage.models import InputTriageState, OutputTriageState, TriageState, TriageContext
 from src.agent_triage.tools import crear_ticket, patch_ticket, listar_tickets    

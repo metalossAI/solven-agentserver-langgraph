@@ -41,6 +41,7 @@ class S3Backend(BackendProtocol):
         scope: str = "write",
         user_id: Optional[str] = None,
         thread_id: Optional[str] = None,
+        ticket_id: Optional[str] = None,
         skills_prefix: Optional[str] = None
     ):
         self.bucket = bucket
@@ -55,6 +56,9 @@ class S3Backend(BackendProtocol):
         
         # Mount points: virtual path -> S3 prefix
         self.mounts = {}
+
+        if ticket_id:
+            self.mounts["/solicitud"] = f"tickets/{ticket_id}"
         
         # Workspace mount - thread-specific for shared access
         if thread_id:
@@ -693,6 +697,102 @@ class S3Backend(BackendProtocol):
             print(f"Error parsing frontmatter: {e}")
             return {}
     
+    async def load_skills_frontmatter(self, category: Optional[str] = None) -> str:
+        """
+        Load all skills frontmatter as concatenated YAML blocks.
+        Returns the raw frontmatter from each SKILL.md file concatenated together.
+        
+        Args:
+            category: Optional category to filter skills (e.g., 'escrituras'). 
+                      If provided, only returns frontmatter from that category.
+        
+        Returns:
+            Concatenated YAML frontmatter blocks from all skills, each wrapped in ---
+        """
+        if not self.user_id:
+            return ""
+            
+        skills_prefix = f"{self.user_id}/skills/"
+        frontmatter_blocks = []
+        
+        try:
+            # If category is specified, only list that category
+            if category:
+                category_prefix = f"{skills_prefix}{category}/"
+                
+                # List skills in this specific category
+                category_response = self.s3_client.list_objects_v2(
+                    Bucket=self.bucket,
+                    Prefix=category_prefix,
+                    Delimiter='/'
+                )
+                
+                if 'CommonPrefixes' not in category_response:
+                    return ""
+                
+                for skill_prefix in category_response['CommonPrefixes']:
+                    # Try to load SKILL.md and extract frontmatter
+                    skill_file_key = f"{skill_prefix['Prefix']}SKILL.md"
+                    try:
+                        response = self.s3_client.get_object(Bucket=self.bucket, Key=skill_file_key)
+                        content = response['Body'].read().decode('utf-8')
+                        
+                        # Extract frontmatter using the utility function
+                        from src.utils import parse_skillmd_frontmatter
+                        frontmatter = parse_skillmd_frontmatter(content)
+                        
+                        if frontmatter:
+                            frontmatter_blocks.append(f"---\n{frontmatter}\n---")
+                    except Exception as e:
+                        # Skip skills that can't be read
+                        continue
+                
+                return "\n".join(frontmatter_blocks)
+            
+            # Otherwise, list all categories
+            response = self.s3_client.list_objects_v2(
+                Bucket=self.bucket,
+                Prefix=skills_prefix,
+                Delimiter='/'
+            )
+            
+            if 'CommonPrefixes' not in response:
+                return ""
+            
+            for prefix_info in response['CommonPrefixes']:
+                category_prefix = prefix_info['Prefix']
+                
+                # List skills in this category
+                category_response = self.s3_client.list_objects_v2(
+                    Bucket=self.bucket,
+                    Prefix=category_prefix,
+                    Delimiter='/'
+                )
+                
+                if 'CommonPrefixes' in category_response:
+                    for skill_prefix in category_response['CommonPrefixes']:
+                        # Try to load SKILL.md and extract frontmatter
+                        skill_file_key = f"{skill_prefix['Prefix']}SKILL.md"
+                        try:
+                            response = self.s3_client.get_object(Bucket=self.bucket, Key=skill_file_key)
+                            content = response['Body'].read().decode('utf-8')
+                            
+                            # Extract frontmatter using the utility function
+                            from src.utils import parse_skillmd_frontmatter
+                            frontmatter = parse_skillmd_frontmatter(content)
+                            
+                            if frontmatter:
+                                frontmatter_blocks.append(f"---\n{frontmatter}\n---")
+                        except Exception as e:
+                            # Skip skills that can't be read
+                            continue
+            
+            return "\n".join(frontmatter_blocks)
+            
+        except ClientError as e:
+            print(f"Error loading skills frontmatter: {e}")
+            return ""
+    
     async def load_all_skills_formatted(self, category: Optional[str] = None) -> str:
         """
         Load all skills organized by categories and subcategories in a formatted string.
@@ -725,7 +825,7 @@ class S3Backend(BackendProtocol):
                 if 'CommonPrefixes' not in category_response:
                     return f"No skills found in category '{category}'"
                 
-                result = f"📚 Habilidades disponibles en **{category.upper()}**:\n\n"
+                result = f"Habilidades disponibles en **{category.upper()}**:\n\n"
                 
                 for skill_prefix in category_response['CommonPrefixes']:
                     skill_path = skill_prefix['Prefix'].replace(skills_prefix, '').rstrip('/')
@@ -760,7 +860,7 @@ class S3Backend(BackendProtocol):
             if 'CommonPrefixes' not in response:
                 return "No skills found"
             
-            result = "📚 Habilidades disponibles:\n\n"
+            result = "Habilidades disponibles:\n\n"
             
             for prefix_info in response['CommonPrefixes']:
                 category_prefix = prefix_info['Prefix']

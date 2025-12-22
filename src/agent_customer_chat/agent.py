@@ -30,7 +30,7 @@ from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from deepagents.middleware.subagents import SubAgent, SubAgentMiddleware
 from src.backend import get_user_s3_backend
 
-from src.llm import LLM as llm
+from src.llm import LLM
 from src.embeddings import embeddings
 
 from src.models import Thread, AppContext, SolvenState, User
@@ -55,6 +55,7 @@ async def build_context(
 		user_data.get("id"),
 		config.get("metadata").get("thread_id")
 	)
+
 	runtime.context.user = User(
 		id=user_data.get("id"),
 		name=user_data.get("name"),
@@ -62,7 +63,7 @@ async def build_context(
 		role=user_data.get("role"),
 		company_id=user_data.get("company_id"),
 	)
-	runtime.context.tenant_id = user_data.get("company_id")
+
 	runtime.context.thread = Thread(
 		id=config.get("metadata").get("thread_id"),
 		title=config.get("metadata").get("title"),
@@ -80,34 +81,14 @@ async def run_agent(
 	store : BaseStore
 ):
 
-	main_prompt = generate_prompt_template(
-		name=runtime.context.user.name,
-		profile=f"email: {runtime.context.user.email} | role: {runtime.context.user.role}",
-		language="español",
-		context_title=runtime.context.thread.title,
-		context_description=runtime.context.thread.description,
-	)
+	agent = create_agent(
+        model=LLM,
+        middleware=[
+            SkillsMiddleware()
+        ]
+    )
 
-	gmail_agent = await generate_gmail_subagent(runtime)
-	outlook_agent = await generate_outlook_subagent(runtime)
-	escrituras_agent = await generate_escrituras_agent(runtime)
-
-	main_agent = create_deep_agent(
-		model=llm,
-		system_prompt=main_prompt,
-		subagents=[
-			doc_search_agent,
-			gmail_agent,
-			outlook_agent,
-			catastro_subagent,
-			escrituras_agent
-		],
-		store=store,
-		backend=runtime.context.backend,
-		context_schema=AppContext,
-	)
-
-	response = await main_agent.ainvoke(
+	response = await agent.ainvoke(
 		state,
 		config=config,
 		context=runtime.context,
@@ -128,5 +109,5 @@ workflow.add_edge("run_agent", "__end__")
 
 
 graph = workflow.compile(
-	name="solven",
+	name="solven-customer-chat",
 )

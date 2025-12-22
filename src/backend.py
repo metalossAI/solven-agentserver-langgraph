@@ -4,6 +4,7 @@ Implements the BackendProtocol for virtual filesystem operations.
 """
 import os
 import re
+import yaml
 from datetime import datetime
 from typing import Optional, Union
 from fnmatch import fnmatch
@@ -26,6 +27,7 @@ class S3Backend(BackendProtocol):
         access_key: S3 access key
         secret_key: S3 secret key
         region: AWS region (default: "us-east-1")
+        scope: Permission scope - 'read' (read-only) or 'write' (read+write). Default: 'write'
     """
     
     def __init__(
@@ -35,12 +37,46 @@ class S3Backend(BackendProtocol):
         endpoint_url: Optional[str] = None,
         access_key: Optional[str] = None,
         secret_key: Optional[str] = None,
-        region: str = "us-east-1"
+        region: str = "us-east-1",
+        scope: str = "write",
+        user_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        ticket_id: Optional[str] = None,
+        skills_prefix: Optional[str] = None
     ):
         self.bucket = bucket
         self.prefix = prefix.rstrip("/")
+        self.user_id = user_id
+        self.thread_id = thread_id
         
-        print(f"[S3Backend] Initialized with bucket='{bucket}', prefix='{self.prefix}'")
+        # Validate and set scope
+        if scope not in ['read', 'write']:
+            raise ValueError(f"Invalid scope '{scope}'. Must be 'read' or 'write'.")
+        self.scope = scope
+        
+        # Mount points: virtual path -> S3 prefix
+        self.mounts = {}
+
+        if ticket_id:
+            self.mounts["/solicitud"] = f"tickets/{ticket_id}"
+        
+        # Workspace mount - thread-specific for shared access
+        if thread_id:
+            self.mounts["/workspace"] = f"threads/{thread_id}"
+        elif user_id:
+            # Fallback to user workspace if no thread_id
+            self.mounts["/workspace"] = f"{self.prefix}/workspace" if self.prefix else f"{user_id}/workspace"
+        
+        # Skills mount - read-only user skills (user-specific)
+        if user_id:
+            if skills_prefix:
+                self.mounts["/skills"] = skills_prefix
+            else:
+                # Default: user_id/skills
+                self.mounts["/skills"] = f"{user_id}/skills"
+        
+        print(f"[S3Backend] Initialized with bucket='{bucket}', prefix='{self.prefix}', scope='{self.scope}'")
+        print(f"[S3Backend] Mounts: {self.mounts}")
         
         # Store S3 configuration for lazy client creation
         self._s3_endpoint = endpoint_url or os.getenv('S3_ENDPOINT_URL')
@@ -81,27 +117,74 @@ class S3Backend(BackendProtocol):
                 print(f"Warning: Could not create bucket {self.bucket}: {e}")
                 self._bucket_checked = True  # Don't keep retrying
     
-    def _key(self, path: str) -> str:
-        """Convert agent path to S3 key"""
-        # Remove leading slash from path
+    def _resolve_path(self, path: str) -> str:
+        """
+        Resolve a virtual path (e.g., /skills/foo or /workspace/bar) to a full S3 key.
+        Respects mount points defined in self.mounts.
+        """
+        for mount, s3_prefix in self.mounts.items():
+            if path.startswith(mount):
+                relative = path[len(mount):].lstrip("/")
+                resolved = f"{s3_prefix}/{relative}" if relative else s3_prefix
+                return resolved
+        
+        # Fallback: treat as workspace path if mounts exist
+        if "/workspace" in self.mounts:
+            relative = path.lstrip("/")
+            workspace_prefix = self.mounts["/workspace"]
+            return f"{workspace_prefix}/{relative}" if relative else workspace_prefix
+        
+        # No mounts: use legacy prefix behavior
         clean_path = path.lstrip("/")
         if self.prefix:
-            key = f"{self.prefix}/{clean_path}"
-            print(f"[S3Backend] _key: path='{path}' -> prefix='{self.prefix}' -> key='{key}'")
-            return key
-        print(f"[S3Backend] _key: path='{path}' -> key='{clean_path}' (no prefix)")
+            return f"{self.prefix}/{clean_path}"
         return clean_path
     
+    def _key(self, path: str) -> str:
+        """Map virtual path to actual S3 key respecting mounts."""
+        resolved = self._resolve_path(path)
+        print(f"[S3Backend] _key: path='{path}' -> resolved='{resolved}'")
+        return resolved
+    
     def _path_from_key(self, key: str) -> str:
-        """Convert S3 key back to path by removing prefix."""
+        """
+        Convert S3 key back to virtual path by checking mount points.
+        This reverses the _resolve_path operation.
+        """
+        # Check if key matches any mount point
+        for mount, s3_prefix in self.mounts.items():
+            if key.startswith(s3_prefix + "/"):
+                # Extract relative path and prepend mount point
+                relative = key[len(s3_prefix) + 1:]
+                return f"{mount}/{relative}"
+            elif key == s3_prefix:
+                # Exact match to mount point
+                return mount
+        
+        # Fallback: check if it's under workspace mount
+        if "/workspace" in self.mounts:
+            workspace_prefix = self.mounts["/workspace"]
+            if key.startswith(workspace_prefix + "/"):
+                relative = key[len(workspace_prefix) + 1:]
+                return f"/{relative}"
+            elif key == workspace_prefix:
+                return "/"
+        
+        # Legacy behavior: remove prefix
         if self.prefix and key.startswith(self.prefix + "/"):
-            return key[len(self.prefix) + 1:]
-        return key
+            return "/" + key[len(self.prefix) + 1:]
+        return "/" + key
     
     def _ensure_markdown_file(self, file_path: str) -> Optional[str]:
         """Ensure file path ends with .md extension. Returns error message if invalid, None if valid."""
         if not file_path.endswith('.md'):
             return f"Error: Only markdown (.md) files are allowed. File '{file_path}' is not a markdown file."
+        return None
+    
+    def _check_write_permission(self) -> Optional[str]:
+        """Check if write operations are allowed. Returns error message if not allowed, None if allowed."""
+        if self.scope == 'read':
+            return "Error: Write operations are not allowed in read-only mode."
         return None
     
     def _auto_add_md_extension(self, file_path: str) -> str:
@@ -129,26 +212,38 @@ class S3Backend(BackendProtocol):
         """
         List files and directories under the given path.
         Returns FileInfo entries sorted by path.
+        Includes virtual mount points when listing root.
         """
         self._ensure_bucket_exists()
         try:
+            result = []
+            
+            # If listing root and we have mounts, add mount points as virtual directories
+            if path == "/" and self.mounts:
+                for mount in self.mounts.keys():
+                    result.append({
+                        'path': mount,
+                        'is_dir': True,
+                        'size': 0,
+                        'modified_at': None
+                    })
+            
             prefix = self._key(path).rstrip("/")
             if prefix and not prefix.endswith("/"):
                 prefix += "/"
             
-            result = []
             paginator = self.s3_client.get_paginator('list_objects_v2')
             
             for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix, Delimiter='/'):
                 # Add directories (CommonPrefixes)
                 for common_prefix in page.get('CommonPrefixes', []):
                     dir_path = self._path_from_key(common_prefix['Prefix'].rstrip('/'))
-                    result.append(FileInfo(
-                        path=dir_path,
-                        is_dir=True,
-                        size=0,
-                        modified_at=None
-                    ))
+                    result.append({
+                        'path': dir_path,
+                        'is_dir': True,
+                        'size': 0,
+                        'modified_at': None
+                    })
                 
                 # Add files (only .md files, skip .editor.json)
                 for obj in page.get('Contents', []):
@@ -162,13 +257,13 @@ class S3Backend(BackendProtocol):
                     if not file_path.endswith('.md'):
                         continue
                     
-                    result.append(FileInfo(
-                        path=file_path,
-                        is_dir=False,
-                        size=obj['Size'],
-                        modified_at=obj['LastModified'].isoformat() if obj.get('LastModified') else None
-                    ))
-            result.sort(key=lambda x: x['path'] if isinstance(x, dict) else x.path)
+                    result.append({
+                        'path': file_path,
+                        'is_dir': False,
+                        'size': obj['Size'],
+                        'modified_at': obj['LastModified'].isoformat() if obj.get('LastModified') else None
+                    })
+            result.sort(key=lambda x: x['path'])
             return result
             
         except ClientError as e:
@@ -295,27 +390,46 @@ class S3Backend(BackendProtocol):
                     
                     # Apply glob pattern
                     if fnmatch(file_path, pattern) or fnmatch(os.path.basename(file_path), pattern):
-                        result.append(FileInfo(
-                            path=file_path,
-                            is_dir=False,
-                            size=obj['Size'],
-                            modified_at=obj['LastModified'].isoformat() if obj.get('LastModified') else None
-                        ))
+                        result.append({
+                            'path': file_path,
+                            'is_dir': False,
+                            'size': obj['Size'],
+                            'modified_at': obj['LastModified'].isoformat() if obj.get('LastModified') else None
+                        })
             
             # Sort by path
-            result.sort(key=lambda x: x.path)
+            result.sort(key=lambda x: x['path'])
             return result
             
         except ClientError as e:
             print(f"Error in glob_info: {e}")
             return []
-    
+
     def write(self, file_path: str, content: str) -> WriteResult:
         """
         Create a new file (create-only semantics).
         Returns WriteResult with error if file already exists.
         Only allows .md files.
+        Requires 'write' scope.
+        /skills is read-only.
         """
+        # Check if path is under /skills (read-only)
+        if file_path.startswith("/skills"):
+            return WriteResult(
+                error="Error: /skills is read-only. Cannot create files in skills directory.",
+                path=None,
+                files_update=None
+            )
+        
+        # Check write permission
+        perm_error = self._check_write_permission()
+        if perm_error:
+            return WriteResult(
+                error=perm_error,
+                path=None,
+                files_update=None
+            )
+        
         self._ensure_bucket_exists()
         
         # Auto-add .md extension if not present
@@ -332,8 +446,6 @@ class S3Backend(BackendProtocol):
         
         try:
             key = self._key(file_path)
-            
-            # Check if file already exists
             try:
                 self.s3_client.head_object(Bucket=self.bucket, Key=key)
                 return WriteResult(
@@ -383,7 +495,28 @@ class S3Backend(BackendProtocol):
         Edit an existing file by replacing old_string with new_string.
         Enforces uniqueness unless replace_all=True.
         Only allows .md files.
+        Requires 'write' scope.
+        /skills is read-only.
         """
+        # Check if path is under /skills (read-only)
+        if file_path.startswith("/skills"):
+            return EditResult(
+                error="Error: /skills is read-only. Cannot edit files in skills directory.",
+                path=None,
+                files_update=None,
+                occurrences=0
+            )
+        
+        # Check write permission
+        perm_error = self._check_write_permission()
+        if perm_error:
+            return EditResult(
+                error=perm_error,
+                path=None,
+                files_update=None,
+                occurrences=0
+            )
+        
         self._ensure_bucket_exists()
         
         # Auto-add .md extension if not present
@@ -469,6 +602,337 @@ class S3Backend(BackendProtocol):
                 files_update=None,
                 occurrences=0
             )
+    
+    async def load_skills(self, category: str = "all") -> list[str]:
+        """
+        Load available skills for the user from S3.
+        
+        Args:
+            category: Specific category to filter skills, or "all" for all categories
+        
+        Returns:
+            List of skill paths in format "category/skill_name"
+        """
+        if not self.user_id:
+            return []
+            
+        skills_prefix = f"{self.user_id}/skills/"
+        
+        try:
+            # List all objects under the skills prefix
+            response = self.s3_client.list_objects_v2(
+                Bucket=self.bucket,
+                Prefix=skills_prefix,
+                Delimiter='/'
+            )
+            
+            skills = []
+            
+            if category == "all":
+                # Get all categories (common prefixes)
+                if 'CommonPrefixes' in response:
+                    for prefix_info in response['CommonPrefixes']:
+                        category_prefix = prefix_info['Prefix']
+                        # List skills in this category
+                        category_response = self.s3_client.list_objects_v2(
+                            Bucket=self.bucket,
+                            Prefix=category_prefix,
+                            Delimiter='/'
+                        )
+                        
+                        if 'CommonPrefixes' in category_response:
+                            for skill_prefix in category_response['CommonPrefixes']:
+                                # Extract category/skill_name from full path
+                                skill_path = skill_prefix['Prefix'].replace(skills_prefix, '').rstrip('/')
+                                skills.append(skill_path)
+            else:
+                # Get skills from specific category
+                category_prefix = f"{skills_prefix}{category}/"
+                category_response = self.s3_client.list_objects_v2(
+                    Bucket=self.bucket,
+                    Prefix=category_prefix,
+                    Delimiter='/'
+                )
+                
+                if 'CommonPrefixes' in category_response:
+                    for skill_prefix in category_response['CommonPrefixes']:
+                        skill_path = skill_prefix['Prefix'].replace(skills_prefix, '').rstrip('/')
+                        skills.append(skill_path)
+            
+            return skills
+            
+        except ClientError as e:
+            print(f"Error loading skills: {e}")
+            return []
+    
+    def _parse_skill_frontmatter(self, content: str) -> dict:
+        """
+        Parse YAML frontmatter from skill content.
+        
+        Args:
+            content: Full content of SKILL.md file
+            
+        Returns:
+            Dictionary with 'name' and 'description' from frontmatter, or empty dict if not found
+        """
+        try:
+            # Check if content starts with ---
+            if not content.startswith('---'):
+                return {}
+            
+            # Find the closing ---
+            end_idx = content.find('---', 3)
+            if end_idx == -1:
+                return {}
+            
+            # Extract and parse YAML
+            frontmatter = content[3:end_idx].strip()
+            metadata = yaml.safe_load(frontmatter)
+            
+            return {
+                'name': metadata.get('name', ''),
+                'description': metadata.get('description', '')
+            }
+        except Exception as e:
+            print(f"Error parsing frontmatter: {e}")
+            return {}
+    
+    async def load_skills_frontmatter(self, category: Optional[str] = None) -> str:
+        """
+        Load all skills frontmatter as concatenated YAML blocks.
+        Returns the raw frontmatter from each SKILL.md file concatenated together.
+        
+        Args:
+            category: Optional category to filter skills (e.g., 'escrituras'). 
+                      If provided, only returns frontmatter from that category.
+        
+        Returns:
+            Concatenated YAML frontmatter blocks from all skills, each wrapped in ---
+        """
+        if not self.user_id:
+            return ""
+            
+        skills_prefix = f"{self.user_id}/skills/"
+        frontmatter_blocks = []
+        
+        try:
+            # If category is specified, only list that category
+            if category:
+                category_prefix = f"{skills_prefix}{category}/"
+                
+                # List skills in this specific category
+                category_response = self.s3_client.list_objects_v2(
+                    Bucket=self.bucket,
+                    Prefix=category_prefix,
+                    Delimiter='/'
+                )
+                
+                if 'CommonPrefixes' not in category_response:
+                    return ""
+                
+                for skill_prefix in category_response['CommonPrefixes']:
+                    # Try to load SKILL.md and extract frontmatter
+                    skill_file_key = f"{skill_prefix['Prefix']}SKILL.md"
+                    try:
+                        response = self.s3_client.get_object(Bucket=self.bucket, Key=skill_file_key)
+                        content = response['Body'].read().decode('utf-8')
+                        
+                        # Extract frontmatter using the utility function
+                        from src.utils import parse_skillmd_frontmatter
+                        frontmatter = parse_skillmd_frontmatter(content)
+                        
+                        if frontmatter:
+                            frontmatter_blocks.append(f"---\n{frontmatter}\n---")
+                    except Exception as e:
+                        # Skip skills that can't be read
+                        continue
+                
+                return "\n".join(frontmatter_blocks)
+            
+            # Otherwise, list all categories
+            response = self.s3_client.list_objects_v2(
+                Bucket=self.bucket,
+                Prefix=skills_prefix,
+                Delimiter='/'
+            )
+            
+            if 'CommonPrefixes' not in response:
+                return ""
+            
+            for prefix_info in response['CommonPrefixes']:
+                category_prefix = prefix_info['Prefix']
+                
+                # List skills in this category
+                category_response = self.s3_client.list_objects_v2(
+                    Bucket=self.bucket,
+                    Prefix=category_prefix,
+                    Delimiter='/'
+                )
+                
+                if 'CommonPrefixes' in category_response:
+                    for skill_prefix in category_response['CommonPrefixes']:
+                        # Try to load SKILL.md and extract frontmatter
+                        skill_file_key = f"{skill_prefix['Prefix']}SKILL.md"
+                        try:
+                            response = self.s3_client.get_object(Bucket=self.bucket, Key=skill_file_key)
+                            content = response['Body'].read().decode('utf-8')
+                            
+                            # Extract frontmatter using the utility function
+                            from src.utils import parse_skillmd_frontmatter
+                            frontmatter = parse_skillmd_frontmatter(content)
+                            
+                            if frontmatter:
+                                frontmatter_blocks.append(f"---\n{frontmatter}\n---")
+                        except Exception as e:
+                            # Skip skills that can't be read
+                            continue
+            
+            return "\n".join(frontmatter_blocks)
+            
+        except ClientError as e:
+            print(f"Error loading skills frontmatter: {e}")
+            return ""
+    
+    async def load_all_skills_formatted(self, category: Optional[str] = None) -> str:
+        """
+        Load all skills organized by categories and subcategories in a formatted string.
+        Reads SKILL.md frontmatter to extract name and description for each skill.
+        
+        Args:
+            category: Optional category to filter skills (e.g., 'escrituras'). 
+                      If provided, only shows skills from that category.
+        
+        Returns:
+            Formatted string with skills organized by category, including descriptions
+        """
+        if not self.user_id:
+            return "No user ID available"
+            
+        skills_prefix = f"{self.user_id}/skills/"
+        
+        try:
+            # If category is specified, only list that category
+            if category:
+                category_prefix = f"{skills_prefix}{category}/"
+                
+                # List skills in this specific category
+                category_response = self.s3_client.list_objects_v2(
+                    Bucket=self.bucket,
+                    Prefix=category_prefix,
+                    Delimiter='/'
+                )
+                
+                if 'CommonPrefixes' not in category_response:
+                    return f"No skills found in category '{category}'"
+                
+                result = f"Habilidades disponibles en **{category.upper()}**:\n\n"
+                
+                for skill_prefix in category_response['CommonPrefixes']:
+                    skill_path = skill_prefix['Prefix'].replace(skills_prefix, '').rstrip('/')
+                    skill_name = skill_path.split('/')[-1]
+                    
+                    # Try to load SKILL.md and parse frontmatter
+                    skill_file_key = f"{skill_prefix['Prefix']}SKILL.md"
+                    try:
+                        response = self.s3_client.get_object(Bucket=self.bucket, Key=skill_file_key)
+                        content = response['Body'].read().decode('utf-8')
+                        metadata = self._parse_skill_frontmatter(content)
+                        
+                        if metadata.get('description'):
+                            result += f"   └─ **{skill_name}** (`{skill_path}`)\n"
+                            result += f"      {metadata['description']}\n\n"
+                        else:
+                            result += f"   └─ {skill_name} (`{skill_path}`)\n"
+                    except Exception as e:
+                        # If we can't read the file, just show the skill name
+                        result += f"   └─ {skill_name} (`{skill_path}`)\n"
+                
+                result += "\n💡 Para cargar una habilidad, usa: `load_skill('categoria/nombre_habilidad')`"
+                return result
+            
+            # Otherwise, list all categories
+            response = self.s3_client.list_objects_v2(
+                Bucket=self.bucket,
+                Prefix=skills_prefix,
+                Delimiter='/'
+            )
+            
+            if 'CommonPrefixes' not in response:
+                return "No skills found"
+            
+            result = "Habilidades disponibles:\n\n"
+            
+            for prefix_info in response['CommonPrefixes']:
+                category_prefix = prefix_info['Prefix']
+                category_name = category_prefix.replace(skills_prefix, '').rstrip('/')
+                
+                # List skills in this category
+                category_response = self.s3_client.list_objects_v2(
+                    Bucket=self.bucket,
+                    Prefix=category_prefix,
+                    Delimiter='/'
+                )
+                
+                if 'CommonPrefixes' in category_response:
+                    result += f"**{category_name.upper()}**\n"
+                    
+                    for skill_prefix in category_response['CommonPrefixes']:
+                        skill_path = skill_prefix['Prefix'].replace(skills_prefix, '').rstrip('/')
+                        skill_name = skill_path.split('/')[-1]
+                        
+                        # Try to load SKILL.md and parse frontmatter
+                        skill_file_key = f"{skill_prefix['Prefix']}SKILL.md"
+                        try:
+                            response = self.s3_client.get_object(Bucket=self.bucket, Key=skill_file_key)
+                            content = response['Body'].read().decode('utf-8')
+                            metadata = self._parse_skill_frontmatter(content)
+                            
+                            if metadata.get('description'):
+                                result += f"   └─ **{skill_name}** (`{skill_path}`)\n"
+                                result += f"      {metadata['description']}\n\n"
+                            else:
+                                result += f"   └─ {skill_name} (`{skill_path}`)\n"
+                        except Exception as e:
+                            # If we can't read the file, just show the skill name
+                            result += f"   └─ {skill_name} (`{skill_path}`)\n"
+                    
+                    result += "\n"
+            
+            result += "\nPara cargar una habilidad, usa: `load_skill('categoria/nombre_habilidad')`"
+            return result
+            
+        except ClientError as e:
+            print(f"Error loading skills: {e}")
+            return f"Error al cargar habilidades: {str(e)}"
+    
+    async def load_skill_content(self, skill_path: str) -> Optional[str]:
+        """
+        Load the SKILL.md content for a specific skill.
+        
+        Args:
+            skill_path: Skill path in format "category/skill_name"
+        
+        Returns:
+            Content of SKILL.md file or None if not found
+        """
+        if not self.user_id:
+            return None
+            
+        skill_md_path = f"{self.user_id}/skills/{skill_path}/SKILL.md"
+        
+        try:
+            response = self.s3_client.get_object(
+                Bucket=self.bucket,
+                Key=skill_md_path
+            )
+            content = response['Body'].read().decode('utf-8')
+            return content
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'NoSuchKey':
+                print(f"SKILL.md not found at {skill_md_path}")
+            else:
+                print(f"Error loading skill content: {e}")
+            return None
 
 
 def create_s3_backend(
@@ -527,27 +991,43 @@ def get_s3_backend_from_env() -> S3Backend:
         region=os.getenv('S3_REGION', 'us-east-1')
     )
 
-
-async def get_user_s3_backend(user_id: str, conversation_id: Optional[str] = None) -> S3Backend:
-    """
-    Create S3Backend scoped to a specific user and optionally a conversation.
-    Files will be stored in: scriba/{user_id}/{conversation_id}/files/
-    
-    Args:
-        user_id: User ID to scope the backend to
-        conversation_id: Optional conversation ID for further scoping
-    
-    Returns:
-        S3Backend instance with appropriate prefix
-    """
-
-    prefix = f"{user_id}/conversations/{conversation_id}" if conversation_id and conversation_id != "" else f"{user_id}"
-    
+def get_user_backend_sync(user_id: str, conversation_id: Optional[str] = None, scope: str = "write") -> S3Backend:
     return S3Backend(
         bucket=os.getenv('S3_BUCKET', 'scriba'),
-        prefix=prefix,
+        prefix=user_id,
         endpoint_url=os.getenv('S3_ENDPOINT_URL'),
         access_key=os.getenv('S3_ACCESS_KEY'),
         secret_key=os.getenv('S3_SECRET_KEY'),
-        region=os.getenv('S3_REGION', 'us-east-1')
+        region=os.getenv('S3_REGION', 'us-east-1'),
+        scope=scope,
+        user_id=user_id,
+        conversation_id=conversation_id
+    )
+
+async def get_user_s3_backend(user_id: str, thread_id: Optional[str] = None, scope: str = "write") -> S3Backend:
+    """
+    Create S3Backend scoped to a specific user and optionally a thread.
+    Exposes /workspace for thread files (shared) and /skills for user skills (read-only).
+    
+    Args:
+        user_id: User ID for skills access
+        thread_id: Optional thread ID for shared workspace scoping
+        scope: Permission scope - 'read' (read-only) or 'write' (read+write). Default: 'write'
+    
+    Returns:
+        S3Backend instance with appropriate prefix, scope, and mount points
+        - /workspace -> threads/{thread_id} (shared across users)
+        - /skills -> {user_id}/skills (user-specific, read-only)
+    """
+    
+    return S3Backend(
+        bucket=os.getenv('S3_BUCKET', 'scriba'),
+        prefix="",  # No user prefix for shared threads
+        endpoint_url=os.getenv('S3_ENDPOINT_URL'),
+        access_key=os.getenv('S3_ACCESS_KEY'),
+        secret_key=os.getenv('S3_SECRET_KEY'),
+        region=os.getenv('S3_REGION', 'us-east-1'),
+        scope=scope,
+        user_id=user_id,
+        thread_id=thread_id
     )

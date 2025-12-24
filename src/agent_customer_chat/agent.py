@@ -1,46 +1,21 @@
-import os
-import json
-import asyncio
-from datetime import datetime
 from dotenv import load_dotenv
-from numpy import tri
 load_dotenv()
  
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import Command, interrupt
-from langgraph.graph import MessagesState
+from langgraph.types import Command
 from langgraph.graph import StateGraph
 from langgraph.runtime import Runtime
 from langgraph.store.base import BaseStore
-from langgraph.graph.ui import push_ui_message
-
 from langgraph.graph.state import RunnableConfig
 
-from collections.abc import Callable, Sequence
-from typing import Any, Optional, List, TypedDict
-
 from langchain.agents import create_agent
-from langchain.agents.middleware.context_editing import ContextEditingMiddleware, ClearToolUsesEdit
-from langchain.agents.middleware.summarization import SummarizationMiddleware
-from langchain.agents.middleware import InterruptOnConfig, TodoListMiddleware
 
-from deepagents import create_deep_agent
-from deepagents.middleware import FilesystemMiddleware
-from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
-from deepagents.middleware.subagents import SubAgent, SubAgentMiddleware
 from src.backend import get_user_s3_backend
 
 from src.llm import LLM
 from src.embeddings import embeddings
 
 from src.models import Thread, AppContext, SolvenState, User
-from src.agent.prompt import generate_prompt_template
-from src.agent_elasticsearch.agent import doc_search_agent
-from src.agent_email.agent import generate_gmail_subagent, generate_outlook_subagent
-from src.agent_email.tools import get_composio_outlook_tools
-from src.agent_catastro.agent import subagent as catastro_subagent
-from src.agent_escrituras_skilled.agent import generate_escrituras_agent
-from src.agent_escrituras_skilled.tools import list_skills, load_skill
+from src.agent_customer_chat.tools import listar_solicitudes_cliente, crear_solicitud, actualizar_solicitud
 
 async def build_context(
 	state : SolvenState,
@@ -83,8 +58,12 @@ async def run_agent(
 
 	agent = create_agent(
         model=LLM,
+		tools=[
+			listar_solicitudes_cliente,
+			crear_solicitud,
+			actualizar_solicitud,
+		],
         middleware=[
-            SkillsMiddleware()
         ]
     )
 

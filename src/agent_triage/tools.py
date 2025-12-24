@@ -9,40 +9,35 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SECRET_KEY")
 
 @tool
-async def crear_ticket(titulo: str, description: str, runtime: ToolRuntime) -> str:
+async def crear_ticket(titulo: str, descripcion: str, correo_cliente: str, runtime: ToolRuntime) -> str:
     """
-    Crea un ticket con titulo y descripción.
+    Crea un ticket con titulo, descripción y email del cliente.
 
     Args:
     - titulo: titulo del ticket
-    - description: descripción detallada del ticket
+    - descripcion: descripción detallada del ticket
+    - correo_cliente: email del cliente que envió la solicitud
     """
     try:
         company_id = runtime.context.tenant_id
         user_id = runtime.context.user_id
-        
-        print(f"[crear_ticket] Company ID: {company_id}", flush=True)
-        print(f"[crear_ticket] User ID: {user_id}", flush=True)
-        print(f"[crear_ticket] Title: {titulo}", flush=True)
-        
         if not company_id:
-            print(f"[crear_ticket] ERROR: No company_id", flush=True)
             return "Error: No se encontró el ID de la compañía"
         
         if not user_id:
-            print(f"[crear_ticket] ERROR: No user_id", flush=True)
             return "Error: No se encontró el ID del usuario"
         
         supabase = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-        print(f"[crear_ticket] Supabase client created", flush=True)
         
         # Create ticket in database
         ticket_data = {
             "company_id": company_id,
+            "customer_email": correo_cliente,  # Email from the incoming email
+            "channel": "email",  # Ticket created via email triage
             "assigned_to": user_id,
             "assigned_by": "AI",
             "title": titulo,
-            "description": description,
+            "description": descripcion,
             "status": "open",
             "related_threads": [],
         }
@@ -58,9 +53,9 @@ async def crear_ticket(titulo: str, description: str, runtime: ToolRuntime) -> s
         ticket = ticket_response.data[0]
         ticket_id = ticket["id"]
         
-        print(f"[crear_ticket] SUCCESS: Ticket created with ID {ticket_id}", flush=True)
+        print(f"[crear_ticket] SUCCESS: Ticket created with ID {ticket_id} for customer {correo_cliente}", flush=True)
         
-        return f"Ticket creado con id {ticket_id} asignado al usuario {user_id}"
+        return f"Ticket creado con id {ticket_id} para el cliente {correo_cliente}, asignado al usuario {user_id}"
     except Exception as e:
         print(f"Error creating ticket: {str(e)}", flush=True)
         return f"Error al crear ticket: {str(e)}"
@@ -74,7 +69,6 @@ async def patch_ticket(ticket_id: str, status: str, rejection_reason: str = None
     - ticket_id: ID del ticket a actualizar
     - status: nuevo estado del ticket ('open' o 'closed')
     - rejection_reason: razón del rechazo (opcional, requerido si se rechaza)
-    - runtime: contexto de ejecución con configuración del usuario
     """
     try:
         supabase = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -125,7 +119,6 @@ async def listar_tickets(status: str = None, runtime: ToolRuntime = None) -> str
 
     Args:
     - status: filtro opcional por estado ('open' o 'closed')
-    - runtime: contexto de ejecución con configuración del usuario
     """
     try:
         company_id = runtime.context.tenant_id

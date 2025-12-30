@@ -1,27 +1,6 @@
-from pydantic import BaseModel
+from langgraph.graph import MessagesState
+from typing import Optional
+from src.models import Ticket
 
-class CalendarEvent(BaseModel):
-    id: str
-    company_id: str
-    created_by: str
-    title: str
-    description: Optional[str] = None
-    start_date: str
-    end_date: str
-    location: Optional[str] = None
-    attendees: List[str] = []
-    color: str = '#3b82f6'
-    all_day: bool = False
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
-
-
-class CalendarEventCreate(BaseModel):
-    title: str
-    description: Optional[str] = None
-    start_date: str
-    end_date: str
-    location: Optional[str] = None
-    attendees: List[str] = []
-    color: str = '#3b82f6'
-    all_day: bool = False
+class CustomerChatState(MessagesState):
+    ticket : Optional[Ticket] = None # the upstandig ticket context which will serve as link wiht for customer communications

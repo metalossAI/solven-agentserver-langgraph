@@ -28,7 +28,7 @@ class AppContext(BaseModel):
     
     thread: Optional[Thread] = None
     user: Optional[User] = None
-    tenant_id: Optional[str] = None
+    company_id: Optional[str] = None
     backend : Optional[Any] = None  # S3Backend - using Any to avoid schema issues
     ticket: Optional['Ticket'] = None # the upstandig ticket context which will serve as link wiht for customer communications
 

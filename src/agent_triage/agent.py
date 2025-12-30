@@ -28,7 +28,6 @@ from src.agent_triage.models import InputTriageState, OutputTriageState, TriageS
 from src.agent_triage.tools import crear_ticket, patch_ticket, listar_tickets    
 
 from src.agent_triage.prompt import main_prompt
-from src.agent_elasticsearch.agent import doc_search_agent
 
 from src.agent_email.tools import get_composio_outlook_tools, get_composio_gmail_tools
 
@@ -41,7 +40,7 @@ async def run_agent(
 ):
 	
 	user_id = context.user_id
-	tenant_id = context.tenant_id
+	company_id = context.company_id
 
 	gmail_tools = get_composio_gmail_tools(user_id, "tickets")
 	outlook_tools = get_composio_outlook_tools(user_id, "tickets")

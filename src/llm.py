@@ -48,6 +48,8 @@ groq_qwen = ChatGroq(
 	}
 )
 
+LLM_SKILL_MATCHING = xai_grok_4_fast
+
 LLM_SO = xai_grok_4_fast_SO
 
 LLM = xai_grok_4_fast

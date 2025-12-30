@@ -19,7 +19,7 @@ async def crear_ticket(titulo: str, descripcion: str, correo_cliente: str, runti
     - correo_cliente: email del cliente que envió la solicitud
     """
     try:
-        company_id = runtime.context.tenant_id
+        company_id = runtime.context.company_id
         user_id = runtime.context.user_id
         if not company_id:
             return "Error: No se encontró el ID de la compañía"
@@ -76,7 +76,7 @@ async def patch_ticket(ticket_id: str, status: str, rejection_reason: str = None
         if status not in ["open", "closed"]:
             return f"Estado inválido: {status}. Debe ser 'open' o 'closed'"
         
-        company_id = runtime.context.tenant_id
+        company_id = runtime.context.company_id
         
         if not company_id:
             return "Error: Usuario sin compañía asignada"
@@ -121,7 +121,7 @@ async def listar_tickets(status: str = None, runtime: ToolRuntime = None) -> str
     - status: filtro opcional por estado ('open' o 'closed')
     """
     try:
-        company_id = runtime.context.tenant_id
+        company_id = runtime.context.company_id
         supabase = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
         
         if not company_id:

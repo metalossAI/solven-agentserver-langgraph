@@ -7,7 +7,7 @@ from langgraph.graph import MessagesState
 @dataclass
 class TriageContext:
     user_id: str
-    tenant_id : str
+    company_id : str
 
 class Ticket(BaseModel):
     id: str

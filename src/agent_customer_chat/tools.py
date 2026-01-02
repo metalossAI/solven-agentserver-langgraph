@@ -1,4 +1,5 @@
 from langchain.tools import tool, ToolRuntime
+from langgraph.types import interrupt
 import uuid
 from datetime import datetime
 import os
@@ -157,6 +158,59 @@ async def actualizar_solicitud(ticket_id: str, nuevo_estado: str, runtime: ToolR
         return f"Error al actualizar solicitud: {str(e)}"
 
 
+
+
+@tool
+async def solicitar_archivo(tipo_documento: str, descripcion: str, runtime: ToolRuntime):
+    """
+    Solicita al cliente que suba un archivo específico necesario para procesar su solicitud.
+    Este tool pausa la ejecución hasta que el cliente suba el archivo solicitado.
+    
+    Args:
+        tipo_documento: Tipo de documento requerido (ej: "DNI", "pasaporte", "escritura", "contrato")
+        descripcion: Descripción clara de qué archivo se necesita y para qué se usará
+    
+    Returns:
+        Información del archivo subido: nombre, tamaño, tipo, y ruta en S3
+    """
+    user_id = runtime.context.user.id
+    thread_id = runtime.context.thread.id
+    
+    if not user_id:
+        return "Error: No se encontró el ID del usuario"
+    
+    if not thread_id:
+        return "Error: No se encontró el ID del hilo de conversación"
+    
+    # Create interrupt payload to request file upload
+    interrupt_payload = {
+        "action": "file_upload_request",
+        "tipo_documento": tipo_documento,
+        "descripcion": descripcion,
+        "thread_id": thread_id,
+        "user_id": user_id,
+    }
+    
+    # Interrupt execution and wait for file upload
+    # interrupt() raises an exception that LangGraph catches - it doesn't return normally
+    # When resumed, the value passed to resume will be available here
+    uploaded_file_info = interrupt(interrupt_payload)
+    
+    # When resumed, uploaded_file_info will contain the file information
+    if isinstance(uploaded_file_info, dict):
+        filename = uploaded_file_info.get("filename", "archivo")
+        s3_key = uploaded_file_info.get("s3_key", "")
+        file_size = uploaded_file_info.get("size", 0)
+        content_type = uploaded_file_info.get("content_type", "")
+        
+        return f"✅ Archivo recibido exitosamente:\n\n" \
+               f"Tipo: {tipo_documento}\n" \
+               f"Nombre: {filename}\n" \
+               f"Tamaño: {file_size} bytes\n" \
+               f"Ubicación: {s3_key}\n\n" \
+               f"Procederé a analizar el documento."
+    else:
+        return f"Error: Información de archivo inválida recibida"
 
 
 # @tool

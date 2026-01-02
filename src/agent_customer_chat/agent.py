@@ -15,7 +15,7 @@ from src.llm import LLM
 from src.embeddings import embeddings
 
 from src.models import Thread, AppContext, SolvenState, User
-from src.agent_customer_chat.tools import listar_solicitudes_cliente, crear_solicitud, actualizar_solicitud
+from src.agent_customer_chat.tools import listar_solicitudes_cliente, crear_solicitud, actualizar_solicitud, solicitar_archivo
 
 async def build_context(
 	state : SolvenState,
@@ -62,6 +62,7 @@ async def run_agent(
 			listar_solicitudes_cliente,
 			crear_solicitud,
 			actualizar_solicitud,
+			solicitar_archivo,
 		],
         middleware=[
         ]

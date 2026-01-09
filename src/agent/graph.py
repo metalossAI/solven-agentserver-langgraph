@@ -1,4 +1,6 @@
 from dotenv import load_dotenv
+
+from src.sandbox_backend import SandboxBackend
 load_dotenv()
  
 from langgraph.types import Command
@@ -11,8 +13,9 @@ from deepagents import create_deep_agent
 from src.backend import get_user_s3_backend, S3Backend
 
 from src.llm import LLM as llm
-
 from src.models import Thread, AppContext, SolvenState, User
+
+from src.agent.prompt import generate_prompt_template
 
 from src.agent_email.agent import generate_gmail_subagent, generate_outlook_subagent
 from src.agent_catastro.agent import subagent as catastro_subagent
@@ -34,14 +37,7 @@ async def build_context(
 		runtime.context.ticket = await get_ticket(ticket_id)
 	else:
 		runtime.context.ticket = None
-	
-	# Initialize backend with ticket_id for mounting ticket files
-	runtime.context.backend = await get_user_s3_backend(
-		user_data.get("id"),
-		config.get("metadata").get("thread_id"),
-		ticket_id=ticket_id,
-		scope="write"
-	)
+
 	runtime.context.user = User(
 		id=user_data.get("id"),
 		name=user_data.get("name"),
@@ -56,6 +52,8 @@ async def build_context(
 		description=config.get("metadata").get("description"),
 	)
 
+	runtime.context.backend = SandboxBackend(runtime.context)
+
 	return Command(
 		goto="run_agent",
 	)
@@ -66,14 +64,12 @@ async def run_agent(
 	runtime :  Runtime[AppContext],
 	store : BaseStore
 ):
-	# Generate system prompt with skills frontmatter loaded directly from backend
-	from src.agent.prompt import generate_prompt_template
 	
 	# Load skills frontmatter directly from backend
-	backend: S3Backend = runtime.context.backend
+	backend: SandboxBackend = runtime.context.backend
 	skills_frontmatter = await backend.load_skills_frontmatter()
 	
-	main_prompt = generate_prompt_template(
+	main_prompt = await generate_prompt_template(
 		name=runtime.context.user.name,
 		profile=f"email: {runtime.context.user.email} | role: {runtime.context.user.role}",
 		language="español",

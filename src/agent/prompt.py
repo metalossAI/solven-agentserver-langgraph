@@ -1,6 +1,6 @@
 from datetime import datetime
 from dotenv import load_dotenv
-from langsmith import Client
+from langsmith import AsyncClient
 from langchain_core.prompts import ChatPromptTemplate
 
 load_dotenv()
@@ -33,7 +33,7 @@ def get_prompt_variables(name: str, profile: str, language: str = "español", co
         "initial_context_description": context_description or "Conversación general",
     }
 
-def generate_prompt_template(
+async def generate_prompt_template(
 	name: str, 
 	profile: str, 
 	language: str = "español", 
@@ -57,16 +57,16 @@ def generate_prompt_template(
 		Formatted system prompt string
 	"""
 	# Load prompt template from LangSmith
-	client = Client()
-	base_prompt: ChatPromptTemplate = client.pull_prompt("solven-main-skills")
+	client = AsyncClient()
+	base_prompt: ChatPromptTemplate = await client.pull_prompt("solven-main-skills")
 	
 	base_prompt = base_prompt.format(
         date=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         name=name,
-        profile=profile,
+        profile=profile,  
         language=language,
         context_title=context_title,
         context_description=context_description,
-        skills=skills
+        skills=skills,
     )
 	return base_prompt

@@ -42,8 +42,9 @@ async def run_agent(
 	user_id = context.user_id
 	company_id = context.company_id
 
-	gmail_tools = get_composio_gmail_tools(user_id, "tickets")
-	outlook_tools = get_composio_outlook_tools(user_id, "tickets")
+	import asyncio
+	gmail_tools = await asyncio.to_thread(get_composio_gmail_tools, user_id, "tickets")
+	outlook_tools = await asyncio.to_thread(get_composio_outlook_tools, user_id, "tickets")
 
 	main_agent = create_agent(
 		model=llm,

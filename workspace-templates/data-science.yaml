@@ -1,0 +1,76 @@
+# Data Science Workspace Template
+# Heavy-duty environment for data analysis and machine learning
+
+version: "1.0"
+name: "data-science"
+description: "Advanced data science stack with ML/AI libraries"
+
+python:
+  version: "3.12"
+  dependencies:
+    # Core data science
+    - "pandas>=2.1.0"
+    - "numpy>=1.26.0"
+    - "scipy>=1.11.0"
+    
+    # Visualization
+    - "matplotlib>=3.8.0"
+    - "seaborn>=0.13.0"
+    - "plotly>=5.18.0"
+    
+    # Machine Learning
+    - "scikit-learn>=1.3.0"
+    - "xgboost>=2.0.0"
+    
+    # Statistics
+    - "statsmodels>=0.14.0"
+    
+    # Image processing
+    - "pillow>=10.0.0"
+    - "opencv-python>=4.8.0"
+    
+    # File formats
+    - "openpyxl>=3.1.0"
+    - "pyarrow>=14.0.0"  # Parquet
+    - "h5py>=3.10.0"  # HDF5
+    
+    # HTTP & APIs
+    - "requests>=2.31.0"
+    - "httpx>=0.25.0"
+    
+    # Utilities
+    - "python-dotenv>=1.0.0"
+    - "pydantic>=2.5.0"
+    - "python-dateutil>=2.8.0"
+    - "tqdm>=4.66.0"  # Progress bars
+
+nodejs:
+  version: "20"
+  runtime: "bun"
+  dependencies:
+    "docx": "^8.5.0"
+    "axios": "^1.6.0"
+    "dotenv": "^16.3.0"
+    "xlsx": "^0.18.5"
+    "csv-parse": "^5.5.0"
+
+system:
+  shell: "/bin/bash"
+  env:
+    MPLBACKEND: "Agg"
+    PYTHONUNBUFFERED: "1"
+    PYTHONDONTWRITEBYTECODE: "1"
+    OMP_NUM_THREADS: "4"  # OpenMP threads
+    OPENBLAS_NUM_THREADS: "4"
+
+security:
+  network_enabled: true
+  filesystem:
+    readonly: ["/usr", "/lib", "/lib64", "/bin", "/sbin"]
+    writable: ["/", "/tmp", "/.cache"]
+  limits:
+    max_disk: "2GB"  # More space for datasets
+    max_memory: "1GB"
+    max_cpu_time: "120s"  # Longer for ML training
+    max_processes: 20
+

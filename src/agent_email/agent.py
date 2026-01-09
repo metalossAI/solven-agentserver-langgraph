@@ -36,7 +36,12 @@ from src.agent_email.prompt import generate_email_prompt_template
 from src.agent_email.tools import get_composio_gmail_tools, get_composio_outlook_tools
 
 async def generate_outlook_subagent(runtime: Runtime[AppContext]):
-	outlook_tools = get_composio_outlook_tools(runtime.context.user.id, runtime.context.thread.id)
+	import asyncio
+	outlook_tools = await asyncio.to_thread(
+		get_composio_outlook_tools,
+		runtime.context.user.id,
+		runtime.context.thread.id
+	)
 	outlook_subagent = SubAgent(
 		name="asistente_outlook",
 		description="agente para gestionar correo de outlook - listar, leer y enviar correos electrónicos",
@@ -48,8 +53,12 @@ async def generate_outlook_subagent(runtime: Runtime[AppContext]):
 	return outlook_subagent
 
 async def generate_gmail_subagent(runtime: Runtime[AppContext]):
-
-	gmail_tools = get_composio_gmail_tools(runtime.context.user.id, runtime.context.thread.id)
+	import asyncio
+	gmail_tools = await asyncio.to_thread(
+		get_composio_gmail_tools, 
+		runtime.context.user.id, 
+		runtime.context.thread.id
+	)
 
 	gmail_agent = SubAgent(
 		name="asistente_gmail",

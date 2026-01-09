@@ -3,8 +3,7 @@ from langchain_core.messages import ToolMessage
 from langchain.tools import ToolRuntime
 from langgraph.types import Command
 from src.models import AppContext
-from src.backend import S3Backend
-
+from src.sandbox_backend import SandboxBackend
 @tool
 async def cargar_habilidad(runtime: ToolRuntime[AppContext], nombre_habilidad: str) -> Command:
 	"""Carga una habilidad específica. Util para ejecutar tareas especializadas donde el uso de herramientas convencionales no es suficiente.
@@ -13,7 +12,7 @@ async def cargar_habilidad(runtime: ToolRuntime[AppContext], nombre_habilidad: s
 	Args:
 		nombre_habilidad: Nombre de la habilidad a cargar (p. ej., 'compraventa-de-viviendas')
 	"""
-	backend: S3Backend = runtime.context.backend
+	backend: SandboxBackend = runtime.context.backend
 	if not backend:
 		return Command(
 			update={
@@ -25,7 +24,7 @@ async def cargar_habilidad(runtime: ToolRuntime[AppContext], nombre_habilidad: s
 		)
 	
 	# Load the skill content using backend method
-	content = await backend.load_skill_content(nombre_habilidad)
+	content = await backend.get_skill_content(nombre_habilidad)
 	
 	if not content:
 		return Command(
@@ -38,7 +37,7 @@ async def cargar_habilidad(runtime: ToolRuntime[AppContext], nombre_habilidad: s
 		)
 	
 	# Register skill with backend to make it accessible in /skills virtual path
-	backend.load_skill(nombre_habilidad)
+	await backend.load_skills([nombre_habilidad])
 	
 	# Return Command with ToolMessage containing the full SKILL.md content
 	return Command(

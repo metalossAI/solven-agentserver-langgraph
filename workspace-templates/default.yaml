@@ -1,0 +1,94 @@
+# Default Workspace Template
+# Production-ready environment for general-purpose AI agents
+
+version: "1.0"
+name: "default"
+description: "Standard Python + Node.js workspace with common packages"
+
+python:
+  version: "3.12"
+  # Essential packages pre-installed for fast agent execution
+  dependencies:
+    # Data manipulation & analysis
+    - "pandas>=2.1.0"
+    - "numpy>=1.26.0"
+    
+    # Visualization
+    - "matplotlib>=3.8.0"
+    - "seaborn>=0.13.0"
+    
+    # Image processing
+    - "pillow>=10.0.0"
+    
+    # HTTP & APIs
+    - "requests>=2.31.0"
+    - "httpx>=0.25.0"
+    
+    # File formats
+    - "openpyxl>=3.1.0"  # Excel
+    - "python-docx>=1.1.0"  # Word documents
+    - "PyPDF2>=3.0.0"  # PDF
+    
+    # Environment & utilities
+    - "python-dotenv>=1.0.0"
+    - "pydantic>=2.5.0"
+    
+    # Date/time
+    - "python-dateutil>=2.8.0"
+
+nodejs:
+  version: "20"
+  runtime: "bun"
+  # Essential packages for agent execution
+  dependencies:
+    # Document creation
+    "docx": "^8.5.0"
+    
+    # HTTP & APIs
+    "axios": "^1.6.0"
+    
+    # Environment
+    "dotenv": "^16.3.0"
+    
+    # File formats
+    "xlsx": "^0.18.5"
+    
+    # Utilities
+    "date-fns": "^3.0.0"
+
+system:
+  shell: "/bin/bash"
+  
+  # Environment variables
+  env:
+    MPLBACKEND: "Agg"  # Matplotlib headless
+    PYTHONUNBUFFERED: "1"
+    PYTHONDONTWRITEBYTECODE: "1"
+    NODE_ENV: "development"
+
+security:
+  # Isolation settings for bwrap
+  network_enabled: true
+  
+  filesystem:
+    # System directories (read-only)
+    readonly:
+      - "/usr"
+      - "/lib"
+      - "/lib64"
+      - "/bin"
+      - "/sbin"
+    
+    # Workspace directories (writable)
+    writable:
+      - "/"  # Workspace root
+      - "/tmp"
+      - "/.cache"
+  
+  # Resource limits
+  limits:
+    max_disk: "1GB"
+    max_memory: "512MB"
+    max_cpu_time: "60s"
+    max_processes: 20
+

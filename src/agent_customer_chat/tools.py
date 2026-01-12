@@ -158,8 +158,6 @@ async def actualizar_solicitud(ticket_id: str, nuevo_estado: str, runtime: ToolR
         return f"Error al actualizar solicitud: {str(e)}"
 
 
-
-
 @tool
 async def solicitar_archivo(tipo_documento: str, descripcion: str, runtime: ToolRuntime):
     """

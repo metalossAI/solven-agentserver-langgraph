@@ -1,4 +1,5 @@
 from dotenv import load_dotenv
+from langchain.tools import ToolRuntime
 
 from src.sandbox_backend import SandboxBackend
 load_dotenv()
@@ -17,20 +18,21 @@ from src.models import Thread, AppContext, SolvenState, User
 
 from src.agent.prompt import generate_prompt_template
 
-from src.agent_email.agent import generate_gmail_subagent, generate_outlook_subagent
+from src.agent_email.agent import create_gmail_subagent, create_outlook_subagent
 from src.agent_catastro.agent import subagent as catastro_subagent
 from src.agent.tools import cargar_habilidad
 from src.utils.tickets import get_ticket
+from src.common_tools.files import solicitar_archivo
 
 async def build_context(
 	state : SolvenState,
 	config : RunnableConfig,
-	runtime :  Runtime[AppContext],
+	runtime :  ToolRuntime[AppContext],
 	store : BaseStore,
 ):
 	user_config = config["configurable"].get("langgraph_auth_user")
 	user_data = user_config.get("user_data")
-	
+
 	# Load ticket if ticket_id exists in metadata
 	ticket_id = config.get("metadata", {}).get("ticket_id")
 	if ticket_id:
@@ -52,7 +54,7 @@ async def build_context(
 		description=config.get("metadata").get("description"),
 	)
 
-	runtime.context.backend = SandboxBackend(runtime.context)
+	runtime.context.backend = SandboxBackend(runtime)
 
 	return Command(
 		goto="run_agent",
@@ -78,13 +80,16 @@ async def run_agent(
 		skills=skills_frontmatter,
 	)
 
-	gmail_agent = await generate_gmail_subagent(runtime)
-	outlook_agent = await generate_outlook_subagent(runtime)
+	gmail_agent = create_gmail_subagent(runtime)
+	outlook_agent = create_outlook_subagent(runtime)
 	
 	main_agent = create_deep_agent(
 		model=llm,
 		system_prompt=main_prompt,
-		tools=[cargar_habilidad],
+		tools=[
+			cargar_habilidad,
+			solicitar_archivo
+		],
 		subagents=[
 			gmail_agent,
 			outlook_agent,

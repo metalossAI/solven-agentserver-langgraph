@@ -128,6 +128,26 @@ template = (
     .make_dir("/home/user/workspace", mode=0o755, user="root")
     .run_cmd("chown -R user:user /home/user/workspace", user="root")
     # ============================================================================
+    # Local Workspace for Venvs
+    # ============================================================================
+    # Create /tmp/workspace for local venvs (fast, no FUSE issues)
+    # Venvs created here on startup from dependency files on R2
+    .make_dir("/tmp/workspace", mode=0o755, user="root")
+    .run_cmd("chown -R user:user /tmp/workspace", user="root")
+    # Create pyproject.toml template for new workspaces
+    .run_cmd("""cat > /tmp/pyproject.template.toml << 'EOF'
+[project]
+name = "workspace"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+EOF
+""", user="root")
+    # ============================================================================
     # FUSE Configuration
     # ============================================================================
     # Configure fuse to allow non-root users (needed for rclone with allow_other)

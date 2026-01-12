@@ -2,7 +2,7 @@
   "$schema": "https://langgra.ph/schema.json",
   "dependencies": ["."],
   "graphs": {
-    "solven": "./src/agent/graph.py:graph",
+    "solven": "./src/agent/deep_agent.py:graph",
     "ticket_triage": "./src/agent_triage/agent.py:graph",
     "skills_create": "./src/workflow_skills_create/workflow.py:agent",
     "customer_chat": "./src/agent_customer_chat/agent.py:graph"

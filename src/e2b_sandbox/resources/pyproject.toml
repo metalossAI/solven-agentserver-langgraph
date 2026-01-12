@@ -1,0 +1,29 @@
+[project]
+name = "workspace"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    # DOCX dependencies
+    "defusedxml",
+    "python-docx",
+    # PDF dependencies
+    "pypdf",
+    "pdfplumber",
+    "reportlab",
+    # XLSX dependencies
+    "openpyxl",
+    # Shared dependencies
+    "pandas",
+    # Optional / Conditional (PDF OCR & table export)
+    "pytesseract",
+    "pdf2image",
+    # Additional utilities
+    "Pillow",
+]
+
+[tool.uv]
+package = false
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

@@ -182,7 +182,7 @@ class SandboxBackend(SandboxBackendProtocol):
 		sandbox = await AsyncSandbox.create(
 			template=SANDBOX_TEMPLATE,
 			envs=env_vars,
-			timeout=180000,  # 3 minutes in ms
+			timeout=180,  # 3 minutes in s
 				metadata={
 				"threadId": self._thread_id,
 				"userId": str(self._user_id),
@@ -212,7 +212,7 @@ class SandboxBackend(SandboxBackendProtocol):
 			env_vars = f"S3_ENDPOINT_URL='{endpoint}' S3_ACCESS_KEY_ID='{access_key}' S3_ACCESS_SECRET='{secret}' S3_REGION='{region}'"
 			result = await self._sandbox.commands.run(
 				f"{env_vars} sudo -E bash /tmp/create_rclone_config.sh",
-				timeout=10000
+				timeout=180
 			)
 			if result.exit_code != 0:
 				raise RuntimeError(f"Failed to create rclone config (exit {result.exit_code}): {result.stderr or result.stdout}")
@@ -222,19 +222,19 @@ class SandboxBackend(SandboxBackendProtocol):
 		# Mount thread workspace (critical - must succeed)
 		mount_cmd = f'bash /tmp/mount_s3_path.sh "{bucket}" "threads/{self._thread_id}" "{self._r2_workspace}" "/tmp/rclone-thread.log"'
 		try:
-			result = await self._sandbox.commands.run(mount_cmd, timeout=30000)
+			result = await self._sandbox.commands.run(mount_cmd, timeout=300)
 			if result.exit_code != 0:
 				# Show rclone log if available
 				log_result = await self._sandbox.commands.run(
 					"tail -50 /tmp/rclone-thread.log 2>&1 || echo 'No log file'",
-					timeout=5000
+					timeout=500
 				)
 				raise RuntimeError(f"Failed to mount thread workspace (exit {result.exit_code}): {result.stderr or result.stdout}")
 		except Exception as e:
 			try:
 				log_result = await self._sandbox.commands.run(
 					"tail -50 /tmp/rclone-thread.log 2>&1 || echo 'No log file'",
-					timeout=5000
+					timeout=500
 				)
 			except:
 				pass
@@ -243,7 +243,7 @@ class SandboxBackend(SandboxBackendProtocol):
 		try:
 			result = await self._sandbox.commands.run(
 				f'bash /tmp/mount_s3_path.sh "{bucket}" "skills/system" "/mnt/r2/skills/system" "/tmp/rclone-skills-system.log"',
-					timeout=30000
+					timeout=500
 			)
 			if result.exit_code != 0:
 				raise RuntimeError(f"Failed to mount system skills (exit {result.exit_code})")
@@ -252,7 +252,7 @@ class SandboxBackend(SandboxBackendProtocol):
 		try:
 			result = await self._sandbox.commands.run(
 				f'bash /tmp/mount_s3_path.sh "{bucket}" "skills/{self._user_id}" "/mnt/r2/skills/{self._user_id}" "/tmp/rclone-skills-user.log"',
-					timeout=30000
+					timeout=500
 			)
 			if result.exit_code != 0:
 				raise RuntimeError(f"Failed to mount user skills (exit {result.exit_code})")
@@ -264,7 +264,7 @@ class SandboxBackend(SandboxBackendProtocol):
 			try:
 				result = await self._sandbox.commands.run(
 					f'bash /tmp/mount_s3_path.sh "{bucket}" "tickets/{self._ticket_id}" "/mnt/r2/tickets/{self._ticket_id}" "/tmp/rclone-ticket.log"',
-						timeout=30000
+						timeout=500
 				)
 				if result.exit_code != 0:
 					raise RuntimeError(f"Failed to mount ticket workspace (exit {result.exit_code})")
@@ -297,10 +297,10 @@ class SandboxBackend(SandboxBackendProtocol):
 			raise
 		
 		# Verify files exist
-		verify_result = await self._sandbox.commands.run("ls -la /tmp/*.sh", timeout=5000)
+		verify_result = await self._sandbox.commands.run("ls -la /tmp/*.sh", timeout=500)
 		
 		# Make scripts executable
-		chmod_result = await self._sandbox.commands.run("chmod +x /tmp/create_rclone_config.sh /tmp/mount_s3_path.sh", timeout=5000)
+		chmod_result = await self._sandbox.commands.run("chmod +x /tmp/create_rclone_config.sh /tmp/mount_s3_path.sh", timeout=500)
 		if chmod_result.exit_code != 0:
 			raise RuntimeError(f"Failed to make scripts executable: {chmod_result.stderr}")
 		
@@ -309,7 +309,7 @@ class SandboxBackend(SandboxBackendProtocol):
 		"""Set up local workspace with venvs from R2 dependency files."""
 		
 		# Ensure local workspace directory exists
-		await self._sandbox.commands.run(f"mkdir -p {self._local_workspace}", timeout=5000)
+		await self._sandbox.commands.run(f"mkdir -p {self._local_workspace}", timeout=500)
 		
 		# Python setup
 		pyproject_r2 = f"{self._r2_workspace}/pyproject.toml"
@@ -336,7 +336,7 @@ class SandboxBackend(SandboxBackendProtocol):
 			copy_cmd += f" && cp {uvlock_r2} {self._local_workspace}/uv.lock"
 		
 		# Execute the copy command first
-		result = await self._sandbox.commands.run(copy_cmd, timeout=5000)
+		result = await self._sandbox.commands.run(copy_cmd, timeout=500)
 		if result.exit_code != 0:
 			raise RuntimeError(f"Failed to copy Python dependency files: {result.stderr}")
 		
@@ -344,20 +344,20 @@ class SandboxBackend(SandboxBackendProtocol):
 		if uvlock_exists:
 			validate_result = await self._sandbox.commands.run(
 				f"cd {self._local_workspace} && uv sync --dry-run 2>&1",
-				timeout=10000
+				timeout=500
 			)
 			if validate_result.exit_code != 0 or "Failed to parse" in validate_result.stderr or "TOML parse error" in validate_result.stderr:
 				# Remove corrupted lockfile from both local and R2
 				await self._sandbox.commands.run(
 					f"rm -f {self._local_workspace}/uv.lock {uvlock_r2}",
-					timeout=5000
+					timeout=500
 				)
 				uvlock_exists = False  # Treat as if it doesn't exist
 
 		# Create Python venv locally and sync (don't install workspace as package)
 		result = await self._sandbox.commands.run(
 			f"cd {self._local_workspace} && uv venv && uv sync --no-install-project",
-			timeout=90000
+			timeout=900
 		)
 		if result.exit_code != 0:
 			raise RuntimeError(f"Python venv setup failed: {result.stderr}")
@@ -386,13 +386,13 @@ class SandboxBackend(SandboxBackendProtocol):
 			copy_cmd += f" && cp {bunlock_r2} {self._local_workspace}/bun.lockb"
 			print(f"[Bun] ✓ Found existing bun.lockb on R2", flush=True)
 		
-		result = await self._sandbox.commands.run(copy_cmd, timeout=5000)
+		result = await self._sandbox.commands.run(copy_cmd, timeout=500)
 		if result.exit_code != 0:
 			raise RuntimeError(f"Failed to copy Node dependency files: {result.stderr}")
 
 		result = await self._sandbox.commands.run(
 			f"cd {self._local_workspace} && bun install",
-			timeout=30000
+			timeout=300
 		)
 		if result.exit_code != 0:
 			raise RuntimeError(f"Bun install failed: {result.stderr}")
@@ -414,17 +414,17 @@ class SandboxBackend(SandboxBackendProtocol):
 		user_skills_exists = await self._sandbox.files.exists(user_skills_path)
 		
 		if not user_skills_exists:
-			await self._sandbox.commands.run(f"mkdir -p {user_skills_path}", timeout=5000)
+			await self._sandbox.commands.run(f"mkdir -p {user_skills_path}", timeout=500)
 		else:
 			pass
 		# Verify R2 skill mounts have content
 		system_check = await self._sandbox.commands.run(
 			f"ls /mnt/r2/skills/system 2>&1 | head -5 || echo 'Empty or not found'",
-			timeout=5000
+			timeout=500
 		)
 		user_check = await self._sandbox.commands.run(
 			f"ls {user_skills_path} 2>&1 | head -5 || echo 'Empty or not found'",
-			timeout=5000
+			timeout=500
 		)
 		
 		system_count = len([l for l in system_check.stdout.strip().split('\n') if l and 'Empty' not in l])
@@ -435,7 +435,7 @@ class SandboxBackend(SandboxBackendProtocol):
 			ticket_path = f"/mnt/r2/tickets/{self._ticket_id}"
 			ticket_exists = await self._sandbox.files.exists(ticket_path)
 			if not ticket_exists:
-				await self._sandbox.commands.run(f"mkdir -p {ticket_path}", timeout=5000)
+				await self._sandbox.commands.run(f"mkdir -p {ticket_path}", timeout=500)
 			else:
 				pass
 	
@@ -546,7 +546,7 @@ class SandboxBackend(SandboxBackendProtocol):
 		
 		# Run command in isolated environment
 		try:
-			result = await self._run_isolated(command, timeout=120000)
+			result = await self._run_isolated(command, timeout=500)
 		except Exception as e:
 			return ExecuteResponse(
 				output=f"Error executing command: {str(e)}",
@@ -556,7 +556,7 @@ class SandboxBackend(SandboxBackendProtocol):
 		
 		# Flush filesystem changes to ensure FUSE mounts see them
 		try:
-			await self._sandbox.commands.run("sync", timeout=5000)
+			await self._sandbox.commands.run("sync", timeout=500)
 		except:
 			pass  # Sync failures are not critical
 		
@@ -566,7 +566,7 @@ class SandboxBackend(SandboxBackendProtocol):
 				await self._sandbox.commands.run(
 					f"cp {self._local_workspace}/pyproject.toml {self._r2_workspace}/pyproject.toml && "
 					f"cp {self._local_workspace}/uv.lock {self._r2_workspace}/uv.lock 2>/dev/null || true",
-					timeout=5000
+					timeout=500
 				)
 			except:
 				pass  # Sync failures are not critical
@@ -576,7 +576,7 @@ class SandboxBackend(SandboxBackendProtocol):
 				await self._sandbox.commands.run(
 					f"cp {self._local_workspace}/package.json {self._r2_workspace}/package.json && "
 					f"cp {self._local_workspace}/bun.lockb {self._r2_workspace}/bun.lockb 2>/dev/null || true",
-					timeout=5000
+					timeout=500
 				)
 			except:
 				pass  # Sync failures are not critical
@@ -802,7 +802,7 @@ done
 """
 			
 		try:
-			result = await self._run_isolated(list_cmd, timeout=10000)
+			result = await self._run_isolated(list_cmd, timeout=500)
 		except Exception as e:
 			return []
 		
@@ -858,7 +858,7 @@ done
 """
 			
 		try:
-			result = await self._run_isolated(glob_cmd, timeout=30000)
+			result = await self._run_isolated(glob_cmd, timeout=500)
 		except Exception as e:
 			return []
 		
@@ -916,7 +916,7 @@ done
 		rg_cmd = " ".join(rg_parts) + " 2>/dev/null || true"
 		
 		try:
-			result = await self._run_isolated(rg_cmd, timeout=15000)  # rg is much faster
+			result = await self._run_isolated(rg_cmd, timeout=500)  # rg is much faster
 		except Exception as e:
 			return []
 		
@@ -958,7 +958,7 @@ done
 		if system_skills_exists:
 			result = await self._sandbox.commands.run(
 				f"find {system_skills_path} -name '*.md' -type f",
-				timeout=10000
+				timeout=500
 			)
 			if result.exit_code == 0:
 				for skill_file in result.stdout.strip().split('\n'):
@@ -976,7 +976,7 @@ done
 		if user_skills_exists:
 			result = await self._sandbox.commands.run(
 				f"find {user_skills_path} -name '*.md' -type f",
-				timeout=10000
+				timeout=500
 			)
 			if result.exit_code == 0:
 				for skill_file in result.stdout.strip().split('\n'):
@@ -1020,7 +1020,7 @@ done
 				import shlex
 				# Use bwrap to read the skill, ensuring it's accessible in the isolated environment
 				read_cmd = f"cat {shlex.quote(skill_path)} 2>/dev/null"
-				result = await self._run_isolated(read_cmd, timeout=10000)
+				result = await self._run_isolated(read_cmd, timeout=500)
 				
 				if result.exit_code != 0 or not result.stdout.strip():
 					# Skill not found in this location, try next

@@ -263,7 +263,7 @@ class SandboxBackend(SandboxBackendProtocol):
 		if self._ticket_id:
 			try:
 				result = await self._sandbox.commands.run(
-					f'bash /tmp/mount_s3_path.sh "{bucket}" "tickets/{self._ticket_id}" "/mnt/r2/tickets/{self._ticket_id}" "/tmp/rclone-ticket.log"',
+					f'bash /tmp/mount_s3_path.sh "{bucket}" "threads/{self._ticket_id}" "/mnt/r2/threads/{self._ticket_id}" "/tmp/rclone-ticket.log"',
 						timeout=500
 				)
 				if result.exit_code != 0:
@@ -432,7 +432,7 @@ class SandboxBackend(SandboxBackendProtocol):
 
 		# Ensure ticket directory exists on R2 if ticket exists
 		if self._ticket_id:
-			ticket_path = f"/mnt/r2/tickets/{self._ticket_id}"
+			ticket_path = f"/mnt/r2/threads/{self._ticket_id}"
 			ticket_exists = await self._sandbox.files.exists(ticket_path)
 			if not ticket_exists:
 				await self._sandbox.commands.run(f"mkdir -p {ticket_path}", timeout=500)
@@ -470,7 +470,7 @@ class SandboxBackend(SandboxBackendProtocol):
 		# Ticket (read-only) if exists
 		if self._ticket_id:
 			bwrap_cmd.extend([
-				"--ro-bind", f"/mnt/r2/tickets/{self._ticket_id}", "/.ticket",
+				"--ro-bind", f"/mnt/r2/threads/{self._ticket_id}", "/.ticket",
 			])
 		
 		# Continue with system binds
@@ -949,10 +949,11 @@ done
 		"""Load all skills frontmatter (system + user)."""
 		await self._ensure_initialized()
 		
+		print(f"[load_skills_frontmatter] Starting skill loading for user {self._user_id}", flush=True)
 		frontmatters = []
 		
-		# System skills
-		system_skills_path = f"{self._r2_workspace}/.solven/skills/system"
+		# System skills - read from the actual R2 mount point
+		system_skills_path = "/mnt/r2/skills/system"
 		system_skills_exists = await self._sandbox.files.exists(system_skills_path)
 		
 		if system_skills_exists:
@@ -961,16 +962,17 @@ done
 				timeout=500
 			)
 			if result.exit_code == 0:
-				for skill_file in result.stdout.strip().split('\n'):
-					if skill_file:
-						content = await self._sandbox.files.read(skill_file)
-						content_str = content.decode('utf-8') if isinstance(content, bytes) else content
-						fm = _parse_skillmd_frontmatter(content_str)
-						if fm:
-							frontmatters.append(fm)
+				skill_files = [f for f in result.stdout.strip().split('\n') if f]
+				for skill_file in skill_files:
+
+					content = await self._sandbox.files.read(skill_file)
+					content_str = content.decode('utf-8') if isinstance(content, bytes) else content
+					fm = _parse_skillmd_frontmatter(content_str)
+					if fm:
+						frontmatters.append(fm)
 		
-		# User skills
-		user_skills_path = f"{self._r2_workspace}/.solven/skills/user"
+		# User skills - read from the actual R2 mount point
+		user_skills_path = f"/mnt/r2/skills/{self._user_id}"
 		user_skills_exists = await self._sandbox.files.exists(user_skills_path)
 		
 		if user_skills_exists:
@@ -979,13 +981,13 @@ done
 				timeout=500
 			)
 			if result.exit_code == 0:
-				for skill_file in result.stdout.strip().split('\n'):
-					if skill_file:
-						content = await self._sandbox.files.read(skill_file)
-						content_str = content.decode('utf-8') if isinstance(content, bytes) else content
-						fm = _parse_skillmd_frontmatter(content_str)
-						if fm:
-							frontmatters.append(fm)
+				skill_files = [f for f in result.stdout.strip().split('\n') if f]
+				for skill_file in skill_files:
+					content = await self._sandbox.files.read(skill_file)
+					content_str = content.decode('utf-8') if isinstance(content, bytes) else content
+					fm = _parse_skillmd_frontmatter(content_str)
+					if fm:
+						frontmatters.append(fm)
 		
 		return "\n\n".join(frontmatters)
 	

@@ -66,7 +66,7 @@ class Ticket(BaseModel):
     title: str
     description: str
     related_threads: Optional[List[str]] = None
-    status: Literal["open", "closed"] = "open"
+    status: Literal["open", "ongoing", "closed", "deleted"] = "open"
     updated_at: datetime = Field(default_factory=datetime.now)
 
 class Skill(BaseModel):

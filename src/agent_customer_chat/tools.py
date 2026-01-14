@@ -5,6 +5,8 @@ from datetime import datetime
 import os
 from supabase import create_async_client
 
+from src.models import AppContext
+
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SECRET_KEY")
 
@@ -55,7 +57,7 @@ async def listar_solicitudes_cliente(runtime: ToolRuntime):
         return f"Error al listar solicitudes: {str(e)}"
 
 @tool
-async def crear_solicitud(titulo: str, descripcion: str, runtime: ToolRuntime):
+async def crear_solicitud(titulo: str, descripcion: str, runtime: ToolRuntime[AppContext]):
     """
     Crea una nueva solicitud (ticket) para el cliente.
     
@@ -80,6 +82,7 @@ async def crear_solicitud(titulo: str, descripcion: str, runtime: ToolRuntime):
         
         # Create ticket for the company, tracking customer_id but not assigning it
         ticket_data = {
+            'id': runtime.context.thread.id,
             'company_id': company_id,
             'customer_id': user_id,  # Track which customer created it
             'channel': 'chat',  # Ticket created via customer chat
@@ -89,8 +92,8 @@ async def crear_solicitud(titulo: str, descripcion: str, runtime: ToolRuntime):
             'description': descripcion,
             'status': 'open',
             'related_threads': [],
-            'created_at': datetime.utcnow().isoformat(),
-            'updated_at': datetime.utcnow().isoformat()
+            'created_at': datetime.now().isoformat(),
+            'updated_at': datetime.now().isoformat()
         }
         
         response = await supabase.table('tickets').insert(ticket_data).execute()

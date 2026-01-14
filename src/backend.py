@@ -49,12 +49,11 @@ class S3Backend(BackendProtocol):
     
     Virtual Mounts:
         - /workspace -> threads/{thread_id}/ (shared thread workspace)
-        - /ticket -> tickets/{ticket_id}/ (ticket context files, if ticket_id provided)
+        - /ticket -> threads/{ticket_id}/ (ticket context files, if ticket_id provided)
         - /skills -> {user_id}/skills/ (user's skills library with categories and resources)
     
     Args:
         bucket: S3 bucket name
-        prefix: Optional prefix for all paths (e.g., "agents/scriba/")
         endpoint_url: MinIO/S3 endpoint URL (e.g., "http://localhost:9000")
         access_key: S3 access key
         secret_key: S3 secret key
@@ -96,7 +95,7 @@ class S3Backend(BackendProtocol):
         self.mounts = {}
 
         if ticket_id:
-            self.mounts["/ticket"] = f"tickets/{ticket_id}"
+            self.mounts["/ticket"] = f"threads/{ticket_id}"
         
         # Workspace mount - thread-specific for shared access
         if thread_id:
@@ -1248,17 +1247,6 @@ def create_s3_backend(
 ) -> S3Backend:
     """
     Factory function to create an S3Backend instance.
-    
-    Usage:
-        backend = create_s3_backend(
-            bucket="my-agent-files",
-            prefix="scriba",
-            endpoint_url="http://localhost:9000",
-            access_key="minioadmin",
-            secret_key="minioadmin"
-        )
-        
-        agent = create_deep_agent(backend=backend)
     """
     return S3Backend(
         bucket=bucket,
@@ -1322,7 +1310,7 @@ async def get_user_s3_backend(user_id: str, thread_id: Optional[str] = None, tic
     Returns:
         S3Backend instance with virtual mounts:
         - /workspace -> threads/{thread_id}/ (shared thread workspace)
-        - /ticket -> tickets/{ticket_id}/ (ticket context files, if ticket_id provided)
+        - /ticket -> threads/{ticket_id}/ (ticket context files, if ticket_id provided)
         - /skills -> {user_id}/skills/ (user's skills library)
         
     Example usage by agent:

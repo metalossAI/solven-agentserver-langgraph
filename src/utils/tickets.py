@@ -29,6 +29,7 @@ async def get_ticket(ticket_id: str) -> Optional[Ticket]:
         
         # Fetch ticket from database
         response = await supabase.table("tickets").select("*").eq("id", ticket_id).execute()
+        print("[get_ticket] Response: ", response.data)
         
         if not response.data or len(response.data) == 0:
             return None

@@ -240,15 +240,7 @@ class SandboxBackend(SandboxBackendProtocol):
 				pass
 			raise RuntimeError(f"Thread mount timed out - check rclone configuration and S3 connectivity")
 		
-		try:
-			result = await self._sandbox.commands.run(
-				f'bash /tmp/mount_s3_path.sh "{bucket}" "skills/system" "/mnt/r2/skills/system" "/tmp/rclone-skills-system.log"',
-					timeout=500
-			)
-			if result.exit_code != 0:
-				raise RuntimeError(f"Failed to mount system skills (exit {result.exit_code})")
-		except Exception as e:
-			raise
+		# Mount user skills directory
 		try:
 			result = await self._sandbox.commands.run(
 				f'bash /tmp/mount_s3_path.sh "{bucket}" "skills/{self._user_id}" "/mnt/r2/skills/{self._user_id}" "/tmp/rclone-skills-user.log"',
@@ -401,12 +393,10 @@ class SandboxBackend(SandboxBackendProtocol):
 		"""Ensure R2 skill source directories exist (bwrap will handle bind-mounts).
 		
 		We only ensure the SOURCE directories on R2 exist:
-		- /mnt/r2/skills/system (should already exist from mount)
 		- /mnt/r2/skills/{user_id} (may need creation)
 		
 		Bwrap will automatically create /.solven/skills/ structure when it bind-mounts:
-		- --ro-bind /mnt/r2/skills/system /.solven/skills/system
-		- --bind /mnt/r2/skills/{user_id} /.solven/skills/user
+		- --bind /mnt/r2/skills/{user_id} /.solven/skills/
 		"""
 		
 		# Ensure user skills directory exists on R2 (for when agent creates new skills)
@@ -417,17 +407,12 @@ class SandboxBackend(SandboxBackendProtocol):
 			await self._sandbox.commands.run(f"mkdir -p {user_skills_path}", timeout=500)
 		else:
 			pass
-		# Verify R2 skill mounts have content
-		system_check = await self._sandbox.commands.run(
-			f"ls /mnt/r2/skills/system 2>&1 | head -5 || echo 'Empty or not found'",
-			timeout=500
-		)
+		# Verify R2 skill mount has content
 		user_check = await self._sandbox.commands.run(
 			f"ls {user_skills_path} 2>&1 | head -5 || echo 'Empty or not found'",
 			timeout=500
 		)
 		
-		system_count = len([l for l in system_check.stdout.strip().split('\n') if l and 'Empty' not in l])
 		user_count = len([l for l in user_check.stdout.strip().split('\n') if l and 'Empty' not in l])
 
 		# Ensure ticket directory exists on R2 if ticket exists
@@ -443,7 +428,7 @@ class SandboxBackend(SandboxBackendProtocol):
 		"""Run command with bwrap isolation.
 		
 		Bind-mounts R2 skills directly to /.solven/skills/ so:
-		- Agent can read skills from /.solven/skills/system/ and /.solven/skills/user/
+		- Agent can read and modify skills from /.solven/skills/
 		- Agent modifications to user skills persist to /mnt/r2/skills/{user_id}
 		- User skills are shared across all workspaces for the same user
 		"""
@@ -460,11 +445,9 @@ class SandboxBackend(SandboxBackendProtocol):
 			"--bind", f"{self._local_workspace}/.venv", "/.venv",
 			"--bind", f"{self._local_workspace}/node_modules", "/node_modules",
 			
-			# Bind-mount R2 skills directly to /.solven/skills/
-			# System skills (read-only)
-			"--ro-bind", "/mnt/r2/skills/system", "/.solven/skills/system",
+			# Bind-mount R2 user skills directly to /.solven/skills/
 			# User skills (writable - modifications persist to R2!)
-			"--bind", f"/mnt/r2/skills/{self._user_id}", "/.solven/skills/user",
+			"--bind", f"/mnt/r2/skills/{self._user_id}", "/.solven/skills",
 		]
 		
 		# Ticket (read-only) if exists
@@ -946,30 +929,11 @@ done
 		return matches
 	
 	async def load_skills_frontmatter(self) -> str:
-		"""Load all skills frontmatter (system + user)."""
+		"""Load all skills frontmatter (user only)."""
 		await self._ensure_initialized()
 		
 		print(f"[load_skills_frontmatter] Starting skill loading for user {self._user_id}", flush=True)
 		frontmatters = []
-		
-		# System skills - read from the actual R2 mount point
-		system_skills_path = "/mnt/r2/skills/system"
-		system_skills_exists = await self._sandbox.files.exists(system_skills_path)
-		
-		if system_skills_exists:
-			result = await self._sandbox.commands.run(
-				f"find {system_skills_path} -name '*.md' -type f",
-				timeout=500
-			)
-			if result.exit_code == 0:
-				skill_files = [f for f in result.stdout.strip().split('\n') if f]
-				for skill_file in skill_files:
-
-					content = await self._sandbox.files.read(skill_file)
-					content_str = content.decode('utf-8') if isinstance(content, bytes) else content
-					fm = _parse_skillmd_frontmatter(content_str)
-					if fm:
-						frontmatters.append(fm)
 		
 		# User skills - read from the actual R2 mount point
 		user_skills_path = f"/mnt/r2/skills/{self._user_id}"
@@ -998,9 +962,8 @@ done
 		This ensures the skill is accessible from within the isolated environment
 		where agent commands actually run, and that all resources are available.
 		
-		Reads from .solven/skills/ directory which contains symlinks:
-		- /.solven/skills/system/ → system-wide skills from R2
-		- /.solven/skills/user/ → user-specific skills from R2
+		Reads from .solven/skills/ directory which is bound directly from
+		/mnt/r2/skills/{user_id} to /.solven/skills/ in bwrap.
 		
 		Args:
 			skill_name: Name of the skill (e.g., 'compraventa-de-viviendas')
@@ -1010,32 +973,26 @@ done
 		"""
 		await self._ensure_initialized()
 		
-		# Check system skills first, then user skills
-		# Use paths as they appear in bwrap (/ = R2 workspace root)
-		skill_paths = [
-			("system", f"/.solven/skills/system/{skill_name}/SKILL.md"),
-			("user", f"/.solven/skills/user/{skill_name}/SKILL.md")
-		]
+		# Use path as it appears in bwrap (/ = R2 workspace root)
+		# User skills are bound directly to /.solven/skills/ (no user/ prefix)
+		skill_path = f"/.solven/skills/{skill_name}/SKILL.md"
 		
-		for source, skill_path in skill_paths:
-			try:
-				import shlex
-				# Use bwrap to read the skill, ensuring it's accessible in the isolated environment
-				read_cmd = f"cat {shlex.quote(skill_path)} 2>/dev/null"
-				result = await self._run_isolated(read_cmd, timeout=500)
-				
-				if result.exit_code != 0 or not result.stdout.strip():
-					# Skill not found in this location, try next
-					continue
-				
-				content = result.stdout
-				return content
-				
-			except Exception as e:
-				# Skill not found or not accessible in this location, try next
-				continue
-		
-		return None
+		try:
+			import shlex
+			# Use bwrap to read the skill, ensuring it's accessible in the isolated environment
+			read_cmd = f"cat {shlex.quote(skill_path)} 2>/dev/null"
+			result = await self._run_isolated(read_cmd, timeout=500)
+			
+			if result.exit_code != 0 or not result.stdout.strip():
+				# Skill not found
+				return None
+			
+			content = result.stdout
+			return content
+			
+		except Exception as e:
+			# Skill not found or not accessible
+			return None
 	
 	async def aclose(self) -> None:
 		"""Close sandbox and cleanup."""

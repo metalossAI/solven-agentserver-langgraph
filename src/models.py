@@ -25,7 +25,9 @@ class User(BaseModel):
     role : str
     company_id : str
 
-
+class SkillCreate(BaseModel):
+    name: str
+    description: str
 
 class AppContext(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
@@ -35,6 +37,7 @@ class AppContext(BaseModel):
     company_id: Optional[str] = None
     backend : Optional[Any] = None  # S3Backend - using Any to avoid schema issues
     ticket: Optional['Ticket'] = None # the upstandig ticket context which will serve as link wiht for customer communications
+    skill_create: Optional[SkillCreate] = None
 
 # Store Models to ensure orderd long term memory
 class Event(BaseModel):

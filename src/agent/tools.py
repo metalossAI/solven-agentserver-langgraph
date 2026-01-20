@@ -14,7 +14,7 @@ async def cargar_habilidad(
 	Por ejemplo, para redactar un documento legal o para seguir un workflow específico.
 	
 	Args:
-		nombre_habilidad: Nombre de la habilidad a cargar (p. ej., 'compraventa-de-viviendas')
+		nombre_habilidad: Nombre de la habilidad a cargar (p. ej., 'escrituras', 'docx', 'pdf', 'xlsx', 'pptx')
 	
 	Returns:
 		El contenido completo de la habilidad en formato markdown

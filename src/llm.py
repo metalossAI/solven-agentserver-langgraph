@@ -18,9 +18,6 @@ granite_llm = ChatWatsonx(
 xai_grok_4_fast = ChatOpenAI(
     model="x-ai/grok-4.1-fast",
     base_url="https://openrouter.ai/api/v1",
-    model_kwargs={
-        "parallel_tool_calls" : False,
-    },
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 
@@ -37,6 +34,12 @@ mistralai_ministral_3b_2512 = ChatOpenAI(
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 
+mistralai_devs_mistral_2512 = ChatOpenAI(
+    model="mistralai/devstral-2512:free",
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+)
+
 openai_oss_120b = ChatOpenAI(
     model="openai/gpt-oss-120b",
     base_url="https://openrouter.ai/api/v1",
@@ -46,14 +49,28 @@ openai_oss_120b = ChatOpenAI(
 groq_qwen = ChatGroq(
 	model="llama-3.1-8b-instant",
 	max_tokens=50000,
-	model_kwargs={
-		"parallel_tool_calls" : False,
-	}
+	#model_kwargs={
+	#	"parallel_tool_calls" : False,
+	#}
+)
+
+google_gemini = ChatOpenAI(
+    model="google/gemini-3-flash-preview",
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+)
+
+claude_sonnet = ChatOpenAI(
+    model="anthropic/claude-sonnet-4.5",
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 
 LLM_SKILL_MATCHING = xai_grok_4_fast
 
 LLM_SO = xai_grok_4_fast_SO
+
+CODING_LLM = ...
 
 LLM = xai_grok_4_fast
 

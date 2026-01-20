@@ -23,16 +23,18 @@ from src.agent.prompt import generate_prompt_template
 
 from src.agent_catastro.agent import subagent as catastro_subagent
 from src.agent.tools import cargar_habilidad
-from src.utils.tickets import get_ticket
+from src.utils.tickets import get_ticket, crear_ticket, patch_ticket, listar_tickets
 from src.common_tools.files import solicitar_archivo
 
-from langchain.agents.middleware import before_agent, AgentState
+from langchain.agents.middleware import before_agent, AgentState, after_agent
 from langchain.messages import AIMessage
 from langgraph.runtime import Runtime
 
 # Import email tools
 from src.agent_email.gmail_tools import gmail_tools
 from src.agent_email.outlook_tools import outlook_tools
+
+# first identify existing ticket or new ticket.
 
 
 @before_agent
@@ -79,6 +81,13 @@ async def build_context(state: AgentState, runtime: Runtime):
     if not runtime.context.backend:
         runtime.context.backend = SandboxBackend(runtime)
 
+@after_agent
+async def update_ticket(state: AgentState, runtime: Runtime):
+    """
+    Actualiza el ticket en la base de datos
+    """
+    pass
+
 
 @dynamic_prompt
 async def build_prompt(request: ModelRequest):
@@ -121,7 +130,9 @@ graph = create_deep_agent(
     backend=lambda rt: SandboxBackend(rt),
     tools=[
         cargar_habilidad,
-        solicitar_archivo,
+        # crear_ticket,
+        # patch_ticket,
+        # listar_tickets,
     ],
     subagents=[
         gmail_subagent,

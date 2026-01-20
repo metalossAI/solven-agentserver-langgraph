@@ -1,0 +1,39 @@
+{
+  "name": "solven-agentserver-langgraph",
+  "version": "1.0.0",
+  "description": "[![CI](https://github.com/langchain-ai/new-langgraph-project/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/langchain-ai/new-langgraph-project/actions/workflows/unit-tests.yml) [![Integration Tests](https://github.com/langchain-ai/new-langgraph-project/actions/workflows/integration-tests.yml/badge.svg)](https://github.com/langchain-ai/new-langgraph-project/actions/workflows/integration-tests.yml)",
+  "main": "create_docx.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "dependencies": {
+    "core-util-is": "^1.0.3",
+    "docx": "^9.5.1",
+    "hash.js": "^1.1.7",
+    "immediate": "^3.0.6",
+    "inherits": "^2.0.4",
+    "isarray": "^1.0.0",
+    "jszip": "^3.10.1",
+    "lie": "^3.3.0",
+    "minimalistic-assert": "^1.0.1",
+    "nanoid": "^5.1.6",
+    "pako": "^1.0.11",
+    "process-nextick-args": "^2.0.1",
+    "readable-stream": "^2.3.8",
+    "safe-buffer": "^5.1.2",
+    "sax": "^1.4.3",
+    "setimmediate": "^1.0.5",
+    "string_decoder": "^1.1.1",
+    "undici-types": "^7.16.0",
+    "util-deprecate": "^1.0.2",
+    "xml": "^1.0.1",
+    "xml-js": "^1.6.11"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}

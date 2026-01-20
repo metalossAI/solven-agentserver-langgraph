@@ -27,5 +27,3 @@ class TriageState(InputTriageState):
 
 class OutputTriageState(TypedDict):
     ticket: Ticket
-
-

@@ -101,9 +101,25 @@ async def build_prompt(request: ModelRequest):
 		role=runtime.context.user.role,
 		ticket=ticket,
 		skills=skills_frontmatter,
+		workspace_changes=""
 	)
 	return prompt
 
+
+@dynamic_prompt
+async def build_docx_prompt(request: ModelRequest):
+	runtime : Runtime[AppContext] = request.runtime
+	if not runtime.context.backend:
+		runtime.context.backend = SandboxBackend(runtime)
+	
+	backend : SandboxBackend = runtime.context.backend
+	skill_content = await backend.get_skill_content("docx")
+
+	client = AsyncClient()
+	base_prompt : ChatPromptTemplate = await client.pull_prompt("solven-subagent-docx")
+	return base_prompt.format(
+		skill=skill_content
+	)
 
 gmail_subagent = SubAgent(
 	name="asistente_gmail",
@@ -123,6 +139,20 @@ outlook_subagent = SubAgent(
 	state_schema=SolvenState,
 )
 
+docx_subagent = SubAgent(
+	name="asistente_docx",
+	description="agente encargado de redactar, editar y analizar documentos de word (.docx)",
+	system_prompt="",
+	model=llm,
+	tools=[
+		cargar_habilidad,
+	],
+	middleware=[
+		build_docx_prompt
+	],
+	state_schema=SolvenState,
+)
+
 graph = create_deep_agent(
 	model=llm,
 	backend=lambda rt: SandboxBackend(rt),
@@ -131,6 +161,7 @@ graph = create_deep_agent(
 		solicitar_archivo,
 	],
 	subagents=[
+		docx_subagent,
 		gmail_subagent,
 		outlook_subagent,
 		catastro_subagent,

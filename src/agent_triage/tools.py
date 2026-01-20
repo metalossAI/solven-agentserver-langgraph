@@ -1,4 +1,6 @@
+from typing import Optional
 from langchain.tools import tool, ToolRuntime
+from langgraph.graph.state import Command
 from src.agent_triage.models import Ticket
 import uuid
 from datetime import datetime
@@ -7,6 +9,38 @@ from supabase import create_async_client
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SECRET_KEY")
+
+from src.utils.tickets import get_ticket
+
+@tool
+async def buscar_ticket(query: str, runtime: ToolRuntime) -> str:
+    """
+    Crea un ticket con titulo, descripción y email del cliente.
+
+    Args:
+    - titulo: titulo del ticket
+    - descripcion: descripción detallada del ticket
+    - correo_cliente: email del cliente que envió la solicitud
+    """
+    pass
+
+@tool
+async def seleccionar_ticket(id: str, runtime: ToolRuntime) -> str:
+    """
+    Selecciona un ticket existente por su ID.
+
+    Args:
+    - id: ID del ticket a seleccionar
+    """
+    ticket : Ticket | None = await get_ticket(id)
+    if ticket is None:  
+        return "Error: Ticket no encontrado"
+    else:
+        return Command(
+            update = {
+                "ticket": ticket
+            }
+        )
 
 @tool
 async def crear_ticket(titulo: str, descripcion: str, correo_cliente: str, runtime: ToolRuntime) -> str:
@@ -153,5 +187,3 @@ async def listar_tickets(status: str = None, runtime: ToolRuntime = None) -> str
     except Exception as e:
         print(f"Error listing tickets: {str(e)}", flush=True)
         return f"Error al listar tickets: {str(e)}"
-
-

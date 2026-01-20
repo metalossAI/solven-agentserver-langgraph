@@ -23,7 +23,7 @@ import asyncio
 from typing import Optional
 from datetime import datetime
 
-from e2b import AsyncSandbox, SandboxQuery, SandboxState
+from e2b import AsyncSandbox, CommandResult, SandboxQuery, SandboxState
 from e2b.sandbox.commands.command_handle import CommandExitException
 
 from deepagents.backends.protocol import SandboxBackendProtocol, WriteResult, EditResult, ExecuteResponse
@@ -89,7 +89,7 @@ class SandboxBackend(SandboxBackendProtocol):
 		
 		# System directories to exclude from search/list operations
 		# These are bind mounts, system paths, and caches that shouldn't be searched
-		self._exclude_dirs = [".cache", ".local", ".venv", "node_modules", "bin", "dev", 
+		self._exclude_dirs = [".keep",".cache", ".local", ".venv", "node_modules", "bin", "dev", 
 		                      "etc", "lib", "lib64", "proc", "usr", "sys", "run", "tmp"]
 		
 		# State
@@ -240,10 +240,12 @@ class SandboxBackend(SandboxBackendProtocol):
 				pass
 			raise RuntimeError(f"Thread mount timed out - check rclone configuration and S3 connectivity")
 		
-		# Mount user skills directory
+		# Mount user skills directory to /mnt/r2/.solven/skills/ (matches bwrap path structure)
 		try:
+			# Ensure parent directory exists
+			await self._sandbox.commands.run("mkdir -p /mnt/r2/.solven", timeout=500)
 			result = await self._sandbox.commands.run(
-				f'bash /tmp/mount_s3_path.sh "{bucket}" "skills/{self._user_id}" "/mnt/r2/skills/{self._user_id}" "/tmp/rclone-skills-user.log"',
+				f'bash /tmp/mount_s3_path.sh "{bucket}" "skills/{self._user_id}" "/mnt/r2/.solven/skills" "/tmp/rclone-skills-user.log"',
 					timeout=500
 			)
 			if result.exit_code != 0:
@@ -251,11 +253,13 @@ class SandboxBackend(SandboxBackendProtocol):
 		except Exception as e:
 			raise
 		
-		# Mount ticket if exists (optional)
+		# Mount ticket if exists (optional) to /mnt/r2/.ticket (matches bwrap path structure)
 		if self._ticket_id:
 			try:
+				# Ensure parent directory exists
+				await self._sandbox.commands.run("mkdir -p /mnt/r2/.ticket", timeout=500)
 				result = await self._sandbox.commands.run(
-					f'bash /tmp/mount_s3_path.sh "{bucket}" "threads/{self._ticket_id}" "/mnt/r2/threads/{self._ticket_id}" "/tmp/rclone-ticket.log"',
+					f'bash /tmp/mount_s3_path.sh "{bucket}" "threads/{self._ticket_id}" "/mnt/r2/.ticket" "/tmp/rclone-ticket.log"',
 						timeout=500
 				)
 				if result.exit_code != 0:
@@ -393,20 +397,21 @@ class SandboxBackend(SandboxBackendProtocol):
 		"""Ensure R2 skill source directories exist (bwrap will handle bind-mounts).
 		
 		We only ensure the SOURCE directories on R2 exist:
-		- /mnt/r2/skills/{user_id} (may need creation)
+		- /mnt/r2/.solven/skills (mounted from R2 bucket skills/{user_id})
 		
-		Bwrap will automatically create /.solven/skills/ structure when it bind-mounts:
-		- --bind /mnt/r2/skills/{user_id} /.solven/skills/
+		Bwrap will bind-mount this to /.solven/skills/:
+		- --bind /mnt/r2/.solven/skills /.solven/skills/
 		"""
 		
-		# Ensure user skills directory exists on R2 (for when agent creates new skills)
-		user_skills_path = f"/mnt/r2/skills/{self._user_id}"
+		# User skills are mounted at /mnt/r2/.solven/skills (matches bwrap path)
+		# The mount itself ensures the directory exists, but verify it's accessible
+		user_skills_path = "/mnt/r2/.solven/skills"
 		user_skills_exists = await self._sandbox.files.exists(user_skills_path)
 		
 		if not user_skills_exists:
+			# Mount should have created this, but if not, create it
 			await self._sandbox.commands.run(f"mkdir -p {user_skills_path}", timeout=500)
-		else:
-			pass
+		
 		# Verify R2 skill mount has content
 		user_check = await self._sandbox.commands.run(
 			f"ls {user_skills_path} 2>&1 | head -5 || echo 'Empty or not found'",
@@ -416,21 +421,22 @@ class SandboxBackend(SandboxBackendProtocol):
 		user_count = len([l for l in user_check.stdout.strip().split('\n') if l and 'Empty' not in l])
 
 		# Ensure ticket directory exists on R2 if ticket exists
+		# Ticket is mounted at /mnt/r2/.ticket (matches bwrap path)
 		if self._ticket_id:
-			ticket_path = f"/mnt/r2/threads/{self._ticket_id}"
+			ticket_path = "/mnt/r2/.ticket"
 			ticket_exists = await self._sandbox.files.exists(ticket_path)
 			if not ticket_exists:
+				# Mount should have created this, but if not, create it
 				await self._sandbox.commands.run(f"mkdir -p {ticket_path}", timeout=500)
-			else:
-				pass
 	
 	async def _run_isolated(self, command: str, timeout: int = 30000):
 		"""Run command with bwrap isolation.
 		
 		Bind-mounts R2 skills directly to /.solven/skills/ so:
 		- Agent can read and modify skills from /.solven/skills/
-		- Agent modifications to user skills persist to /mnt/r2/skills/{user_id}
+		- Agent modifications to user skills persist to /mnt/r2/.solven/skills
 		- User skills are shared across all workspaces for the same user
+		- Path structure is consistent: /.solven/skills/ in bwrap = /mnt/r2/.solven/skills/ on host
 		"""
 		import shlex
 		
@@ -447,13 +453,15 @@ class SandboxBackend(SandboxBackendProtocol):
 			
 			# Bind-mount R2 user skills directly to /.solven/skills/
 			# User skills (writable - modifications persist to R2!)
-			"--bind", f"/mnt/r2/skills/{self._user_id}", "/.solven/skills",
+			# Mount path matches bwrap path: /mnt/r2/.solven/skills -> /.solven/skills/
+			"--bind", "/mnt/r2/.solven/skills", "/.solven/skills",
 		]
 		
 		# Ticket (read-only) if exists
+		# Mount path matches bwrap path: /mnt/r2/.ticket -> /.ticket/
 		if self._ticket_id:
 			bwrap_cmd.extend([
-				"--ro-bind", f"/mnt/r2/threads/{self._ticket_id}", "/.ticket",
+				"--ro-bind", "/mnt/r2/.ticket", "/.ticket",
 			])
 		
 		# Continue with system binds
@@ -571,52 +579,101 @@ class SandboxBackend(SandboxBackendProtocol):
 		)
 	
 	async def aread(self, path: str, offset: int = 0, limit: int = 2000) -> str:
-		"""Read file directly from R2 workspace with line numbers."""
+		"""Read file using bwrap (no path resolution needed - bwrap handles mounts)."""
 		await self._ensure_initialized()
 		
-		# Construct full R2 path
-		full_path = f"{self._r2_workspace}/{path.lstrip('/')}"
+		import shlex
+		normalized_path = f"/{path.lstrip('/')}"
+		# Build command to read file
+		read_cmd = f"""
+if [ ! -f {shlex.quote(normalized_path)} ]; then
+	echo "__FILE_NOT_EXIST__"
+	exit 0
+fi
+cat {shlex.quote(normalized_path)}
+"""
 		
-		# Read file
 		try:
-			content_bytes = await self._sandbox.files.read(full_path)
-			content = content_bytes.decode('utf-8') if isinstance(content_bytes, bytes) else content_bytes
+			result = await self._run_isolated(read_cmd, timeout=500)
+			
+			# Check if file doesn't exist
+			if "__FILE_NOT_EXIST__" in result.stdout:
+				return f"Error reading {path}: File not found"
+			
+			# Process content: split into lines, apply pagination, add line numbers
+			content = result.stdout
+			lines = content.split('\n')
+			
+			# Apply pagination
+			if offset > 0 or (limit > 0 and limit != 2000):
+				start = offset
+				end = offset + limit if limit > 0 else len(lines)
+				lines = lines[start:end]
+			elif limit == 2000 and len(lines) > 2000:
+				lines = lines[offset:offset + 2000]
+			
+			# Add line numbers
+			numbered = [f"{i+offset+1:6d}|{line}" for i, line in enumerate(lines)]
+			return '\n'.join(numbered)
 		except Exception as e:
 			return f"Error reading {path}: {str(e)}"
-		
-		# Apply pagination and add line numbers
-		lines = content.split('\n')
-		
-		if offset > 0 or (limit > 0 and limit != 2000):
-			start = offset
-			end = offset + limit if limit > 0 else len(lines)
-			lines = lines[start:end]
-		elif limit == 2000 and len(lines) > 2000:
-			lines = lines[offset:offset + 2000]
-		
-		# Add line numbers
-		numbered = [f"{i+offset+1:6d}|{line}" for i, line in enumerate(lines)]
-		return '\n'.join(numbered)
 	
 	async def awrite(self, path: str, content: str) -> WriteResult:
-		"""Write file directly to R2 workspace (auto-creates parent directories)."""
+		"""Write file using bwrap (no path resolution needed - bwrap handles mounts)."""
 		await self._ensure_initialized()
 		
-		# Construct full R2 path
-		full_path = f"{self._r2_workspace}/{path.lstrip('/')}"
+		import shlex
+		normalized_path = f"/{path.lstrip('/')}"
 		
-		# Check if file exists (to prevent overwriting)
-		file_exists = await self._sandbox.files.exists(full_path)
-		if file_exists:
+		# Check if ticket (read-only)
+		if normalized_path.startswith("/.ticket/"):
+			if not self._ticket_id:
+				return WriteResult(
+					error=f"Cannot write to ticket directory (no ticket_id): {path}",
+					path=None,
+					files_update=None
+				)
 			return WriteResult(
-				error=f"File '{path}' already exists. Use edit to modify existing files.",
+				error=f"Cannot write to ticket directory (read-only): {path}",
 				path=None,
 				files_update=None
 			)
 		
-		# Write file (automatically creates parent directories)
+		# Check if file exists (to prevent overwriting)
+		check_cmd = f"""
+if [ -f {shlex.quote(normalized_path)} ]; then
+	echo "__FILE_EXISTS__"
+fi
+"""
 		try:
-			await self._sandbox.files.write(full_path, content)
+			check_result = await self._run_isolated(check_cmd, timeout=100)
+			if "__FILE_EXISTS__" in check_result.stdout:
+				return WriteResult(
+					error=f"File '{path}' already exists. Use edit to modify existing files.",
+					path=None,
+					files_update=None
+				)
+		except Exception as e:
+			pass  # Continue even if check fails
+		
+		# Write file using heredoc (auto-creates parent directories)
+		# Escape content for safe shell usage
+		content_escaped = content.replace("'", "'\"'\"'")
+		write_cmd = f"""
+mkdir -p "$(dirname {shlex.quote(normalized_path)})"
+cat > {shlex.quote(normalized_path)} << 'EOFWRITE'
+{content}
+EOFWRITE
+"""
+		
+		try:
+			result : CommandResult = await self._run_isolated(write_cmd, timeout=500)
+			if result.exit_code != 0:
+				return WriteResult(
+					error=f"Write failed: {result.stderr or result.stdout}",
+					path=None,
+					files_update=None
+				)
 			return WriteResult(error=None, path=path, files_update=None)
 		except Exception as e:
 			return WriteResult(
@@ -627,7 +684,7 @@ class SandboxBackend(SandboxBackendProtocol):
 	
 	async def upload_file(self, destination_path: str, source_file_path: str) -> WriteResult:
 		"""
-		Upload a file from the local filesystem to the sandbox workspace.
+		Upload a file from the local filesystem to the sandbox workspace using bwrap.
 		Uses bwrap path resolution to handle special paths like /.solven/skills/user/
 		
 		Args:
@@ -641,42 +698,38 @@ class SandboxBackend(SandboxBackendProtocol):
 		
 		self._writer(f"📤 Subiendo archivo a {destination_path}...")
 		
-		# Normalize the destination path
+		import shlex
 		dest_path_normalized = f"/{destination_path.lstrip('/')}"
 		
-		# Resolve bwrap path mappings to actual R2 paths
-		# Check if path is in a special bwrap-bound location
-		if dest_path_normalized.startswith("/.solven/skills/system/"):
-			# System skills are read-only, cannot upload here
-			error_msg = "Cannot upload to system skills directory (read-only)"
+		# Check if ticket (read-only)
+		if dest_path_normalized.startswith("/.ticket/"):
 			return WriteResult(
-				error=error_msg,
+				error="Cannot upload to ticket directory (read-only)",
 				path=None,
 				files_update=None
 			)
-		elif dest_path_normalized.startswith("/.solven/skills/user/"):
-			# User skills map to /mnt/r2/skills/{user_id}/
-			relative_path = dest_path_normalized.replace("/.solven/skills/user/", "")
-			full_dest_path = f"/mnt/r2/skills/{self._user_id}/{relative_path}"
-		elif dest_path_normalized.startswith("/.ticket/"):
-			# Ticket files are read-only
-			error_msg = "Cannot upload to ticket directory (read-only)"
-			return WriteResult(
-				error=error_msg,
-				path=None,
-				files_update=None
-			)
-		else:
-			# Regular workspace files map to R2 workspace
-			full_dest_path = f"{self._r2_workspace}{dest_path_normalized}"
 		
 		try:
 			# Read the local file
+			import base64
 			with open(source_file_path, 'rb') as f:
 				file_content = f.read()
 			
-			# Write to sandbox (respects bwrap path mappings)
-			await self._sandbox.files.write(full_dest_path, file_content)
+			# Encode file content as base64 for safe transmission through shell
+			file_content_b64 = base64.b64encode(file_content).decode('utf-8')
+			
+			# Write file directly to destination using bwrap with base64 decode
+			upload_cmd = f"""
+mkdir -p "$(dirname {shlex.quote(dest_path_normalized)})"
+echo {shlex.quote(file_content_b64)} | base64 -d > {shlex.quote(dest_path_normalized)}
+"""
+			result = await self._run_isolated(upload_cmd, timeout=500)
+			if result.exit_code != 0:
+				return WriteResult(
+					error=f"Upload failed: {result.stderr or result.stdout}",
+					path=None,
+					files_update=None
+				)
 			
 			self._writer(f"✅ Archivo subido exitosamente")
 			
@@ -698,36 +751,54 @@ class SandboxBackend(SandboxBackendProtocol):
 			)
 	
 	async def aedit(self, path: str, old_string: str, new_string: str, replace_all: bool = False) -> EditResult:
-		"""Edit file in R2 workspace."""
+		"""Edit file using bwrap (no path resolution needed - bwrap handles mounts)."""
 		await self._ensure_initialized()
 		
-		# Construct full R2 path
-		full_path = f"{self._r2_workspace}/{path.lstrip('/')}"
+		import shlex
+		normalized_path = f"/{path.lstrip('/')}"
+		
+		# Check if ticket (read-only)
+		if normalized_path.startswith("/.ticket/"):
+			return EditResult(
+				error=f"Cannot edit ticket directory (read-only): {path}",
+				path=None,
+				files_update=None,
+				occurrences=0
+			)
 		
 		# Check if file exists
-		file_exists = await self._sandbox.files.exists(full_path)
-		if not file_exists:
-			return EditResult(
-				error=f"File not found: {path}",
-				path=None,
-				files_update=None,
-				occurrences=0
-			)
-		
-		# Read current content
+		check_cmd = f"""
+if [ ! -f {shlex.quote(normalized_path)} ]; then
+	echo "__FILE_NOT_EXIST__"
+	exit 0
+fi
+"""
 		try:
-			content_bytes = await self._sandbox.files.read(full_path)
-			content = content_bytes.decode('utf-8') if isinstance(content_bytes, bytes) else content_bytes
+			check_result = await self._run_isolated(check_cmd, timeout=100)
+			if "__FILE_NOT_EXIST__" in check_result.stdout:
+				return EditResult(
+					error=f"File not found: {path}",
+					path=None,
+					files_update=None,
+					occurrences=0
+				)
 		except Exception as e:
 			return EditResult(
-				error=f"Failed to read file: {str(e)}",
+				error=f"File check failed: {str(e)}",
 				path=None,
 				files_update=None,
 				occurrences=0
 			)
 		
-		# Count occurrences
-		occurrences = content.count(old_string)
+		# Count occurrences first
+		count_cmd = f"""
+grep -oF {shlex.quote(old_string)} {shlex.quote(normalized_path)} | wc -l
+"""
+		try:
+			count_result = await self._run_isolated(count_cmd, timeout=100)
+			occurrences = int(count_result.stdout.strip() or 0)
+		except Exception as e:
+			occurrences = 0
 		
 		if occurrences == 0:
 			return EditResult(
@@ -745,19 +816,35 @@ class SandboxBackend(SandboxBackendProtocol):
 				occurrences=occurrences
 			)
 		
-		# Replace
-		if replace_all:
-			new_content = content.replace(old_string, new_string)
-		else:
-			new_content = content.replace(old_string, new_string, 1)
+		# Perform replacement using sed
+		# Escape special characters for sed
+		old_escaped = old_string.replace("\\", "\\\\").replace("/", "\\/").replace("&", "\\&").replace("$", "\\$")
+		new_escaped = new_string.replace("\\", "\\\\").replace("/", "\\/").replace("&", "\\&").replace("$", "\\$")
 		
-		# Write back
+		if replace_all:
+			# Replace all occurrences
+			edit_cmd = f"""
+sed -i 's/{old_escaped}/{new_escaped}/g' {shlex.quote(normalized_path)}
+"""
+		else:
+			# Replace first occurrence only
+			edit_cmd = f"""
+sed -i '0,/{old_escaped}/s//{new_escaped}/' {shlex.quote(normalized_path)}
+"""
+		
 		try:
-			await self._sandbox.files.write(full_path, new_content)
+			result = await self._run_isolated(edit_cmd, timeout=500)
+			if result.exit_code != 0:
+				return EditResult(
+					error=f"Edit failed: {result.stderr or result.stdout}",
+					path=None,
+					files_update=None,
+					occurrences=0
+				)
 			return EditResult(error=None, path=path, files_update=None, occurrences=occurrences)
 		except Exception as e:
 			return EditResult(
-				error=f"Write failed: {str(e)}",
+				error=f"Edit failed: {str(e)}",
 				path=None,
 				files_update=None,
 				occurrences=0
@@ -766,8 +853,6 @@ class SandboxBackend(SandboxBackendProtocol):
 	async def als_info(self, path: str = "/") -> list[FileInfo]:
 		"""List directory contents using bwrap."""
 		await self._ensure_initialized()
-		
-		self._writer(f"📂 Listando archivos...")
 		
 		import shlex
 		normalized_path = f"/{path.lstrip('/')}"
@@ -780,12 +865,16 @@ if [ ! -d {shlex.quote(normalized_path)} ]; then
 fi
 cd {shlex.quote(normalized_path)} || exit 0
 ls -A1 | while IFS= read -r file; do
+	# Skip . and .. entries explicitly
+	if [ "$file" = "." ] || [ "$file" = ".." ]; then
+		continue
+	fi
 	stat -c '%n|%s|%Y' "$file" 2>/dev/null || true
 done
 """
 			
 		try:
-			result = await self._run_isolated(list_cmd, timeout=500)
+			result : CommandResult = await self._run_isolated(list_cmd, timeout=500)
 		except Exception as e:
 			return []
 		
@@ -799,23 +888,33 @@ done
 			if not line or '|' not in line:
 				continue
 			parts = line.split('|', 2)
-			if len(parts) >= 2:
-				filename = parts[0]
+			if len(parts) < 2:
+				continue
+			
+			filename = parts[0].strip()
+			
+			# Skip empty filenames, ".", and ".."
+			if not filename or filename == "." or filename == "..":
+				continue
 			
 			# Skip system directories when listing root
 			if normalized_path == "/" and filename in self._exclude_dirs:
 				continue
 			
+			# Construct full path with proper formatting
 			if normalized_path == "/":
-					full_path = f"/{filename}"
+				full_path = f"/{filename}"
 			else:
-				full_path = f"{normalized_path}/{filename}".replace("//", "/")
-				
+				# Ensure normalized_path doesn't end with / and filename doesn't start with /
+				normalized = normalized_path.rstrip('/')
+				fname = filename.lstrip('/')
+				full_path = f"{normalized}/{fname}".replace("//", "/")
+			
 			files.append(FileInfo(
-					path=full_path,
-					size=int(parts[1]) if parts[1].isdigit() else 0,
-					modified=parts[2] if len(parts) > 2 else None
-				))
+				path=full_path,
+				size=int(parts[1]) if parts[1].isdigit() else 0,
+				modified=parts[2] if len(parts) > 2 else None
+			))
 			
 		return files
 	
@@ -936,7 +1035,7 @@ done
 		frontmatters = []
 		
 		# User skills - read from the actual R2 mount point
-		user_skills_path = f"/mnt/r2/skills/{self._user_id}"
+		user_skills_path = "/mnt/r2/.solven/skills"
 		user_skills_exists = await self._sandbox.files.exists(user_skills_path)
 		
 		if user_skills_exists:
@@ -963,7 +1062,7 @@ done
 		where agent commands actually run, and that all resources are available.
 		
 		Reads from .solven/skills/ directory which is bound directly from
-		/mnt/r2/skills/{user_id} to /.solven/skills/ in bwrap.
+		/mnt/r2/.solven/skills to /.solven/skills/ in bwrap.
 		
 		Args:
 			skill_name: Name of the skill (e.g., 'compraventa-de-viviendas')

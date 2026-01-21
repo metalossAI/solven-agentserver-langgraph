@@ -54,7 +54,7 @@ async def build_context(
 		description=config.get("metadata").get("description"),
 	)
 
-	runtime.context.backend = SandboxBackend(runtime)
+	runtime.context.backend = SandboxBackend()
 
 	return Command(
 		goto="run_agent",

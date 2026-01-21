@@ -1,4 +1,6 @@
 import datetime
+import asyncio
+from deepagents.graph import SkillsMiddleware
 from dotenv import load_dotenv
 from langchain_core.prompts import ChatPromptTemplate
 load_dotenv()
@@ -19,6 +21,7 @@ from langgraph.config import get_config
 from deepagents import create_deep_agent, SubAgent
 
 from src.llm import LLM as llm
+from src.llm import CODING_LLM as coding_llm
 from src.models import Thread, AppContext, SolvenState, User
 
 from src.agent_catastro.agent import subagent as catastro_subagent
@@ -75,7 +78,7 @@ async def build_context(state: AgentState, runtime: Runtime):
 	
 	# Initialize backend
 	if not runtime.context.backend:
-		runtime.context.backend = SandboxBackend(runtime)
+		runtime.context.backend = await asyncio.to_thread(SandboxBackend(runtime)._ensure_initialized)
 
 
 @dynamic_prompt
@@ -84,7 +87,7 @@ async def build_prompt(request: ModelRequest):
 	# Backend is already initialized in build_context
 	runtime : Runtime[AppContext] = request.runtime
 	if not runtime.context.backend:
-		runtime.context.backend = SandboxBackend(runtime)
+		runtime.context.backend = SandboxBackend()
 	
 	backend : SandboxBackend = runtime.context.backend
 	skills_frontmatter = await backend.load_skills_frontmatter()
@@ -110,7 +113,7 @@ async def build_prompt(request: ModelRequest):
 async def build_docx_prompt(request: ModelRequest):
 	runtime : Runtime[AppContext] = request.runtime
 	if not runtime.context.backend:
-		runtime.context.backend = SandboxBackend(runtime)
+		runtime.context.backend = SandboxBackend()
 	
 	backend : SandboxBackend = runtime.context.backend
 	skill_content = await backend.get_skill_content("docx")
@@ -127,7 +130,6 @@ gmail_subagent = SubAgent(
 	system_prompt="",
 	model=llm,
 	tools=gmail_tools,
-	state_schema=SolvenState,
 )
 
 outlook_subagent = SubAgent(
@@ -136,39 +138,33 @@ outlook_subagent = SubAgent(
 	system_prompt="",
 	model=llm,
 	tools=outlook_tools,
-	state_schema=SolvenState,
 )
 
-docx_subagent = SubAgent(
-	name="asistente_docx",
-	description="agente encargado de redactar, editar y analizar documentos de word (.docx)",
-	system_prompt="",
-	model=llm,
-	tools=[
-		cargar_habilidad,
-	],
-	middleware=[
-		build_docx_prompt
-	],
-	state_schema=SolvenState,
-)
+# docx_subagent = SubAgent(
+# 	name="asistente_docx",
+# 	description="agente encargado de redactar, editar y analizar documentos de word (.docx)",
+# 	system_prompt="",
+# 	model=coding_llm,
+# 	tools=[
+# 		cargar_habilidad,
+# 	],
+# 	middleware=[
+# 		build_docx_prompt
+# 	],
+# 	state_schema=SolvenState,
+# )
 
 graph = create_deep_agent(
 	model=llm,
 	backend=lambda rt: SandboxBackend(rt),
-	tools=[
-		cargar_habilidad,
-		solicitar_archivo,
-	],
 	subagents=[
-		docx_subagent,
 		gmail_subagent,
 		outlook_subagent,
 		catastro_subagent,
 	],
 	middleware=[
 		build_context,
-		build_prompt,
+		SkillsMiddleware(backend=SandboxBackend, sources=["/mnt/skills/"])
 	],
 	context_schema=AppContext,
 )

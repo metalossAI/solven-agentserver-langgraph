@@ -95,6 +95,8 @@ template = (
     # ============================================================================
     # Required across all three skills (DOCX + PDF + XLSX)
     .pip_install([
+        "lxml",
+        "python-docx",
         # DOCX dependencies
         "defusedxml",       # Secure OOXML parsing (DOCX)
         # PDF dependencies

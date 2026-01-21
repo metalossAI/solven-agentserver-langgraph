@@ -44,7 +44,7 @@ El asistente nunca debe inventar una estructura que entre en conflicto con la pl
 
 Inicialmente vacío.
 
-## Flujo de trabajo para escrituras
+## Flujo de trabajo
 
 Debe seguirse el siguiente flujo:
 
@@ -53,16 +53,19 @@ Debe seguirse el siguiente flujo:
 2. **Cargar el documento de referencia** desde `references/[escritura_tipo]/[escritura_tipo].md`.
 3. **Seleccionar la plantilla adecuada** desde `assets/templates/`.
 4. **Copiar la plantilla seleccionada** desde `assets/templates/[escritura_tipo]/template.docx`
-5. **Editar la plantilla usando la habilidad de docx** usando el workflow redlining (DOCX).
+5. **Editar la plantilla usando la habilidad de docx** usando el workflow de redlining (DOCX).
+
+### Reglas de edición
+
+* Usar comentarios y redlining para indicar cambios al editar escrituras
+* Mantener el estilo original cuando se trabaje sobre plantillas
 
 ## Reglas de validación
 
 Antes de entregar el resultado, el asistente debe:
-
 * Garantizar la coherencia de nombres, fechas, identificadores e importes.
 * Confirmar la adecuación al documento de referencia del tipo de escritura.
 * Verificar que no falte ninguna cláusula o sección obligatoria.
-* Mantener un tono formal, neutro y jurídicamente preciso.
 
 ## Ejemplos de activación de esta skill
 

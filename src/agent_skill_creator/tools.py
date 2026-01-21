@@ -49,7 +49,7 @@ async def solicitar_recurso_de_skill(
 
         try:
             backend : SandboxBackend = runtime.context.backend
-            runtime.stream_writer(f"📤 Subiendo {filename} al espacio de trabajo...")
+            runtime.stream_writer(f"Subiendo {filename} al espacio de trabajo...")
             
             # Upload file to workspace using the new upload_file method
             result = await backend.upload_file(path, local_path)

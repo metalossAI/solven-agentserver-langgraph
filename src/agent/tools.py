@@ -10,21 +10,21 @@ async def cargar_habilidad(
     nombre_habilidad: str, 
     runtime: Annotated[ToolRuntime[AppContext], InjectedToolArg] = None
 ) -> str:
-	"""Carga una habilidad específica. Util para ejecutar tareas especializadas donde el uso de herramientas convencionales no es suficiente.
-	Por ejemplo, para redactar un documento legal o para seguir un workflow específico.
+	"""
+	Carga un skill especifico.
 	
 	Args:
-		nombre_habilidad: Nombre de la habilidad a cargar (p. ej., 'escrituras', 'docx', 'pdf', 'xlsx', 'pptx')
+		nombre_habilidad: Nombre del skill a cargar (p. ej., 'escrituras/compraventa')
 	
 	Returns:
-		El contenido completo de la habilidad en formato markdown
+		El contenido completo del skill en formato markdown
 	"""
 	backend: SandboxBackend = runtime.context.backend
 	if not backend:
 		return "Error: No hay backend disponible"
 	
 	# Stream status update
-	runtime.stream_writer(f"🔄 Cargando habilidad '{nombre_habilidad}'...")
+	runtime.stream_writer(f"Cargando instrucciones '{nombre_habilidad}'...")
 	
 	# Load the skill content using backend method
 	content = await backend.get_skill_content(nombre_habilidad)
@@ -32,7 +32,7 @@ async def cargar_habilidad(
 	if not content:
 		return f"Error: No se pudo cargar la habilidad '{nombre_habilidad}'. Verifica que el nombre sea correcto."
 	
-	runtime.stream_writer(f"✅ Habilidad '{nombre_habilidad}' cargada")
+	runtime.stream_writer(f"Instrucciones cargadas")
 	
 	# Return the skill content directly
 	return content

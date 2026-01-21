@@ -91,7 +91,7 @@ class SandboxBackend(SandboxBackendProtocol):
 			skill_name = runtime.context.skill_create.name
 			if skill_name:
 		# Normalize skill name (lowercase, replace spaces with hyphens, remove special chars)
-		import re
+				import re
 				self._skill_name = re.sub(r'[^a-z0-9-]', '', skill_name.lower().replace(' ', '-'))
 		
 		# Paths
@@ -132,7 +132,7 @@ class SandboxBackend(SandboxBackendProtocol):
 		await self._initialize_workspace()
 		
 		self._initialized = True
-		self._writer("✅ Espacio de trabajo listo")
+		self._writer("Espacio de trabajo listo")
 	
 	async def _create_or_connect_sandbox(self) -> tuple[AsyncSandbox, bool]:
 		"""
@@ -912,10 +912,10 @@ done
 		try:
 			content_bytes = await self._sandbox.files.read(skill_md_path)
 			content = content_bytes.decode('utf-8') if isinstance(content_bytes, bytes) else content_bytes
-				return content
-			except Exception as e:
+			return content
+		except Exception as e:
 			# SKILL.md not found or not accessible
-		return None
+			return None
 	
 	async def aclose(self) -> None:
 		"""Close sandbox and cleanup."""

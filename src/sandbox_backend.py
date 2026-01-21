@@ -5,16 +5,10 @@ Implements the BackendProtocol for filesystem operations in an isolated sandbox 
 ARCHITECTURE OVERVIEW:
 ======================
 
-Hybrid Venv Approach:
-- **Dependency files on R2** (pyproject.toml, package.json, lockfiles) - Persisted, tracked
-- **Venvs on local filesystem** (/tmp/workspace/.venv, /tmp/workspace/node_modules) - Fast, no FUSE issues 
-- **On startup**: Read dep files from R2, create venvs locally, install deps
-
-Benefits:
-- No FUSE symlink/atomic write issues
-- Fast venv operations
-- Deps persist across sandboxes
-- Clean separation: user files on R2, runtime artifacts local
+Simple Mount Approach:
+- **Thread workspace**: Mounted from `threads/{thread_id}` to `/home/user` (writable)
+- **Skills**: Mounted from `skills/{user_id}` to `/mnt/skills` (writable)
+- **Ticket**: Mounted from `threads/{ticket_id}` to `/mnt/.ticket` (read-only, if ticket exists)
 """
 import os
 import re
@@ -23,13 +17,13 @@ import asyncio
 from typing import Optional
 from datetime import datetime
 
-from e2b import AsyncSandbox, CommandResult, SandboxQuery, SandboxState
-from e2b.sandbox.commands.command_handle import CommandExitException
+from e2b import Sandbox, CommandResult, SandboxQuery, SandboxState
 
-from deepagents.backends.protocol import SandboxBackendProtocol, WriteResult, EditResult, ExecuteResponse
+from deepagents.backends.protocol import SandboxBackendProtocol, WriteResult, EditResult, ExecuteResponse, FileDownloadResponse, FileUploadResponse
 from deepagents.backends.utils import FileInfo, GrepMatch
 from langchain.tools import ToolRuntime
-from langgraph.config import get_stream_writer
+from langgraph.config import get_stream_writer, get_config
+from langgraph.graph.state import RunnableConfig
 from src.models import AppContext
 
 
@@ -63,85 +57,70 @@ SANDBOX_TEMPLATE = "solven-sandbox-v1"
 
 class SandboxBackend(SandboxBackendProtocol):
 	"""
-	E2B Sandbox backend with hybrid venv approach.
+	E2B Sandbox backend with simple mount approach.
 	
-	Paths:
-	- R2 workspace: /mnt/r2/threads/{thread_id} - User files + dep files
-	- Local workspace: /tmp/workspace - Venvs (.venv, node_modules)
+	Mount structure:
+	- Workspace: /workspace - Mounted from threads/{thread_id} (writable)
+	- Skills: /mnt/skills - Mounted from skills/{user_id} (writable)
+	- Ticket: /.ticket - Mounted from threads/{ticket_id} (read-only, if exists)
 	"""
 	
 	def __init__(self, runtime: ToolRuntime[AppContext]):
-		self._sandbox: Optional[AsyncSandbox] = None
-		self._runtime = runtime
+		self._sandbox: Optional[Sandbox] = None
 		self._writer = get_stream_writer()  # Use LangGraph's get_stream_writer() function
 		
-		# Handle case where context might not be fully initialized yet
-		if runtime.context.thread is None:
-			raise RuntimeError("Cannot initialize SandboxBackend: runtime.context.thread is None")
+		# Extract IDs from config instead of runtime context
+		config: RunnableConfig = get_config()
 		
-		self._thread_id = runtime.context.thread.id
-		self._user_id = runtime.context.user.id
-		self._ticket_id = runtime.context.ticket.id if runtime.context.ticket else None
+		# Thread ID comes from configurable (set by LangGraph SDK)
+		thread_id = config["configurable"].get("thread_id")
+		if not thread_id:
+			raise RuntimeError("Cannot initialize SandboxBackend: thread_id not found in config")
+		self._thread_id = thread_id
+		
+		# Extract user data from auth
+		user_config = config["configurable"].get("langgraph_auth_user")
+		user_data = user_config.get("user_data") if user_config else {}
+		user_id = user_data.get("id")
+		if not user_id:
+			raise RuntimeError("Cannot initialize SandboxBackend: user_id not found in config")
+		self._user_id = user_id
+		
+		# Extract ticket_id from metadata
+		metadata = config.get("metadata", {})
+		self._ticket_id = metadata.get("ticket_id")
 		
 		# Paths
-		self._r2_workspace = f"/mnt/r2/threads/{self._thread_id}"  # R2 FUSE mount
-		self._local_workspace = "/tmp/workspace"  # Local fast storage
+		self._workspace = "/workspace"  # Main workspace (mounted from threads/{thread_id})
+		self._skills_mount = "/mnt/skills"  # Skills mount (from skills/{user_id})
+		self._ticket_mount = "/.ticket"  # Ticket mount (from threads/{ticket_id})
 		
-		# System directories to exclude from search/list operations
-		# These are bind mounts, system paths, and caches that shouldn't be searched
-		self._exclude_dirs = [".keep",".cache", ".local", ".venv", "node_modules", "bin", "dev", 
-		                      "etc", "lib", "lib64", "proc", "usr", "sys", "run", "tmp"]
+		# Directories to show (everything else is filtered)
+		self._allowed_dirs = ["workspace", "mnt", ".ticket"]
+		
+		# Only show these directories at root level - filter everything else
+		# This ensures we only see workspace, mnt, and .ticket
+		self._allowed_root_dirs = ["workspace", "mnt", ".ticket"]
 		
 		# State
 		self._initialized = False
-		self._init_lock = asyncio.Lock()
 	
-	async def _ensure_initialized(self) -> None:
+	def _ensure_initialized(self) -> None:
 		"""Ensure sandbox is initialized (idempotent)."""
-		if self._initialized:
+		if self._sandbox is not None:
 			return
 		
-		async with self._init_lock:
-			if self._initialized:
-				return
-			
-			self._writer("🔧 Preparando espacio de trabajo...")
-			
-		# Step 1: Create or connect to sandbox
-		self._sandbox, is_existing = await self._create_or_connect_sandbox()
+		print(f"[_ensure_initialized] Starting initialization for thread_id={self._thread_id}, user_id={self._user_id}", flush=True)
+		self._writer("🔧 Preparando espacio de trabajo...")
 		
-		# Step 2-4: Run setup (always needed, even for existing sandboxes)
-		# Venvs are in /tmp/workspace which is ephemeral, so they need to be recreated
-		if not is_existing:
-			# Mount R2 buckets (only for new sandboxes)
-			await self._mount_r2_buckets()
-		
-		# ALWAYS initialize workspace (venvs are ephemeral in /tmp)
-		self._writer("📦 Instalando dependencias...")
-		await self._initialize_workspace()
-		
-		# ALWAYS ensure R2 skill directories exist (bwrap will bind-mount them)
-		self._writer("🔧 Comprobando que todo funcione...")
-		await self._setup_skill_directories()
-		
-		self._initialized = True
-		self._writer("✅ Espacio de trabajo listo")
-	
-	async def _create_or_connect_sandbox(self) -> tuple[AsyncSandbox, bool]:
-		"""
-		Get existing sandbox or create new E2B sandbox with environment variables.
-		
-		Returns:
-			Tuple of (sandbox, is_existing) where is_existing is True if connected to existing sandbox
-		"""
+		# Step 1: Try to find existing sandbox
 		try:
-			paginator = AsyncSandbox.list(
+			existing_sandboxes = Sandbox.list(
 				query=SandboxQuery(
-					metadata={"threadId": self._thread_id},
+					metadata={"threadId": self._thread_id, "userId": str(self._user_id)},
 					state=[SandboxState.RUNNING, SandboxState.PAUSED]
 				)
 			)
-			existing_sandboxes = await paginator.next_items()
 			
 			if existing_sandboxes and len(existing_sandboxes) > 0:
 				existing_sandbox = existing_sandboxes[0]
@@ -149,20 +128,36 @@ class SandboxBackend(SandboxBackendProtocol):
 				
 				if sandbox_id:
 					try:
-
-						sandbox = await AsyncSandbox.connect(sandbox_id)
-						return sandbox, True  # Existing sandbox
+						self._sandbox = Sandbox.connect(sandbox_id)
+						print(f"[_ensure_initialized] ✓ Connected to existing sandbox: {sandbox_id}", flush=True)
+						
+						# Verify mount is accessible - if not, remount
+						try:
+							check_result = self._sandbox.commands.run("test -d /mnt/skills && echo 'MOUNT_OK' || echo 'MOUNT_MISSING'", timeout=5)
+							mount_status = check_result.stdout.strip()
+							print(f"[_ensure_initialized] Mount check: {mount_status}", flush=True)
+							
+							if "MOUNT_MISSING" in mount_status:
+								print(f"[_ensure_initialized] Mounts missing, remounting...", flush=True)
+								self._mount_r2_buckets()
+						except Exception as e:
+							print(f"[_ensure_initialized] Error checking mounts: {e}, attempting to mount...", flush=True)
+							self._mount_r2_buckets()
+						
+						self._initialized = True
+						return
 					except Exception as e:
-						print(f"[Sandbox] ✗ Failed to connect to existing sandbox {sandbox_id}: {e}", flush=True)
-						# Continue to create new sandbox below
+						print(f"[_ensure_initialized] ✗ Failed to connect to existing sandbox {sandbox_id}: {e}", flush=True)
 		except Exception as e:
-			pass
+			print(f"[_ensure_initialized] ✗ Error listing sandboxes: {e}", flush=True)
+		
+		# Step 2: Create new sandbox if not found
 		env_vars = {
 			"THREAD_ID": self._thread_id,
 			"USER_ID": str(self._user_id),
 		}
 		
-		# Add R2 credentials if present (using correct env var names)
+		# Add R2 credentials if present
 		if bucket := os.getenv("R2_BUCKET_NAME"):
 			env_vars["S3_BUCKET_NAME"] = bucket
 		if access_key := os.getenv("R2_ACCESS_KEY_ID"):
@@ -173,26 +168,28 @@ class SandboxBackend(SandboxBackendProtocol):
 			env_vars["S3_ENDPOINT_URL"] = endpoint
 		if region := os.getenv("R2_REGION"):
 			env_vars["S3_REGION"] = region
-		else:
-			env_vars["S3_REGION"] = "auto"
 		
-		if self._ticket_id:
-			env_vars["TICKET_ID"] = str(self._ticket_id)
-		
-		sandbox = await AsyncSandbox.create(
+		self._sandbox = Sandbox.create(
 			template=SANDBOX_TEMPLATE,
 			envs=env_vars,
-			timeout=180,  # 3 minutes in s
-				metadata={
+			timeout=180,
+			metadata={
 				"threadId": self._thread_id,
 				"userId": str(self._user_id),
 				"ticketId": str(self._ticket_id) if self._ticket_id else "",
 			},
 		)
 		
-		return sandbox, False  # New sandbox
+		print(f"[_ensure_initialized] ✓ Created new sandbox: {self._sandbox.sandbox_id}", flush=True)
+		
+		# Step 3: Mount R2 buckets for new sandbox
+		self._mount_r2_buckets()
+		
+		self._initialized = True
+		self._writer("Espacio de trabajo listo")
+		print(f"[_ensure_initialized] ✓ Initialization complete", flush=True)
 	
-	async def _mount_r2_buckets(self) -> None:
+	def _mount_r2_buckets(self) -> None:
 		"""Mount R2 buckets using rclone."""
 		
 		# Get credentials from environment (support both R2_ and S3_ prefixes)
@@ -206,11 +203,11 @@ class SandboxBackend(SandboxBackendProtocol):
 			return
 	
 		# Upload mount scripts from files
-		await self._upload_mount_scripts()
+		self._upload_mount_scripts()
 		
 		try:
 			env_vars = f"S3_ENDPOINT_URL='{endpoint}' S3_ACCESS_KEY_ID='{access_key}' S3_ACCESS_SECRET='{secret}' S3_REGION='{region}'"
-			result = await self._sandbox.commands.run(
+			result = self._sandbox.commands.run(
 				f"{env_vars} sudo -E bash /tmp/create_rclone_config.sh",
 				timeout=180
 			)
@@ -219,55 +216,186 @@ class SandboxBackend(SandboxBackendProtocol):
 		except Exception as e:
 			raise
 		
-		# Mount thread workspace (critical - must succeed)
-		mount_cmd = f'bash /tmp/mount_s3_path.sh "{bucket}" "threads/{self._thread_id}" "{self._r2_workspace}" "/tmp/rclone-thread.log"'
+		# Mount thread workspace to /workspace - critical, must succeed
+		# First ensure workspace directory exists
+		self._sandbox.commands.run(f"sudo mkdir -p {self._workspace}", timeout=30)
+		
+		# Check if workspace is already mounted
 		try:
-			result = await self._sandbox.commands.run(mount_cmd, timeout=300)
+			check_mount = self._sandbox.commands.run(
+				f"mountpoint -q {self._workspace} 2>/dev/null && echo 'ALREADY_MOUNTED' || echo 'NOT_MOUNTED'",
+				timeout=10
+			)
+			if "ALREADY_MOUNTED" in check_mount.stdout:
+				print(f"[Mount] {self._workspace} is already mounted, skipping mount", flush=True)
+				# Verify it's accessible
+				verify_result = self._sandbox.commands.run(
+					f"test -d {self._workspace} && ls {self._workspace} >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
+					timeout=10
+				)
+				if "MOUNT_OK" in verify_result.stdout:
+					return  # Already mounted and working
+				# Mount exists but not accessible, try to unmount and remount
+				print(f"[Mount] Existing mount not accessible, attempting to unmount and remount", flush=True)
+				self._sandbox.commands.run(
+					f"sudo umount {self._workspace} 2>/dev/null || true",
+					timeout=30
+				)
+		except Exception as e:
+			# If check fails, continue with mount attempt
+			print(f"[Mount] Could not check existing mount: {e}", flush=True)
+		
+		mount_cmd = f'bash /tmp/mount_s3_path.sh "{bucket}" "threads/{self._thread_id}" "{self._workspace}" "/tmp/rclone-thread.log"'
+		try:
+			# Run mount command with longer timeout (rclone mounts can take time)
+			print(f"[Mount] Starting mount command: {mount_cmd}", flush=True)
+			result = self._sandbox.commands.run(mount_cmd, timeout=600)
 			if result.exit_code != 0:
 				# Show rclone log if available
-				log_result = await self._sandbox.commands.run(
-					"tail -50 /tmp/rclone-thread.log 2>&1 || echo 'No log file'",
-					timeout=500
+				try:
+					log_result = self._sandbox.commands.run(
+						"tail -100 /tmp/rclone-thread.log 2>&1 || echo 'No log file'",
+						timeout=10
+					)
+					log_output = log_result.stdout if log_result else "No log available"
+				except:
+					log_output = "Could not read log file"
+				raise RuntimeError(
+					f"Failed to mount thread workspace (exit {result.exit_code}): "
+					f"{result.stderr or result.stdout}\n\nLog output:\n{log_output}"
 				)
-				raise RuntimeError(f"Failed to mount thread workspace (exit {result.exit_code}): {result.stderr or result.stdout}")
-		except Exception as e:
+			
+			# Verify mount is actually accessible (wait a bit for mount to stabilize)
+			import time
+			time.sleep(2)
+			verify_result = self._sandbox.commands.run(
+				f"test -d {self._workspace} && ls {self._workspace} >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
+				timeout=30
+			)
+			if "MOUNT_OK" not in verify_result.stdout:
+				# Check if rclone process is still running
+				ps_result = self._sandbox.commands.run(
+					"ps aux | grep 'rclone.*mount.*threads' | grep -v grep || echo 'NO_PROCESS'",
+					timeout=10
+				)
+				raise RuntimeError(
+					f"Mount verification failed. Workspace mount may not be accessible.\n"
+					f"Rclone process status: {ps_result.stdout}\n"
+					f"Check log: /tmp/rclone-thread.log"
+				)
+		except Exception as timeout_exc:
+			# Timeout or other exception occurred - try to get diagnostic info
+			is_timeout = isinstance(timeout_exc, TimeoutError) or "timeout" in str(timeout_exc).lower()
+			
 			try:
-				log_result = await self._sandbox.commands.run(
-					"tail -50 /tmp/rclone-thread.log 2>&1 || echo 'No log file'",
-					timeout=500
+				log_result = self._sandbox.commands.run(
+					"tail -100 /tmp/rclone-thread.log 2>&1 || echo 'No log file'",
+					timeout=10
 				)
+				ps_result = self._sandbox.commands.run(
+					"ps aux | grep rclone | grep -v grep || echo 'No rclone processes'",
+					timeout=10
+				)
+				mount_result = self._sandbox.commands.run(
+					f"mountpoint {self._workspace} 2>&1 || mount | grep {self._workspace} || echo 'Not mounted'",
+					timeout=10
+				)
+				log_output = log_result.stdout if log_result else "No log available"
+				ps_output = ps_result.stdout if ps_result else "Could not check processes"
+				mount_output = mount_result.stdout if mount_result else "Could not check mount status"
 			except:
-				pass
-			raise RuntimeError(f"Thread mount timed out - check rclone configuration and S3 connectivity")
+				log_output = "Could not read diagnostics"
+				ps_output = "Could not check processes"
+				mount_output = "Could not check mount status"
+			
+			error_msg = (
+				f"Thread mount {'timed out after 600 seconds' if is_timeout else 'failed'}.\n"
+				f"Exception: {str(timeout_exc)}\n"
+				f"Rclone processes: {ps_output}\n"
+				f"Mount status: {mount_output}\n"
+				f"Log output:\n{log_output}\n"
+				f"Check rclone configuration and S3 connectivity."
+			)
+			raise RuntimeError(error_msg)
+		except RuntimeError:
+			# Re-raise RuntimeErrors as-is
+			raise
+		except Exception as e:
+			# Catch any other exceptions and provide context
+			try:
+				log_result = self._sandbox.commands.run(
+					"tail -100 /tmp/rclone-thread.log 2>&1 || echo 'No log file'",
+					timeout=10
+				)
+				log_output = log_result.stdout if log_result else "No log available"
+			except:
+				log_output = "Could not read log file"
+			
+			raise RuntimeError(
+				f"Thread mount failed with exception: {str(e)}\n"
+				f"Log output:\n{log_output}"
+			)
 		
-		# Mount user skills directory to /mnt/r2/.solven/skills/ (matches bwrap path structure)
+		# Mount user skills directory to /mnt/skills
 		try:
-			# Ensure parent directory exists
-			await self._sandbox.commands.run("mkdir -p /mnt/r2/.solven", timeout=500)
-			result = await self._sandbox.commands.run(
-				f'bash /tmp/mount_s3_path.sh "{bucket}" "skills/{self._user_id}" "/mnt/r2/.solven/skills" "/tmp/rclone-skills-user.log"',
-					timeout=500
+			# Ensure parent directory exists and is visible
+			self._sandbox.commands.run("sudo mkdir -p /mnt", timeout=30)
+			# Verify mnt directory exists and is accessible
+			verify_mnt = self._sandbox.commands.run(
+				"test -d /mnt && ls -la /mnt >/dev/null 2>&1 && echo 'MNT_OK' || echo 'MNT_FAILED'",
+				timeout=10
+			)
+			print(f"[Mount] /mnt directory check: {verify_mnt.stdout}", flush=True)
+			
+			result = self._sandbox.commands.run(
+				f'bash /tmp/mount_s3_path.sh "{bucket}" "skills/{self._user_id}" "{self._skills_mount}" "/tmp/rclone-skills-user.log"',
+				timeout=500
 			)
 			if result.exit_code != 0:
 				raise RuntimeError(f"Failed to mount user skills (exit {result.exit_code})")
+			
+			# Verify mount is accessible
+			import time
+			time.sleep(2)
+			verify_mount = self._sandbox.commands.run(
+				"test -d /mnt/skills && ls /mnt/skills >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
+				timeout=10
+			)
+			print(f"[Mount] /mnt/skills mount check: {verify_mount.stdout}", flush=True)
 		except Exception as e:
 			raise
 		
-		# Mount ticket if exists (optional) to /mnt/r2/.ticket (matches bwrap path structure)
+		# Mount ticket if exists (optional) to /.ticket
 		if self._ticket_id:
 			try:
-				# Ensure parent directory exists
-				await self._sandbox.commands.run("mkdir -p /mnt/r2/.ticket", timeout=500)
-				result = await self._sandbox.commands.run(
-					f'bash /tmp/mount_s3_path.sh "{bucket}" "threads/{self._ticket_id}" "/mnt/r2/.ticket" "/tmp/rclone-ticket.log"',
-						timeout=500
+				# Ensure parent directory exists and is visible
+				self._sandbox.commands.run("sudo mkdir -p /.ticket", timeout=30)
+				# Verify .ticket directory exists
+				verify_ticket = self._sandbox.commands.run(
+					"test -d /.ticket && ls -la /.ticket >/dev/null 2>&1 && echo 'TICKET_OK' || echo 'TICKET_FAILED'",
+					timeout=10
+				)
+				print(f"[Mount] .ticket directory check: {verify_ticket.stdout}", flush=True)
+				
+				result = self._sandbox.commands.run(
+					f'bash /tmp/mount_s3_path.sh "{bucket}" "threads/{self._ticket_id}" "{self._ticket_mount}" "/tmp/rclone-ticket.log"',
+					timeout=500
 				)
 				if result.exit_code != 0:
 					raise RuntimeError(f"Failed to mount ticket workspace (exit {result.exit_code})")
+				
+				# Verify mount is accessible
+				import time
+				time.sleep(2)
+				verify_mount = self._sandbox.commands.run(
+					"test -d /.ticket && ls /.ticket >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
+					timeout=10
+				)
+				print(f"[Mount] .ticket mount check: {verify_mount.stdout}", flush=True)
 			except Exception as e:
 				pass
 	
-	async def _upload_mount_scripts(self) -> None:
+	def _upload_mount_scripts(self) -> None:
 		"""Upload rclone mount scripts to sandbox from files."""
 		# Get script directory path
 		src_dir = os.path.dirname(os.path.abspath(__file__))
@@ -286,230 +414,26 @@ class SandboxBackend(SandboxBackendProtocol):
 		
 		# Upload scripts to sandbox
 		try:
-			await self._sandbox.files.write("/tmp/create_rclone_config.sh", config_script)
+			self._sandbox.files.write("/tmp/create_rclone_config.sh", config_script)
 			
-			await self._sandbox.files.write("/tmp/mount_s3_path.sh", mount_script)
+			self._sandbox.files.write("/tmp/mount_s3_path.sh", mount_script)
 		except Exception as e:
 			raise
 		
 		# Verify files exist
-		verify_result = await self._sandbox.commands.run("ls -la /tmp/*.sh", timeout=500)
+		verify_result = self._sandbox.commands.run("ls -la /tmp/*.sh", timeout=500)
 		
 		# Make scripts executable
-		chmod_result = await self._sandbox.commands.run("chmod +x /tmp/create_rclone_config.sh /tmp/mount_s3_path.sh", timeout=500)
+		chmod_result = self._sandbox.commands.run("chmod +x /tmp/create_rclone_config.sh /tmp/mount_s3_path.sh", timeout=500)
 		if chmod_result.exit_code != 0:
 			raise RuntimeError(f"Failed to make scripts executable: {chmod_result.stderr}")
-		
 	
-	async def _initialize_workspace(self) -> None:
-		"""Set up local workspace with venvs from R2 dependency files."""
-		
-		# Ensure local workspace directory exists
-		await self._sandbox.commands.run(f"mkdir -p {self._local_workspace}", timeout=500)
-		
-		# Python setup
-		pyproject_r2 = f"{self._r2_workspace}/pyproject.toml"
-		uvlock_r2 = f"{self._r2_workspace}/uv.lock"
-		pyproject_exists = await self._sandbox.files.exists(pyproject_r2)
-		
-		if not pyproject_exists:
-			# Load pyproject.toml template from resources
-			resources_dir = os.path.join(os.path.dirname(__file__), "e2b_sandbox", "resources")
-			pyproject_template_path = os.path.join(resources_dir, "pyproject.toml")
-			
-			with open(pyproject_template_path, "r") as f:
-				pyproject_content = f.read()
-			
-			await self._sandbox.files.write(pyproject_r2, pyproject_content)
-		else:
-			pass
-		# ALWAYS copy pyproject.toml from R2 to local workspace
-		copy_cmd = f"cp {pyproject_r2} {self._local_workspace}/pyproject.toml"
-		
-		# Also copy uv.lock if it exists
-		uvlock_exists = await self._sandbox.files.exists(uvlock_r2)
-		if uvlock_exists:
-			copy_cmd += f" && cp {uvlock_r2} {self._local_workspace}/uv.lock"
-		
-		# Execute the copy command first
-		result = await self._sandbox.commands.run(copy_cmd, timeout=500)
-		if result.exit_code != 0:
-			raise RuntimeError(f"Failed to copy Python dependency files: {result.stderr}")
-		
-		# Now validate uv.lock if it was copied (files are now in place)
-		if uvlock_exists:
-			validate_result = await self._sandbox.commands.run(
-				f"cd {self._local_workspace} && uv sync --dry-run 2>&1",
-				timeout=500
-			)
-			if validate_result.exit_code != 0 or "Failed to parse" in validate_result.stderr or "TOML parse error" in validate_result.stderr:
-				# Remove corrupted lockfile from both local and R2
-				await self._sandbox.commands.run(
-					f"rm -f {self._local_workspace}/uv.lock {uvlock_r2}",
-					timeout=500
-				)
-				uvlock_exists = False  # Treat as if it doesn't exist
-
-		# Create Python venv locally and sync (don't install workspace as package)
-		result = await self._sandbox.commands.run(
-			f"cd {self._local_workspace} && uv venv && uv sync --no-install-project",
-			timeout=900
-		)
-		if result.exit_code != 0:
-			raise RuntimeError(f"Python venv setup failed: {result.stderr}")
-		
-		# Node setup
-		package_r2 = f"{self._r2_workspace}/package.json"
-		bunlock_r2 = f"{self._r2_workspace}/bun.lockb"
-		package_exists = await self._sandbox.files.exists(package_r2)
-		
-		if not package_exists:
-			# Load package.json template from resources
-			resources_dir = os.path.join(os.path.dirname(__file__), "e2b_sandbox", "resources")
-			package_template_path = os.path.join(resources_dir, "package.json")
-			
-			with open(package_template_path, "r") as f:
-				package_content = f.read()
-			await self._sandbox.files.write(package_r2, package_content)
-		else:
-			pass
-			# ALWAYS copy dependency files from R2 to local (they may have been updated by previous sandbox)
-		copy_cmd = f"cp {package_r2} {self._local_workspace}/package.json"
-		
-		# Also copy bun.lockb if it exists
-		bunlock_exists = await self._sandbox.files.exists(bunlock_r2)
-		if bunlock_exists:
-			copy_cmd += f" && cp {bunlock_r2} {self._local_workspace}/bun.lockb"
-			print(f"[Bun] ✓ Found existing bun.lockb on R2", flush=True)
-		
-		result = await self._sandbox.commands.run(copy_cmd, timeout=500)
-		if result.exit_code != 0:
-			raise RuntimeError(f"Failed to copy Node dependency files: {result.stderr}")
-
-		result = await self._sandbox.commands.run(
-			f"cd {self._local_workspace} && bun install",
-			timeout=300
-		)
-		if result.exit_code != 0:
-			raise RuntimeError(f"Bun install failed: {result.stderr}")
-	
-	async def _setup_skill_directories(self) -> None:
-		"""Ensure R2 skill source directories exist (bwrap will handle bind-mounts).
-		
-		We only ensure the SOURCE directories on R2 exist:
-		- /mnt/r2/.solven/skills (mounted from R2 bucket skills/{user_id})
-		
-		Bwrap will bind-mount this to /.solven/skills/:
-		- --bind /mnt/r2/.solven/skills /.solven/skills/
-		"""
-		
-		# User skills are mounted at /mnt/r2/.solven/skills (matches bwrap path)
-		# The mount itself ensures the directory exists, but verify it's accessible
-		user_skills_path = "/mnt/r2/.solven/skills"
-		user_skills_exists = await self._sandbox.files.exists(user_skills_path)
-		
-		if not user_skills_exists:
-			# Mount should have created this, but if not, create it
-			await self._sandbox.commands.run(f"mkdir -p {user_skills_path}", timeout=500)
-		
-		# Verify R2 skill mount has content
-		user_check = await self._sandbox.commands.run(
-			f"ls {user_skills_path} 2>&1 | head -5 || echo 'Empty or not found'",
-			timeout=500
-		)
-		
-		user_count = len([l for l in user_check.stdout.strip().split('\n') if l and 'Empty' not in l])
-
-		# Ensure ticket directory exists on R2 if ticket exists
-		# Ticket is mounted at /mnt/r2/.ticket (matches bwrap path)
-		if self._ticket_id:
-			ticket_path = "/mnt/r2/.ticket"
-			ticket_exists = await self._sandbox.files.exists(ticket_path)
-			if not ticket_exists:
-				# Mount should have created this, but if not, create it
-				await self._sandbox.commands.run(f"mkdir -p {ticket_path}", timeout=500)
-	
-	async def _run_isolated(self, command: str, timeout: int = 30000):
-		"""Run command with bwrap isolation.
-		
-		Bind-mounts R2 skills directly to /.solven/skills/ so:
-		- Agent can read and modify skills from /.solven/skills/
-		- Agent modifications to user skills persist to /mnt/r2/.solven/skills
-		- User skills are shared across all workspaces for the same user
-		- Path structure is consistent: /.solven/skills/ in bwrap = /mnt/r2/.solven/skills/ on host
-		"""
-		import shlex
-		
-		# Build bwrap command
-		bwrap_cmd = [
-			"bwrap",
-			
-			# Mount R2 workspace as / (writable)
-			"--bind", self._r2_workspace, "/",
-			
-			# Mount local venvs into workspace (writable)
-			"--bind", f"{self._local_workspace}/.venv", "/.venv",
-			"--bind", f"{self._local_workspace}/node_modules", "/node_modules",
-			
-			# Bind-mount R2 user skills directly to /.solven/skills/
-			# User skills (writable - modifications persist to R2!)
-			# Mount path matches bwrap path: /mnt/r2/.solven/skills -> /.solven/skills/
-			"--bind", "/mnt/r2/.solven/skills", "/.solven/skills",
-		]
-		
-		# Ticket (read-only) if exists
-		# Mount path matches bwrap path: /mnt/r2/.ticket -> /.ticket/
-		if self._ticket_id:
-			bwrap_cmd.extend([
-				"--ro-bind", "/mnt/r2/.ticket", "/.ticket",
-			])
-		
-		# Continue with system binds
-		bwrap_cmd.extend([
-			# System binds (read-only)
-			"--ro-bind", "/usr", "/usr",
-			"--ro-bind", "/lib", "/lib",
-			"--ro-bind", "/lib64", "/lib64",
-			"--ro-bind", "/bin", "/bin",
-			"--ro-bind", "/etc", "/etc",
-			
-			# System resources
-			"--proc", "/proc",
-			"--dev", "/dev",
-			
-			# Cache directories (tmpfs to avoid FUSE issues)
-			"--tmpfs", "/.cache",
-			"--tmpfs", "/.local",
-			
-			# Working directory
-			"--chdir", "/",
-			
-			# Environment
-			"--setenv", "HOME", "/",
-			"--setenv", "PATH", "/.venv/bin:/node_modules/.bin:/usr/local/bin:/usr/bin:/bin",
-			"--setenv", "PYTHONUNBUFFERED", "1",
-			"--setenv", "PYTHONDONTWRITEBYTECODE", "1",
-			"--setenv", "NODE_ENV", "development",
-			"--setenv", "UV_CACHE_DIR", "/.cache/uv",
-			"--setenv", "BUN_INSTALL_CACHE_DIR", "/.cache/bun",
-			
-			# Command
-			"/bin/bash", "-c", command
-		])
-		
-		cmd_str = " ".join(shlex.quote(arg) for arg in bwrap_cmd)
-		return await self._sandbox.commands.run(cmd_str, timeout=timeout)
-	
-	async def _filter_unwanted_commands(self, command: str) -> Optional[str]:
+	def _filter_unwanted_commands(self, command: str) -> Optional[str]:
 		"""Block dangerous commands."""
 		unwanted = {
-			r"\buv\s+init\b": "Error: Use 'uv add <package>' to add packages (project already initialized)",
-			r"\bbun\s+init\b": "Error: Use 'bun add <package>' to add packages (project already initialized)",
-			r"\bsudo\b": "Error: sudo is not allowed in isolated environment",
+			r"\bsudo\b": "Error: sudo is not allowed in sandbox environment",
 			r"\bapt-get\b": "Error: apt-get is not allowed (system packages pre-installed)",
 			r"\bapt\b": "Error: apt is not allowed (system packages pre-installed)",
-			r"\bpip\b": "Error: Usa 'uv add <package>' en lugar de pip",
-			r"\bnpm\b": "Error: Usa 'bun add <package>' en lugar de npm",
 		}
 		
 		for pattern, message in unwanted.items():
@@ -517,27 +441,21 @@ class SandboxBackend(SandboxBackendProtocol):
 				return message
 		return None
 	
-	async def aexecute(self, command: str) -> ExecuteResponse:
-		"""Execute command and sync deps back to R2 if changed."""
-		await self._ensure_initialized()
+	def execute(self, command: str) -> ExecuteResponse:
+		"""Execute command directly in sandbox. Pass command as-is without any path manipulation."""
+		self._ensure_initialized()
 		
 		# Filter unwanted commands
-		if error_msg := await self._filter_unwanted_commands(command):
+		if error_msg := self._filter_unwanted_commands(command):
 			return ExecuteResponse(
 				output=error_msg,
 				exit_code=1,
 				truncated=False
 			)
 		
-		# Stream status for installation/execution commands
-		if "uv add" in command or "bun add" in command:
-			self._writer("📦 Instalando dependencia...")
-		elif "uv run" in command or "bun run" in command or "python" in command:
-			self._writer("▶️ Ejecutando comando...")
-		
-		# Run command in isolated environment
+		# Run command directly - pass as-is to sandbox
 		try:
-			result = await self._run_isolated(command, timeout=500)
+			result = self._sandbox.commands.run(command, timeout=500)
 		except Exception as e:
 			return ExecuteResponse(
 				output=f"Error executing command: {str(e)}",
@@ -547,30 +465,9 @@ class SandboxBackend(SandboxBackendProtocol):
 		
 		# Flush filesystem changes to ensure FUSE mounts see them
 		try:
-			await self._sandbox.commands.run("sync", timeout=500)
+			self._sandbox.commands.run("sync", timeout=500)
 		except:
 			pass  # Sync failures are not critical
-		
-		# If command modified dependencies, sync back to R2
-		if "uv add" in command or "uv remove" in command:
-			try:
-				await self._sandbox.commands.run(
-					f"cp {self._local_workspace}/pyproject.toml {self._r2_workspace}/pyproject.toml && "
-					f"cp {self._local_workspace}/uv.lock {self._r2_workspace}/uv.lock 2>/dev/null || true",
-					timeout=500
-				)
-			except:
-				pass  # Sync failures are not critical
-		
-		if "bun add" in command or "bun remove" in command:
-			try:
-				await self._sandbox.commands.run(
-					f"cp {self._local_workspace}/package.json {self._r2_workspace}/package.json && "
-					f"cp {self._local_workspace}/bun.lockb {self._r2_workspace}/bun.lockb 2>/dev/null || true",
-					timeout=500
-				)
-			except:
-				pass  # Sync failures are not critical
 		
 		return ExecuteResponse(
 			output=result.stdout + result.stderr,
@@ -578,55 +475,42 @@ class SandboxBackend(SandboxBackendProtocol):
 			truncated=False
 		)
 	
-	async def aread(self, path: str, offset: int = 0, limit: int = 2000) -> str:
-		"""Read file using bwrap (no path resolution needed - bwrap handles mounts)."""
-		await self._ensure_initialized()
+	async def aexecute(self, command: str) -> ExecuteResponse:
+		"""Async version of execute."""
+		return await asyncio.to_thread(self.execute, command)
+	
+	def read(self, path: str, offset: int = 0, limit: int = 2000) -> str:
+		"""Read file using sandbox.files API. Pass path directly to sandbox."""
+		self._ensure_initialized()
+		file_type = path.split('.')[-1]
+		disallowed_file_types = ["pdf", "docx", "xlsx", "pptx"]
+		if file_type in disallowed_file_types:
+			return f"To read this file, please use the corresponsing skill"
 		
-		import shlex
-		normalized_path = f"/{path.lstrip('/')}"
-		# Build command to read file
-		read_cmd = f"""
-if [ ! -f {shlex.quote(normalized_path)} ]; then
-	echo "__FILE_NOT_EXIST__"
-	exit 0
-fi
-cat {shlex.quote(normalized_path)}
-"""
-		
+		# Pass path directly to sandbox without normalization
 		try:
-			result = await self._run_isolated(read_cmd, timeout=500)
-			
-			# Check if file doesn't exist
-			if "__FILE_NOT_EXIST__" in result.stdout:
+			# Check if file exists
+			if not self._sandbox.files.exists(path):
 				return f"Error reading {path}: File not found"
 			
-			# Process content: split into lines, apply pagination, add line numbers
-			content = result.stdout
-			lines = content.split('\n')
-			
-			# Apply pagination
-			if offset > 0 or (limit > 0 and limit != 2000):
-				start = offset
-				end = offset + limit if limit > 0 else len(lines)
-				lines = lines[start:end]
-			elif limit == 2000 and len(lines) > 2000:
-				lines = lines[offset:offset + 2000]
-			
-			# Add line numbers
-			numbered = [f"{i+offset+1:6d}|{line}" for i, line in enumerate(lines)]
-			return '\n'.join(numbered)
+			# Read file using files API
+			content_bytes = self._sandbox.files.read(path)
+			content = content_bytes.decode('utf-8') if isinstance(content_bytes, bytes) else content_bytes
+			return content
 		except Exception as e:
 			return f"Error reading {path}: {str(e)}"
 	
-	async def awrite(self, path: str, content: str) -> WriteResult:
-		"""Write file using bwrap (no path resolution needed - bwrap handles mounts)."""
-		await self._ensure_initialized()
+	async def aread(self, path: str, offset: int = 0, limit: int = 2000) -> str:
+		"""Async version of read."""
+		return await asyncio.to_thread(self.read, path, offset, limit)
+	
+	def write(self, path: str, content: str) -> WriteResult:
+		"""Write file using sandbox.files API. Pass path directly to sandbox."""
+		self._ensure_initialized()
 		
-		import shlex
-		normalized_path = f"/{path.lstrip('/')}"
-		
+		# Pass path directly to sandbox without normalization
 		# Check if ticket (read-only)
-		if normalized_path.startswith("/.ticket/"):
+		if path.startswith("/.ticket/"):
 			if not self._ticket_id:
 				return WriteResult(
 					error=f"Cannot write to ticket directory (no ticket_id): {path}",
@@ -640,14 +524,8 @@ cat {shlex.quote(normalized_path)}
 			)
 		
 		# Check if file exists (to prevent overwriting)
-		check_cmd = f"""
-if [ -f {shlex.quote(normalized_path)} ]; then
-	echo "__FILE_EXISTS__"
-fi
-"""
 		try:
-			check_result = await self._run_isolated(check_cmd, timeout=100)
-			if "__FILE_EXISTS__" in check_result.stdout:
+			if self._sandbox.files.exists(path):
 				return WriteResult(
 					error=f"File '{path}' already exists. Use edit to modify existing files.",
 					path=None,
@@ -656,24 +534,9 @@ fi
 		except Exception as e:
 			pass  # Continue even if check fails
 		
-		# Write file using heredoc (auto-creates parent directories)
-		# Escape content for safe shell usage
-		content_escaped = content.replace("'", "'\"'\"'")
-		write_cmd = f"""
-mkdir -p "$(dirname {shlex.quote(normalized_path)})"
-cat > {shlex.quote(normalized_path)} << 'EOFWRITE'
-{content}
-EOFWRITE
-"""
-		
+		# Write file using files API (auto-creates parent directories)
 		try:
-			result : CommandResult = await self._run_isolated(write_cmd, timeout=500)
-			if result.exit_code != 0:
-				return WriteResult(
-					error=f"Write failed: {result.stderr or result.stdout}",
-					path=None,
-					files_update=None
-				)
+			self._sandbox.files.write(path, content)
 			return WriteResult(error=None, path=path, files_update=None)
 		except Exception as e:
 			return WriteResult(
@@ -682,83 +545,17 @@ EOFWRITE
 				files_update=None
 			)
 	
-	async def upload_file(self, destination_path: str, source_file_path: str) -> WriteResult:
-		"""
-		Upload a file from the local filesystem to the sandbox workspace using bwrap.
-		Uses bwrap path resolution to handle special paths like /.solven/skills/user/
-		
-		Args:
-			destination_path: Destination path in workspace (e.g., "/documents/file.pdf" or "/.solven/skills/user/my_skill.py")
-			source_file_path: Local file path to upload (e.g., "/tmp/upload_abc123.pdf")
-		
-		Returns:
-			WriteResult with success/error status
-		"""
-		await self._ensure_initialized()
-		
-		self._writer(f"📤 Subiendo archivo a {destination_path}...")
-		
-		import shlex
-		dest_path_normalized = f"/{destination_path.lstrip('/')}"
-		
-		# Check if ticket (read-only)
-		if dest_path_normalized.startswith("/.ticket/"):
-			return WriteResult(
-				error="Cannot upload to ticket directory (read-only)",
-				path=None,
-				files_update=None
-			)
-		
-		try:
-			# Read the local file
-			import base64
-			with open(source_file_path, 'rb') as f:
-				file_content = f.read()
-			
-			# Encode file content as base64 for safe transmission through shell
-			file_content_b64 = base64.b64encode(file_content).decode('utf-8')
-			
-			# Write file directly to destination using bwrap with base64 decode
-			upload_cmd = f"""
-mkdir -p "$(dirname {shlex.quote(dest_path_normalized)})"
-echo {shlex.quote(file_content_b64)} | base64 -d > {shlex.quote(dest_path_normalized)}
-"""
-			result = await self._run_isolated(upload_cmd, timeout=500)
-			if result.exit_code != 0:
-				return WriteResult(
-					error=f"Upload failed: {result.stderr or result.stdout}",
-					path=None,
-					files_update=None
-				)
-			
-			self._writer(f"✅ Archivo subido exitosamente")
-			
-			return WriteResult(error=None, path=destination_path, files_update=None)
-			
-		except FileNotFoundError:
-			error_msg = f"Source file not found: {source_file_path}"
-			return WriteResult(
-				error=error_msg,
-				path=None,
-				files_update=None
-			)
-		except Exception as e:
-			error_msg = f"Upload failed: {str(e)}"
-			return WriteResult(
-				error=error_msg,
-				path=None,
-				files_update=None
-			)
+	async def awrite(self, path: str, content: str) -> WriteResult:
+		"""Async version of write."""
+		return await asyncio.to_thread(self.write, path, content)
 	
-	async def aedit(self, path: str, old_string: str, new_string: str, replace_all: bool = False) -> EditResult:
-		"""Edit file using bwrap (no path resolution needed - bwrap handles mounts)."""
-		await self._ensure_initialized()
+	def edit(self, path: str, old_string: str, new_string: str, replace_all: bool = False) -> EditResult:
+		"""Edit file using sandbox.files API. Pass path directly to sandbox."""
+		self._ensure_initialized()
 		
-		import shlex
-		normalized_path = f"/{path.lstrip('/')}"
-		
+		# Pass path directly to sandbox without normalization
 		# Check if ticket (read-only)
-		if normalized_path.startswith("/.ticket/"):
+		if path.startswith("/.ticket/"):
 			return EditResult(
 				error=f"Cannot edit ticket directory (read-only): {path}",
 				path=None,
@@ -767,15 +564,8 @@ echo {shlex.quote(file_content_b64)} | base64 -d > {shlex.quote(dest_path_normal
 			)
 		
 		# Check if file exists
-		check_cmd = f"""
-if [ ! -f {shlex.quote(normalized_path)} ]; then
-	echo "__FILE_NOT_EXIST__"
-	exit 0
-fi
-"""
 		try:
-			check_result = await self._run_isolated(check_cmd, timeout=100)
-			if "__FILE_NOT_EXIST__" in check_result.stdout:
+			if not self._sandbox.files.exists(path):
 				return EditResult(
 					error=f"File not found: {path}",
 					path=None,
@@ -790,15 +580,20 @@ fi
 				occurrences=0
 			)
 		
-		# Count occurrences first
-		count_cmd = f"""
-grep -oF {shlex.quote(old_string)} {shlex.quote(normalized_path)} | wc -l
-"""
+		# Read file content
 		try:
-			count_result = await self._run_isolated(count_cmd, timeout=100)
-			occurrences = int(count_result.stdout.strip() or 0)
+			content_bytes = self._sandbox.files.read(path)
+			content = content_bytes.decode('utf-8') if isinstance(content_bytes, bytes) else content_bytes
 		except Exception as e:
-			occurrences = 0
+			return EditResult(
+				error=f"Failed to read file: {str(e)}",
+				path=None,
+				files_update=None,
+				occurrences=0
+			)
+		
+		# Count occurrences
+		occurrences = content.count(old_string)
 		
 		if occurrences == 0:
 			return EditResult(
@@ -816,31 +611,16 @@ grep -oF {shlex.quote(old_string)} {shlex.quote(normalized_path)} | wc -l
 				occurrences=occurrences
 			)
 		
-		# Perform replacement using sed
-		# Escape special characters for sed
-		old_escaped = old_string.replace("\\", "\\\\").replace("/", "\\/").replace("&", "\\&").replace("$", "\\$")
-		new_escaped = new_string.replace("\\", "\\\\").replace("/", "\\/").replace("&", "\\&").replace("$", "\\$")
-		
+		# Perform replacement in Python
 		if replace_all:
-			# Replace all occurrences
-			edit_cmd = f"""
-sed -i 's/{old_escaped}/{new_escaped}/g' {shlex.quote(normalized_path)}
-"""
+			new_content = content.replace(old_string, new_string)
 		else:
 			# Replace first occurrence only
-			edit_cmd = f"""
-sed -i '0,/{old_escaped}/s//{new_escaped}/' {shlex.quote(normalized_path)}
-"""
+			new_content = content.replace(old_string, new_string, 1)
 		
+		# Write back using files API
 		try:
-			result = await self._run_isolated(edit_cmd, timeout=500)
-			if result.exit_code != 0:
-				return EditResult(
-					error=f"Edit failed: {result.stderr or result.stdout}",
-					path=None,
-					files_update=None,
-					occurrences=0
-				)
+			self._sandbox.files.write(path, new_content)
 			return EditResult(error=None, path=path, files_update=None, occurrences=occurrences)
 		except Exception as e:
 			return EditResult(
@@ -850,97 +630,247 @@ sed -i '0,/{old_escaped}/s//{new_escaped}/' {shlex.quote(normalized_path)}
 				occurrences=0
 			)
 	
-	async def als_info(self, path: str = "/") -> list[FileInfo]:
-		"""List directory contents using bwrap."""
-		await self._ensure_initialized()
+	async def aedit(self, path: str, old_string: str, new_string: str, replace_all: bool = False) -> EditResult:
+		"""Async version of edit."""
+		return await asyncio.to_thread(self.edit, path, old_string, new_string, replace_all)
+	
+	def ls_info(self, path: str = "/") -> list[FileInfo]:
+		"""List directory contents using sandbox.files.list() API. Pass path directly to sandbox."""
+		self._ensure_initialized()
 		
-		import shlex
-		normalized_path = f"/{path.lstrip('/')}"
+		# Normalize path - handle trailing slashes
+		normalized_path = path.rstrip('/') if path != "/" else "/"
 		
-		# List directory contents - don't exit with error if directory doesn't exist
-		list_cmd = f"""
-if [ ! -d {shlex.quote(normalized_path)} ]; then
-	echo "__DIR_NOT_EXIST__"
-	exit 0
-fi
-cd {shlex.quote(normalized_path)} || exit 0
-ls -A1 | while IFS= read -r file; do
-	# Skip . and .. entries explicitly
-	if [ "$file" = "." ] || [ "$file" = ".." ]; then
-		continue
-	fi
-	stat -c '%n|%s|%Y' "$file" 2>/dev/null || true
-done
-"""
-			
+		print(f"[ls_info] Listing path: '{path}' (normalized: '{normalized_path}')", flush=True)
+		
+		# For mounted directories (like /mnt/skills), use command-based listing
+		# as E2B's files.list() may not work reliably with FUSE mounts
+		# Check both original and normalized path to catch /mnt/skills/ and /mnt/skills
+		if path.startswith("/mnt/") or normalized_path.startswith("/mnt/") or path.startswith("/.ticket") or normalized_path.startswith("/.ticket"):
+			target_path = normalized_path if normalized_path != "/" else path
+			print(f"[ls_info] Using command-based listing for mounted path: {target_path}", flush=True)
+			return self._ls_info_command(target_path)
+		
+		# For regular paths, use E2B files.list() API
+		depth = len(path.split('/'))
 		try:
-			result : CommandResult = await self._run_isolated(list_cmd, timeout=500)
+			entries : list[str] = self._sandbox.files.list(path, depth=depth)
+			print(f"[ls_info] files.list() returned {len(entries)} entries for {path}", flush=True)
 		except Exception as e:
-			return []
+			print(f"[ls_info] files.list() failed for {path}: {e}, trying command-based approach", flush=True)
+			return self._ls_info_command(path)
 		
-		# Check if directory doesn't exist (normal case, not an error)
-		if "__DIR_NOT_EXIST__" in result.stdout:
-			return []
-		
-		# Parse output (format: filename|size|timestamp)
 		files = []
-		for line in result.stdout.strip().split('\n'):
-			if not line or '|' not in line:
-				continue
-			parts = line.split('|', 2)
-			if len(parts) < 2:
-				continue
-			
-			filename = parts[0].strip()
+		for entry in entries:
+			# E2B files.list() returns strings (paths) or objects with name/path
+			if isinstance(entry, str):
+				# Entry is a string path - extract filename
+				entry_path = entry.rstrip('/')
+				filename = entry_path.split('/')[-1] if entry_path else entry_path
+			else:
+				# Entry is an object - try to get name or path
+				filename = getattr(entry, 'name', None)
+				entry_path = getattr(entry, 'path', None)
+				if not filename and entry_path:
+					filename = entry_path.rstrip('/').split('/')[-1]
+				if not entry_path and filename:
+					# Construct path from path and filename
+					entry_path = f"{path.rstrip('/')}/{filename}"
 			
 			# Skip empty filenames, ".", and ".."
 			if not filename or filename == "." or filename == "..":
 				continue
 			
-			# Skip system directories when listing root
-			if normalized_path == "/" and filename in self._exclude_dirs:
-				continue
+			# At root level, only show allowed directories
+			if path == "/":
+				if filename not in self._allowed_root_dirs:
+					continue
 			
-			# Construct full path with proper formatting
-			if normalized_path == "/":
+			# Construct full path
+			if path == "/":
 				full_path = f"/{filename}"
+			elif isinstance(entry_path, str) and entry_path.startswith('/'):
+				full_path = entry_path
 			else:
-				# Ensure normalized_path doesn't end with / and filename doesn't start with /
-				normalized = normalized_path.rstrip('/')
+				base_path = path.rstrip('/')
 				fname = filename.lstrip('/')
-				full_path = f"{normalized}/{fname}".replace("//", "/")
+				full_path = f"{base_path}/{fname}".replace("//", "/")
+			
+			# Get size and modified time from entry if available
+			size = 0
+			modified = None
+			is_dir = False
+			
+			# Check if it's a directory - check if path ends with / or entry indicates directory
+			if isinstance(entry, str) and entry.endswith('/'):
+				is_dir = True
+			elif isinstance(entry_path, str) and entry_path.endswith('/'):
+				is_dir = True
+			elif not isinstance(entry, str):
+				# Check entry object for directory indicator
+				if hasattr(entry, 'is_dir'):
+					is_dir = entry.is_dir
+				elif hasattr(entry, 'type') and entry.type == 'directory':
+					is_dir = True
+			
+			if not isinstance(entry, str):
+				# Try to get metadata from entry object
+				if hasattr(entry, 'size'):
+					size = entry.size or 0
+				if hasattr(entry, 'modified') or hasattr(entry, 'mtime'):
+					modified = getattr(entry, 'modified', None) or getattr(entry, 'mtime', None)
+				elif hasattr(entry, 'stat'):
+					stat = entry.stat
+					size = getattr(stat, 'st_size', 0) if stat else 0
+					modified = getattr(stat, 'st_mtime', None) if stat else None
+			
+			# Format modified time as ISO string if it's a datetime object
+			modified_at = None
+			if modified:
+				if hasattr(modified, 'isoformat'):
+					modified_at = modified.isoformat()
+				elif isinstance(modified, (int, float)):
+					# Unix timestamp
+					from datetime import datetime
+					modified_at = datetime.fromtimestamp(modified).isoformat()
+				else:
+					modified_at = str(modified)
 			
 			files.append(FileInfo(
 				path=full_path,
-				size=int(parts[1]) if parts[1].isdigit() else 0,
-				modified=parts[2] if len(parts) > 2 else None
+				is_dir=is_dir,
+				size=size,
+				modified_at=modified_at
 			))
-			
+
 		return files
 	
-	async def aglob_info(self, pattern: str, path: str = "/") -> list[FileInfo]:
-		"""Find files matching glob pattern using bash globstar in bwrap."""
-		await self._ensure_initialized()
+	def _ls_info_command(self, path: str) -> list[FileInfo]:
+		"""List directory contents using shell commands (for FUSE mounts)."""
 		import shlex
-		normalized_path = f"/{path.lstrip('/')}"
+		try:
+			# Normalize path - remove trailing slash for ls command
+			normalized_path = path.rstrip('/')
+			if not normalized_path:
+				normalized_path = "/"
+			
+			print(f"[_ls_info_command] Listing {normalized_path} (original: {path})", flush=True)
+			
+			# First verify the directory exists
+			check_cmd = f"test -d {shlex.quote(normalized_path)} && echo 'EXISTS' || echo 'NOT_EXISTS'"
+			check_result = self._sandbox.commands.run(check_cmd, timeout=5)
+			print(f"[_ls_info_command] Directory check: {check_result.stdout.strip()}", flush=True)
+			
+			if "NOT_EXISTS" in check_result.stdout:
+				print(f"[_ls_info_command] Directory {normalized_path} does not exist", flush=True)
+				return []
+			
+			# Use ls command to list directory contents
+			ls_cmd = f"ls -la {shlex.quote(normalized_path)} 2>&1 | tail -n +2"
+			result = self._sandbox.commands.run(ls_cmd, timeout=10)
+			
+			print(f"[_ls_info_command] ls exit code: {result.exit_code}, stdout length: {len(result.stdout)}, stderr: {result.stderr[:200]}", flush=True)
+			
+			if result.exit_code != 0:
+				print(f"[_ls_info_command] ls failed for {normalized_path}: {result.stderr}", flush=True)
+				return []
+			
+			files = []
+			for line in result.stdout.strip().split('\n'):
+				if not line.strip():
+					continue
+				
+				# Parse ls -la output: permissions links owner group size date time name
+				# Example: drwxr-xr-x 2 root root 4096 Jan 15 10:30 docx
+				parts = line.split(None, 8)
+				if len(parts) < 9:
+					continue
+				
+				permissions = parts[0]
+				name = parts[8]
+				
+				# Skip . and ..
+				if name in [".", ".."]:
+					continue
+				
+				# Check if it's a directory (first char of permissions is 'd')
+				is_dir = permissions.startswith('d')
+				
+				# Get size
+				try:
+					size = int(parts[4]) if parts[4].isdigit() else 0
+				except:
+					size = 0
+				
+				# Construct full path
+				if path == "/":
+					full_path = f"/{name}"
+				else:
+					base_path = path.rstrip('/')
+					full_path = f"{base_path}/{name}".replace("//", "/")
+				
+				# Get modified time from parts[5], parts[6], parts[7]
+				# Format: "Jan 15 10:30" or "Jan 15 2024"
+				modified_at = None
+				if len(parts) >= 8:
+					try:
+						date_parts = parts[5:8]
+						# Try to parse date - this is approximate
+						modified_at = " ".join(date_parts)
+					except:
+						pass
+				
+				files.append(FileInfo(
+					path=full_path,
+					is_dir=is_dir,
+					size=size,
+					modified_at=modified_at
+				))
+			
+			print(f"[_ls_info_command] Found {len(files)} entries in {path}", flush=True)
+			return files
+		except Exception as e:
+			print(f"[_ls_info_command] Exception listing {path}: {e}", flush=True)
+			return []
+	
+	async def als_info(self, path: str = "/") -> list[FileInfo]:
+		"""Async version of ls_info."""
+		return await asyncio.to_thread(self.ls_info, path)
+	
+	def glob_info(self, pattern: str, path: str = "/") -> list[FileInfo]:
+		"""Find files matching glob pattern using bash globstar. Pass paths directly to sandbox."""
+		self._ensure_initialized()
+		import shlex
 		
-		# Build exclusion pattern for bash
-		exclusion_checks = " && ".join([f'[[ "$file" != {exc}/* ]]' for exc in self._exclude_dirs])
+		# Build filtering: at root, only search in allowed directories
+		# In subdirectories, search everything
+		if path == "/":
+			# At root: only search in allowed directories using absolute paths
+			allowed_globs = " ".join([f"/{allowed}/**/{pattern}" for allowed in self._allowed_root_dirs])
+			glob_pattern = f"({allowed_globs})"
+			exclusion_checks = "true"  # No exclusion needed, we're already filtering by allowed dirs
+		else:
+			# In subdirectories: use absolute path with pattern
+			base_path = path.rstrip('/')
+			glob_pattern = f"{base_path}/**/{pattern}"
+			exclude_checks_parts = []
+			# Exclude common system directories
+			system_dirs = ["bin", "sbin", "dev", "etc", "lib", "lib32", "lib64", "libx32", "proc", "sys", "run", "tmp", "var", "boot", "root", "srv", "opt", "mnt", "media", "home", "lost+found"]
+			for exc in system_dirs:
+				exclude_checks_parts.append(f'[[ "$file" != *{shlex.quote("/" + exc + "/")}* ]]')
+			exclusion_checks = " && ".join(exclude_checks_parts) if exclude_checks_parts else "true"
 		
-		# Use bash globstar - fastest and most idiomatic
-		# Supports **, *, ?, character classes, etc.
+		# Use bash globstar - pass paths directly, no cd needed
 		glob_cmd = f"""
-cd {shlex.quote(normalized_path)} 2>/dev/null || exit 0
 shopt -s globstar nullglob
-for file in {pattern}; do
+for file in {glob_pattern}; do
 	if [ -e "$file" ] && {exclusion_checks}; then
 		stat -c '%n|%s|%Y' "$file" 2>/dev/null || true
     fi
 done
 """
-			
 		try:
-			result = await self._run_isolated(glob_cmd, timeout=500)
+			result = self._sandbox.commands.run(glob_cmd, timeout=500)
 		except Exception as e:
 			return []
 		
@@ -952,41 +882,69 @@ done
 			parts = line.split('|', 2)
 			if len(parts) >= 2:
 				filename = parts[0]
+			# At root level, only show files from allowed directories
+			if path == "/":
+				# Check if file is in an allowed directory
+				path_parts = filename.split('/')
+				if path_parts and path_parts[0] not in self._allowed_root_dirs:
+					continue
+			# In subdirectories, filter out system directories
+			else:
+				path_parts = filename.split('/')
+				system_dirs = ["bin", "sbin", "dev", "etc", "lib", "lib32", "lib64", "libx32", "proc", "sys", "run", "tmp", "var", "boot", "root", "srv", "opt", "mnt", "media", "home", "lost+found"]
+				if any(part in system_dirs for part in path_parts if part):
+					continue
+			
 			# Make path absolute
 			if not filename.startswith('/'):
-				if normalized_path == "/":
+				if path == "/":
 					full_path = f"/{filename}"
 				else:
-					full_path = f"{normalized_path}/{filename}".replace("//", "/")
+					base_path = path.rstrip('/')
+					fname = filename.lstrip('/')
+					full_path = f"{base_path}/{fname}".replace("//", "/")
 			else:
+				# If absolute, use as-is
 				full_path = filename
 			
 			files.append(FileInfo(
 				path=full_path,
-					size=int(parts[1]) if parts[1].isdigit() else 0,
-					modified=parts[2] if len(parts) > 2 else None
-				))
+				size=int(parts[1]) if parts[1].isdigit() else 0,
+				modified_at=parts[2] if len(parts) > 2 else None
+			))
 			
 		return files
 	
-	async def agrep_raw(self, pattern: str, path: str | None = None, glob: str | None = None) -> list[GrepMatch] | str:
-		"""Search for pattern using ripgrep in bwrap."""
-		await self._ensure_initialized()
+	async def aglob_info(self, pattern: str, path: str = "/") -> list[FileInfo]:
+		"""Async version of glob_info."""
+		return await asyncio.to_thread(self.glob_info, pattern, path)
+	
+	def grep_raw(self, pattern: str, path: str | None = None, glob: str | None = None) -> list[GrepMatch] | str:
+		"""Search for pattern using ripgrep. Pass path directly to sandbox."""
+		self._ensure_initialized()
 		
-		self._writer(f"🔍 Buscando '{pattern}'...")
+		self._writer(f"Buscando '{pattern}'...")
 		
 		import shlex
 			
-		# Normalize search path
-		search_path = f"/{path.lstrip('/')}" if path else "/"
+		# Pass path directly to sandbox without normalization
+		search_path = path if path else "/"
 		
-		# Build ripgrep command with directory exclusions
+		# Build ripgrep command with directory filtering
 		# rg is much faster than grep and has native directory exclusion
 		rg_parts = ["rg", "--no-config", "--no-heading", "--with-filename", "--line-number"]
 		
-		# Add directory exclusions using negated globs (very fast, applied during traversal)
-		for exc_dir in self._exclude_dirs:
-			rg_parts.extend(["-g", f"!{exc_dir}/**"])
+		# At root level, only search in allowed directories
+		if search_path == "/":
+			# Only search in workspace, mnt, and .ticket
+			for allowed_dir in self._allowed_root_dirs:
+				rg_parts.extend(["-g", f"{allowed_dir}/**"])
+		else:
+			# In subdirectories, exclude system directories
+			system_dirs = ["bin", "sbin", "dev", "etc", "lib", "lib32", "lib64", "libx32", "proc", "sys", "run", "tmp", "var", "boot", "root", "srv", "opt", "mnt", "media", "home", "lost+found"]
+			for exc_dir in system_dirs:
+				rg_parts.extend(["-g", f"!{exc_dir}/**"])
+				rg_parts.extend(["-g", f"!**/{exc_dir}/**"])
 		
 		# Add glob filter if provided (e.g., -g '*.txt')
 		if glob:
@@ -998,7 +956,7 @@ done
 		rg_cmd = " ".join(rg_parts) + " 2>/dev/null || true"
 		
 		try:
-			result = await self._run_isolated(rg_cmd, timeout=500)  # rg is much faster
+			result = self._sandbox.commands.run(rg_cmd, timeout=500)  # rg is much faster
 		except Exception as e:
 			return []
 		
@@ -1008,96 +966,86 @@ done
 			if not line:
 				continue
 		
-		# Split only on first two colons to preserve colons in content
+			# Split only on first two colons to preserve colons in content
 			parts = line.split(':', 2)
 			if len(parts) >= 3:
 				file_path = parts[0]
-			try:
-				line_num = int(parts[1])
-			except ValueError:
-				continue
-			content = parts[2]
-			
-			matches.append(GrepMatch(
-				path=file_path,
-				line=line_num,
-				text=content
-			))
-		
-		print(f"[agrep_raw] Found {len(matches)} matches", flush=True)
+				# Ensure path starts with /
+				if not file_path.startswith('/'):
+					file_path = f"/{file_path}"
+				try:
+					line_num = int(parts[1])
+				except ValueError:
+					continue
+				content = parts[2]
+				
+				matches.append(GrepMatch(
+					path=file_path,
+					line=line_num,
+					text=content
+				))
+	
 		return matches
 	
-	async def load_skills_frontmatter(self) -> str:
-		"""Load all skills frontmatter (user only)."""
-		await self._ensure_initialized()
-		
-		print(f"[load_skills_frontmatter] Starting skill loading for user {self._user_id}", flush=True)
-		frontmatters = []
-		
-		# User skills - read from the actual R2 mount point
-		user_skills_path = "/mnt/r2/.solven/skills"
-		user_skills_exists = await self._sandbox.files.exists(user_skills_path)
-		
-		if user_skills_exists:
-			result = await self._sandbox.commands.run(
-				f"find {user_skills_path} -name '*.md' -type f",
-				timeout=500
-			)
-			if result.exit_code == 0:
-				skill_files = [f for f in result.stdout.strip().split('\n') if f]
-				for skill_file in skill_files:
-					content = await self._sandbox.files.read(skill_file)
-					content_str = content.decode('utf-8') if isinstance(content, bytes) else content
-					fm = _parse_skillmd_frontmatter(content_str)
-					if fm:
-						frontmatters.append(fm)
-		
-		return "\n\n".join(frontmatters)
+	async def agrep_raw(self, pattern: str, path: str | None = None, glob: str | None = None) -> list[GrepMatch] | str:
+		"""Async version of grep_raw."""
+		return await asyncio.to_thread(self.grep_raw, pattern, path, glob)
 	
-	async def get_skill_content(self, skill_name: str) -> Optional[str]:
-		"""
-		Get the SKILL.md content for a skill using bwrap isolation.
-		
-		This ensures the skill is accessible from within the isolated environment
-		where agent commands actually run, and that all resources are available.
-		
-		Reads from .solven/skills/ directory which is bound directly from
-		/mnt/r2/.solven/skills to /.solven/skills/ in bwrap.
-		
-		Args:
-			skill_name: Name of the skill (e.g., 'compraventa-de-viviendas')
-			
-		Returns:
-			SKILL.md content as string if skill exists and is accessible, None otherwise
-		"""
-		await self._ensure_initialized()
-		
-		# Use path as it appears in bwrap (/ = R2 workspace root)
-		# User skills are bound directly to /.solven/skills/ (no user/ prefix)
-		skill_path = f"/.solven/skills/{skill_name}/SKILL.md"
-		
-		try:
-			import shlex
-			# Use bwrap to read the skill, ensuring it's accessible in the isolated environment
-			read_cmd = f"cat {shlex.quote(skill_path)} 2>/dev/null"
-			result = await self._run_isolated(read_cmd, timeout=500)
-			
-			if result.exit_code != 0 or not result.stdout.strip():
-				# Skill not found
-				return None
-			
-			content = result.stdout
-			return content
-			
-		except Exception as e:
-			# Skill not found or not accessible
-			return None
-	
-	async def aclose(self) -> None:
-		"""Close sandbox and cleanup."""
-		if self._sandbox:
+	def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+		"""Download multiple files from the sandbox."""
+		self._ensure_initialized()
+		responses = []
+		for path in paths:
 			try:
-				await self._sandbox.kill()
+				if not self._sandbox.files.exists(path):
+					responses.append(FileDownloadResponse(path=path, content=None, error="file_not_found"))
+					continue
+				
+				content_bytes = self._sandbox.files.read(path)
+				if isinstance(content_bytes, bytes):
+					responses.append(FileDownloadResponse(path=path, content=content_bytes, error=None))
+				else:
+					# If it's already a string, encode it
+					responses.append(FileDownloadResponse(path=path, content=content_bytes.encode('utf-8'), error=None))
 			except Exception as e:
-				pass
+				responses.append(FileDownloadResponse(path=path, content=None, error="permission_denied"))
+		
+		return responses
+	
+	async def adownload_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+		"""Async version of download_files."""
+		return await asyncio.to_thread(self.download_files, paths)
+	
+	def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+		"""Upload multiple files to the sandbox."""
+		self._ensure_initialized()
+		responses = []
+		for path, content in files:
+			try:
+				# Decode bytes to string if it's text content
+				if isinstance(content, bytes):
+					try:
+						content_str = content.decode('utf-8')
+						self._sandbox.files.write(path, content_str)
+					except UnicodeDecodeError:
+						# Binary file - write as bytes
+						self._sandbox.files.write(path, content)
+				else:
+					self._sandbox.files.write(path, str(content))
+				responses.append(FileUploadResponse(path=path, error=None))
+			except Exception as e:
+				responses.append(FileUploadResponse(path=path, error="permission_denied"))
+		
+		return responses
+	
+	async def aupload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+		"""Async version of upload_files."""
+		return await asyncio.to_thread(self.upload_files, files)
+
+	@property
+	def id(self) -> str:
+		"""Unique identifier for the sandbox backend instance."""
+		if self._sandbox:
+			return self._sandbox.sandbox_id
+		return "uninitialized"
 

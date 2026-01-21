@@ -4,11 +4,16 @@ Implements the BackendProtocol for filesystem operations in an isolated sandbox 
 
 ARCHITECTURE OVERVIEW:
 ======================
+Direct R2 Mounts:
+- **R2 Mounts**:
+  - threads/{thread_id} -> /workspace
+  - skills/{user_id} -> /skills
+  - threads/{ticket_id} -> /ticket (optional, read-only)
 
-Simple Mount Approach:
-- **Thread workspace**: Mounted from `threads/{thread_id}` to `/home/user` (writable)
-- **Skills**: Mounted from `skills/{user_id}` to `/mnt/skills` (writable)
-- **Ticket**: Mounted from `threads/{ticket_id}` to `/mnt/.ticket` (read-only, if ticket exists)
+- **Agent View**:
+  - Works from /workspace directory
+  - Can access /skills and /ticket directly
+  - System directories available at root for python/node
 """
 import os
 import re
@@ -19,50 +24,30 @@ from datetime import datetime
 
 from e2b import Sandbox, CommandResult, SandboxQuery, SandboxState
 
-from deepagents.backends.protocol import SandboxBackendProtocol, WriteResult, EditResult, ExecuteResponse, FileDownloadResponse, FileUploadResponse
+from deepagents.backends.sandbox import BaseSandbox
+from deepagents.backends.protocol import WriteResult, EditResult, ExecuteResponse, FileDownloadResponse, FileUploadResponse
 from deepagents.backends.utils import FileInfo, GrepMatch
 from langchain.tools import ToolRuntime
 from langgraph.config import get_stream_writer, get_config
 from langgraph.graph.state import RunnableConfig
 from src.models import AppContext
 
-
-def _parse_skillmd_frontmatter(skillmd: str) -> str:
-	"""
-	Parse and extract the frontmatter from a skillmd file.
-	
-	Extracts YAML frontmatter from the beginning of a file in the format:
-	---
-	name: compraventa-escrituras
-	description: Redacta escrituras de compraventa...
-	---
-	
-	Args:
-		skillmd: The content of the skillmd file as a string
-		
-	Returns:
-		The frontmatter string (content between --- delimiters), or empty string if not found
-	"""
-	frontmatter_pattern = r'^---\s*\n(.*?)\n---\s*\n'
-	match = re.match(frontmatter_pattern, skillmd, re.DOTALL)
-	
-	if not match:
-		return ""
-	
-	return match.group(1)
-
-
 SANDBOX_TEMPLATE = "solven-sandbox-v1"
 
 
-class SandboxBackend(SandboxBackendProtocol):
+class SandboxBackend(BaseSandbox):
 	"""
-	E2B Sandbox backend with simple mount approach.
+	E2B Sandbox backend with direct R2 mounts.
 	
-	Mount structure:
-	- Workspace: /workspace - Mounted from threads/{thread_id} (writable)
-	- Skills: /mnt/skills - Mounted from skills/{user_id} (writable)
-	- Ticket: /.ticket - Mounted from threads/{ticket_id} (read-only, if exists)
+	R2 Mounts:
+	- /workspace - threads/{thread_id}
+	- /skills - skills/{user_id}
+	- /ticket - threads/{ticket_id} (optional, read-only)
+	
+	Agent works from /workspace directory and can access:
+	- /workspace - user workspace files
+	- /skills - user skills
+	- /ticket - ticket files (read-only)
 	"""
 	
 	def __init__(self, runtime: ToolRuntime[AppContext]):
@@ -90,37 +75,42 @@ class SandboxBackend(SandboxBackendProtocol):
 		metadata = config.get("metadata", {})
 		self._ticket_id = metadata.get("ticket_id")
 		
-		# Paths
-		self._workspace = "/workspace"  # Main workspace (mounted from threads/{thread_id})
-		self._skills_mount = "/mnt/skills"  # Skills mount (from skills/{user_id})
-		self._ticket_mount = "/.ticket"  # Ticket mount (from threads/{ticket_id})
-		
-		# Directories to show (everything else is filtered)
-		self._allowed_dirs = ["workspace", "mnt", ".ticket"]
-		
-		# Only show these directories at root level - filter everything else
-		# This ensures we only see workspace, mnt, and .ticket
-		self._allowed_root_dirs = ["workspace", "mnt", ".ticket"]
+		# R2 mount paths
+		self._workspace = "/workspace"  # threads/{thread_id}
+		self._skills_mount = "/skills"  # skills/{user_id}
+		self._ticket_mount = "/ticket"  # threads/{ticket_id}
 		
 		# State
 		self._initialized = False
+	
+	@property
+	def id(self) -> str:
+		"""Unique identifier for the sandbox backend instance."""
+		if self._sandbox:
+			return self._sandbox.sandbox_id
+		return f"sandbox-{self._thread_id}"
 	
 	def _ensure_initialized(self) -> None:
 		"""Ensure sandbox is initialized (idempotent)."""
 		if self._sandbox is not None:
 			return
+		self._writer("Preparando espacio de trabajo...")
 		
-		print(f"[_ensure_initialized] Starting initialization for thread_id={self._thread_id}, user_id={self._user_id}", flush=True)
-		self._writer("🔧 Preparando espacio de trabajo...")
-		
-		# Step 1: Try to find existing sandbox
+		# Step 1: Try to find existing sandbox (query by threadId only)
+		print(f"[_ensure_initialized] Searching for sandboxes with threadId={self._thread_id}", flush=True)
+		print(f"[_ensure_initialized] threadId type: {type(self._thread_id)}, value: '{self._thread_id}'", flush=True)
 		try:
-			existing_sandboxes = Sandbox.list(
+			sandbox_paginator = Sandbox.list(
 				query=SandboxQuery(
-					metadata={"threadId": self._thread_id, "userId": str(self._user_id)},
+					metadata={"threadId": self._thread_id},
 					state=[SandboxState.RUNNING, SandboxState.PAUSED]
 				)
 			)
+			existing_sandboxes = sandbox_paginator.next_items()
+			print(f"[_ensure_initialized] Found {len(existing_sandboxes)} existing sandboxes", flush=True)
+			if len(existing_sandboxes) > 0:
+				for idx, sb in enumerate(existing_sandboxes):
+					print(f"[_ensure_initialized] Sandbox {idx}: id={sb.sandbox_id}, metadata={getattr(sb, 'metadata', 'N/A')}", flush=True)
 			
 			if existing_sandboxes and len(existing_sandboxes) > 0:
 				existing_sandbox = existing_sandboxes[0]
@@ -131,12 +121,10 @@ class SandboxBackend(SandboxBackendProtocol):
 						self._sandbox = Sandbox.connect(sandbox_id)
 						print(f"[_ensure_initialized] ✓ Connected to existing sandbox: {sandbox_id}", flush=True)
 						
-						# Verify mount is accessible - if not, remount
+						# Verify mounts are accessible
 						try:
-							check_result = self._sandbox.commands.run("test -d /mnt/skills && echo 'MOUNT_OK' || echo 'MOUNT_MISSING'", timeout=5)
+							check_result = self._sandbox.commands.run("test -d /skills && echo 'MOUNT_OK' || echo 'MOUNT_MISSING'", timeout=5)
 							mount_status = check_result.stdout.strip()
-							print(f"[_ensure_initialized] Mount check: {mount_status}", flush=True)
-							
 							if "MOUNT_MISSING" in mount_status:
 								print(f"[_ensure_initialized] Mounts missing, remounting...", flush=True)
 								self._mount_r2_buckets()
@@ -145,6 +133,7 @@ class SandboxBackend(SandboxBackendProtocol):
 							self._mount_r2_buckets()
 						
 						self._initialized = True
+						print(f"[_ensure_initialized] ✓ Reused existing sandbox", flush=True)
 						return
 					except Exception as e:
 						print(f"[_ensure_initialized] ✗ Failed to connect to existing sandbox {sandbox_id}: {e}", flush=True)
@@ -185,9 +174,41 @@ class SandboxBackend(SandboxBackendProtocol):
 		# Step 3: Mount R2 buckets for new sandbox
 		self._mount_r2_buckets()
 		
+		# Step 4: Sync local skills to sandbox
+		self._sync_local_skills()
+		
 		self._initialized = True
 		self._writer("Espacio de trabajo listo")
 		print(f"[_ensure_initialized] ✓ Initialization complete", flush=True)
+	
+	def _sync_local_skills(self) -> None:		
+		# Path to local skills directory
+		local_skills_dir = os.path.join(os.path.dirname(__file__), "skills")
+		
+		if not os.path.exists(local_skills_dir):
+			print(f"[_sync_local_skills] Local skills directory not found: {local_skills_dir}", flush=True)
+			return
+		
+		try:
+			# Sync escrituras skill
+			escrituras_skill_path = os.path.join(local_skills_dir, "escrituras", "SKILL.md")
+			if os.path.exists(escrituras_skill_path):
+				with open(escrituras_skill_path, 'r', encoding='utf-8') as f:
+					skill_content = f.read()
+				
+				# Ensure /skills/escrituras directory exists
+				self._sandbox.commands.run("mkdir -p /skills/escrituras", timeout=10)
+				
+				# Write skill file to sandbox
+				self._sandbox.files.write("/skills/escrituras/SKILL.md", skill_content)
+				print(f"[_sync_local_skills] ✓ Synced escrituras/SKILL.md", flush=True)
+			else:
+				print(f"[_sync_local_skills] escrituras/SKILL.md not found at {escrituras_skill_path}", flush=True)
+			
+			# TODO: Add more skills here as needed
+			
+		except Exception as e:
+			print(f"[_sync_local_skills] ✗ Error syncing skills: {e}", flush=True)
 	
 	def _mount_r2_buckets(self) -> None:
 		"""Mount R2 buckets using rclone."""
@@ -442,7 +463,13 @@ class SandboxBackend(SandboxBackendProtocol):
 		return None
 	
 	def execute(self, command: str) -> ExecuteResponse:
-		"""Execute command directly in sandbox. Pass command as-is without any path manipulation."""
+		"""Execute command directly in sandbox.
+		
+		Commands run from /workspace directory where:
+		- /workspace contains user workspace files
+		- /skills contains user skills
+		- /ticket contains ticket files (read-only)
+		"""
 		self._ensure_initialized()
 		
 		# Filter unwanted commands
@@ -452,10 +479,9 @@ class SandboxBackend(SandboxBackendProtocol):
 				exit_code=1,
 				truncated=False
 			)
-		
-		# Run command directly - pass as-is to sandbox
+		wrapped_command = f"cd {shlex.quote(self._workspace)} && {command}"
 		try:
-			result = self._sandbox.commands.run(command, timeout=500)
+			result = self._sandbox.commands.run(wrapped_command, timeout=500)
 		except Exception as e:
 			return ExecuteResponse(
 				output=f"Error executing command: {str(e)}",
@@ -479,517 +505,26 @@ class SandboxBackend(SandboxBackendProtocol):
 		"""Async version of execute."""
 		return await asyncio.to_thread(self.execute, command)
 	
-	def read(self, path: str, offset: int = 0, limit: int = 2000) -> str:
-		"""Read file using sandbox.files API. Pass path directly to sandbox."""
+	def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+		"""Upload multiple files to the sandbox."""
 		self._ensure_initialized()
-		file_type = path.split('.')[-1]
-		disallowed_file_types = ["pdf", "docx", "xlsx", "pptx"]
-		if file_type in disallowed_file_types:
-			return f"To read this file, please use the corresponsing skill"
-		
-		# Pass path directly to sandbox without normalization
-		try:
-			# Check if file exists
-			if not self._sandbox.files.exists(path):
-				return f"Error reading {path}: File not found"
-			
-			# Read file using files API
-			content_bytes = self._sandbox.files.read(path)
-			content = content_bytes.decode('utf-8') if isinstance(content_bytes, bytes) else content_bytes
-			return content
-		except Exception as e:
-			return f"Error reading {path}: {str(e)}"
-	
-	async def aread(self, path: str, offset: int = 0, limit: int = 2000) -> str:
-		"""Async version of read."""
-		return await asyncio.to_thread(self.read, path, offset, limit)
-	
-	def write(self, path: str, content: str) -> WriteResult:
-		"""Write file using sandbox.files API. Pass path directly to sandbox."""
-		self._ensure_initialized()
-		
-		# Pass path directly to sandbox without normalization
-		# Check if ticket (read-only)
-		if path.startswith("/.ticket/"):
-			if not self._ticket_id:
-				return WriteResult(
-					error=f"Cannot write to ticket directory (no ticket_id): {path}",
-					path=None,
-					files_update=None
-				)
-			return WriteResult(
-				error=f"Cannot write to ticket directory (read-only): {path}",
-				path=None,
-				files_update=None
-			)
-		
-		# Check if file exists (to prevent overwriting)
-		try:
-			if self._sandbox.files.exists(path):
-				return WriteResult(
-					error=f"File '{path}' already exists. Use edit to modify existing files.",
-					path=None,
-					files_update=None
-				)
-		except Exception as e:
-			pass  # Continue even if check fails
-		
-		# Write file using files API (auto-creates parent directories)
-		try:
-			self._sandbox.files.write(path, content)
-			return WriteResult(error=None, path=path, files_update=None)
-		except Exception as e:
-			return WriteResult(
-				error=f"Write failed: {str(e)}",
-				path=None,
-				files_update=None
-			)
-	
-	async def awrite(self, path: str, content: str) -> WriteResult:
-		"""Async version of write."""
-		return await asyncio.to_thread(self.write, path, content)
-	
-	def edit(self, path: str, old_string: str, new_string: str, replace_all: bool = False) -> EditResult:
-		"""Edit file using sandbox.files API. Pass path directly to sandbox."""
-		self._ensure_initialized()
-		
-		# Pass path directly to sandbox without normalization
-		# Check if ticket (read-only)
-		if path.startswith("/.ticket/"):
-			return EditResult(
-				error=f"Cannot edit ticket directory (read-only): {path}",
-				path=None,
-				files_update=None,
-				occurrences=0
-			)
-		
-		# Check if file exists
-		try:
-			if not self._sandbox.files.exists(path):
-				return EditResult(
-					error=f"File not found: {path}",
-					path=None,
-					files_update=None,
-					occurrences=0
-				)
-		except Exception as e:
-			return EditResult(
-				error=f"File check failed: {str(e)}",
-				path=None,
-				files_update=None,
-				occurrences=0
-			)
-		
-		# Read file content
-		try:
-			content_bytes = self._sandbox.files.read(path)
-			content = content_bytes.decode('utf-8') if isinstance(content_bytes, bytes) else content_bytes
-		except Exception as e:
-			return EditResult(
-				error=f"Failed to read file: {str(e)}",
-				path=None,
-				files_update=None,
-				occurrences=0
-			)
-		
-		# Count occurrences
-		occurrences = content.count(old_string)
-		
-		if occurrences == 0:
-			return EditResult(
-				error=f"String not found in file",
-				path=None,
-				files_update=None,
-				occurrences=0
-			)
-		
-		if occurrences > 1 and not replace_all:
-			return EditResult(
-				error=f"String appears {occurrences} times. Use replace_all=True",
-				path=None,
-				files_update=None,
-				occurrences=occurrences
-			)
-		
-		# Perform replacement in Python
-		if replace_all:
-			new_content = content.replace(old_string, new_string)
-		else:
-			# Replace first occurrence only
-			new_content = content.replace(old_string, new_string, 1)
-		
-		# Write back using files API
-		try:
-			self._sandbox.files.write(path, new_content)
-			return EditResult(error=None, path=path, files_update=None, occurrences=occurrences)
-		except Exception as e:
-			return EditResult(
-				error=f"Edit failed: {str(e)}",
-				path=None,
-				files_update=None,
-				occurrences=0
-			)
-	
-	async def aedit(self, path: str, old_string: str, new_string: str, replace_all: bool = False) -> EditResult:
-		"""Async version of edit."""
-		return await asyncio.to_thread(self.edit, path, old_string, new_string, replace_all)
-	
-	def ls_info(self, path: str = "/") -> list[FileInfo]:
-		"""List directory contents using sandbox.files.list() API. Pass path directly to sandbox."""
-		self._ensure_initialized()
-		
-		# Normalize path - handle trailing slashes
-		normalized_path = path.rstrip('/') if path != "/" else "/"
-		
-		print(f"[ls_info] Listing path: '{path}' (normalized: '{normalized_path}')", flush=True)
-		
-		# For mounted directories (like /mnt/skills), use command-based listing
-		# as E2B's files.list() may not work reliably with FUSE mounts
-		# Check both original and normalized path to catch /mnt/skills/ and /mnt/skills
-		if path.startswith("/mnt/") or normalized_path.startswith("/mnt/") or path.startswith("/.ticket") or normalized_path.startswith("/.ticket"):
-			target_path = normalized_path if normalized_path != "/" else path
-			print(f"[ls_info] Using command-based listing for mounted path: {target_path}", flush=True)
-			return self._ls_info_command(target_path)
-		
-		# For regular paths, use E2B files.list() API
-		depth = len(path.split('/'))
-		try:
-			entries : list[str] = self._sandbox.files.list(path, depth=depth)
-			print(f"[ls_info] files.list() returned {len(entries)} entries for {path}", flush=True)
-		except Exception as e:
-			print(f"[ls_info] files.list() failed for {path}: {e}, trying command-based approach", flush=True)
-			return self._ls_info_command(path)
-		
-		files = []
-		for entry in entries:
-			# E2B files.list() returns strings (paths) or objects with name/path
-			if isinstance(entry, str):
-				# Entry is a string path - extract filename
-				entry_path = entry.rstrip('/')
-				filename = entry_path.split('/')[-1] if entry_path else entry_path
-			else:
-				# Entry is an object - try to get name or path
-				filename = getattr(entry, 'name', None)
-				entry_path = getattr(entry, 'path', None)
-				if not filename and entry_path:
-					filename = entry_path.rstrip('/').split('/')[-1]
-				if not entry_path and filename:
-					# Construct path from path and filename
-					entry_path = f"{path.rstrip('/')}/{filename}"
-			
-			# Skip empty filenames, ".", and ".."
-			if not filename or filename == "." or filename == "..":
-				continue
-			
-			# At root level, only show allowed directories
-			if path == "/":
-				if filename not in self._allowed_root_dirs:
-					continue
-			
-			# Construct full path
-			if path == "/":
-				full_path = f"/{filename}"
-			elif isinstance(entry_path, str) and entry_path.startswith('/'):
-				full_path = entry_path
-			else:
-				base_path = path.rstrip('/')
-				fname = filename.lstrip('/')
-				full_path = f"{base_path}/{fname}".replace("//", "/")
-			
-			# Get size and modified time from entry if available
-			size = 0
-			modified = None
-			is_dir = False
-			
-			# Check if it's a directory - check if path ends with / or entry indicates directory
-			if isinstance(entry, str) and entry.endswith('/'):
-				is_dir = True
-			elif isinstance(entry_path, str) and entry_path.endswith('/'):
-				is_dir = True
-			elif not isinstance(entry, str):
-				# Check entry object for directory indicator
-				if hasattr(entry, 'is_dir'):
-					is_dir = entry.is_dir
-				elif hasattr(entry, 'type') and entry.type == 'directory':
-					is_dir = True
-			
-			if not isinstance(entry, str):
-				# Try to get metadata from entry object
-				if hasattr(entry, 'size'):
-					size = entry.size or 0
-				if hasattr(entry, 'modified') or hasattr(entry, 'mtime'):
-					modified = getattr(entry, 'modified', None) or getattr(entry, 'mtime', None)
-				elif hasattr(entry, 'stat'):
-					stat = entry.stat
-					size = getattr(stat, 'st_size', 0) if stat else 0
-					modified = getattr(stat, 'st_mtime', None) if stat else None
-			
-			# Format modified time as ISO string if it's a datetime object
-			modified_at = None
-			if modified:
-				if hasattr(modified, 'isoformat'):
-					modified_at = modified.isoformat()
-				elif isinstance(modified, (int, float)):
-					# Unix timestamp
-					from datetime import datetime
-					modified_at = datetime.fromtimestamp(modified).isoformat()
-				else:
-					modified_at = str(modified)
-			
-			files.append(FileInfo(
-				path=full_path,
-				is_dir=is_dir,
-				size=size,
-				modified_at=modified_at
-			))
-
-		return files
-	
-	def _ls_info_command(self, path: str) -> list[FileInfo]:
-		"""List directory contents using shell commands (for FUSE mounts)."""
-		import shlex
-		try:
-			# Normalize path - remove trailing slash for ls command
-			normalized_path = path.rstrip('/')
-			if not normalized_path:
-				normalized_path = "/"
-			
-			print(f"[_ls_info_command] Listing {normalized_path} (original: {path})", flush=True)
-			
-			# First verify the directory exists
-			check_cmd = f"test -d {shlex.quote(normalized_path)} && echo 'EXISTS' || echo 'NOT_EXISTS'"
-			check_result = self._sandbox.commands.run(check_cmd, timeout=5)
-			print(f"[_ls_info_command] Directory check: {check_result.stdout.strip()}", flush=True)
-			
-			if "NOT_EXISTS" in check_result.stdout:
-				print(f"[_ls_info_command] Directory {normalized_path} does not exist", flush=True)
-				return []
-			
-			# Use ls command to list directory contents
-			ls_cmd = f"ls -la {shlex.quote(normalized_path)} 2>&1 | tail -n +2"
-			result = self._sandbox.commands.run(ls_cmd, timeout=10)
-			
-			print(f"[_ls_info_command] ls exit code: {result.exit_code}, stdout length: {len(result.stdout)}, stderr: {result.stderr[:200]}", flush=True)
-			
-			if result.exit_code != 0:
-				print(f"[_ls_info_command] ls failed for {normalized_path}: {result.stderr}", flush=True)
-				return []
-			
-			files = []
-			for line in result.stdout.strip().split('\n'):
-				if not line.strip():
-					continue
-				
-				# Parse ls -la output: permissions links owner group size date time name
-				# Example: drwxr-xr-x 2 root root 4096 Jan 15 10:30 docx
-				parts = line.split(None, 8)
-				if len(parts) < 9:
-					continue
-				
-				permissions = parts[0]
-				name = parts[8]
-				
-				# Skip . and ..
-				if name in [".", ".."]:
-					continue
-				
-				# Check if it's a directory (first char of permissions is 'd')
-				is_dir = permissions.startswith('d')
-				
-				# Get size
-				try:
-					size = int(parts[4]) if parts[4].isdigit() else 0
-				except:
-					size = 0
-				
-				# Construct full path
-				if path == "/":
-					full_path = f"/{name}"
-				else:
-					base_path = path.rstrip('/')
-					full_path = f"{base_path}/{name}".replace("//", "/")
-				
-				# Get modified time from parts[5], parts[6], parts[7]
-				# Format: "Jan 15 10:30" or "Jan 15 2024"
-				modified_at = None
-				if len(parts) >= 8:
+		responses = []
+		for path, content in files:
+			try:
+				# Decode bytes to string if it's text content
+				if isinstance(content, bytes):
 					try:
-						date_parts = parts[5:8]
-						# Try to parse date - this is approximate
-						modified_at = " ".join(date_parts)
-					except:
-						pass
-				
-				files.append(FileInfo(
-					path=full_path,
-					is_dir=is_dir,
-					size=size,
-					modified_at=modified_at
-				))
-			
-			print(f"[_ls_info_command] Found {len(files)} entries in {path}", flush=True)
-			return files
-		except Exception as e:
-			print(f"[_ls_info_command] Exception listing {path}: {e}", flush=True)
-			return []
-	
-	async def als_info(self, path: str = "/") -> list[FileInfo]:
-		"""Async version of ls_info."""
-		return await asyncio.to_thread(self.ls_info, path)
-	
-	def glob_info(self, pattern: str, path: str = "/") -> list[FileInfo]:
-		"""Find files matching glob pattern using bash globstar. Pass paths directly to sandbox."""
-		self._ensure_initialized()
-		import shlex
-		
-		# Build filtering: at root, only search in allowed directories
-		# In subdirectories, search everything
-		if path == "/":
-			# At root: only search in allowed directories using absolute paths
-			allowed_globs = " ".join([f"/{allowed}/**/{pattern}" for allowed in self._allowed_root_dirs])
-			glob_pattern = f"({allowed_globs})"
-			exclusion_checks = "true"  # No exclusion needed, we're already filtering by allowed dirs
-		else:
-			# In subdirectories: use absolute path with pattern
-			base_path = path.rstrip('/')
-			glob_pattern = f"{base_path}/**/{pattern}"
-			exclude_checks_parts = []
-			# Exclude common system directories
-			system_dirs = ["bin", "sbin", "dev", "etc", "lib", "lib32", "lib64", "libx32", "proc", "sys", "run", "tmp", "var", "boot", "root", "srv", "opt", "mnt", "media", "home", "lost+found"]
-			for exc in system_dirs:
-				exclude_checks_parts.append(f'[[ "$file" != *{shlex.quote("/" + exc + "/")}* ]]')
-			exclusion_checks = " && ".join(exclude_checks_parts) if exclude_checks_parts else "true"
-		
-		# Use bash globstar - pass paths directly, no cd needed
-		glob_cmd = f"""
-shopt -s globstar nullglob
-for file in {glob_pattern}; do
-	if [ -e "$file" ] && {exclusion_checks}; then
-		stat -c '%n|%s|%Y' "$file" 2>/dev/null || true
-    fi
-done
-"""
-		try:
-			result = self._sandbox.commands.run(glob_cmd, timeout=500)
-		except Exception as e:
-			return []
-		
-		# Parse output (format: filename|size|timestamp)
-		files = []
-		for line in result.stdout.strip().split('\n'):
-			if not line or '|' not in line:
-				continue
-			parts = line.split('|', 2)
-			if len(parts) >= 2:
-				filename = parts[0]
-			# At root level, only show files from allowed directories
-			if path == "/":
-				# Check if file is in an allowed directory
-				path_parts = filename.split('/')
-				if path_parts and path_parts[0] not in self._allowed_root_dirs:
-					continue
-			# In subdirectories, filter out system directories
-			else:
-				path_parts = filename.split('/')
-				system_dirs = ["bin", "sbin", "dev", "etc", "lib", "lib32", "lib64", "libx32", "proc", "sys", "run", "tmp", "var", "boot", "root", "srv", "opt", "mnt", "media", "home", "lost+found"]
-				if any(part in system_dirs for part in path_parts if part):
-					continue
-			
-			# Make path absolute
-			if not filename.startswith('/'):
-				if path == "/":
-					full_path = f"/{filename}"
+						content_str = content.decode('utf-8')
+						self._sandbox.files.write(path, content_str)
+					except UnicodeDecodeError:
+						self._sandbox.files.write(path, content)
 				else:
-					base_path = path.rstrip('/')
-					fname = filename.lstrip('/')
-					full_path = f"{base_path}/{fname}".replace("//", "/")
-			else:
-				# If absolute, use as-is
-				full_path = filename
-			
-			files.append(FileInfo(
-				path=full_path,
-				size=int(parts[1]) if parts[1].isdigit() else 0,
-				modified_at=parts[2] if len(parts) > 2 else None
-			))
-			
-		return files
-	
-	async def aglob_info(self, pattern: str, path: str = "/") -> list[FileInfo]:
-		"""Async version of glob_info."""
-		return await asyncio.to_thread(self.glob_info, pattern, path)
-	
-	def grep_raw(self, pattern: str, path: str | None = None, glob: str | None = None) -> list[GrepMatch] | str:
-		"""Search for pattern using ripgrep. Pass path directly to sandbox."""
-		self._ensure_initialized()
+					self._sandbox.files.write(path, str(content))
+				responses.append(FileUploadResponse(path=path, error=None))
+			except Exception as e:
+				responses.append(FileUploadResponse(path=path, error="permission_denied"))
 		
-		self._writer(f"Buscando '{pattern}'...")
-		
-		import shlex
-			
-		# Pass path directly to sandbox without normalization
-		search_path = path if path else "/"
-		
-		# Build ripgrep command with directory filtering
-		# rg is much faster than grep and has native directory exclusion
-		rg_parts = ["rg", "--no-config", "--no-heading", "--with-filename", "--line-number"]
-		
-		# At root level, only search in allowed directories
-		if search_path == "/":
-			# Only search in workspace, mnt, and .ticket
-			for allowed_dir in self._allowed_root_dirs:
-				rg_parts.extend(["-g", f"{allowed_dir}/**"])
-		else:
-			# In subdirectories, exclude system directories
-			system_dirs = ["bin", "sbin", "dev", "etc", "lib", "lib32", "lib64", "libx32", "proc", "sys", "run", "tmp", "var", "boot", "root", "srv", "opt", "mnt", "media", "home", "lost+found"]
-			for exc_dir in system_dirs:
-				rg_parts.extend(["-g", f"!{exc_dir}/**"])
-				rg_parts.extend(["-g", f"!**/{exc_dir}/**"])
-		
-		# Add glob filter if provided (e.g., -g '*.txt')
-		if glob:
-			rg_parts.extend(["-g", glob])
-		
-		# Add pattern and search path
-		rg_parts.extend([shlex.quote(pattern), shlex.quote(search_path)])
-		
-		rg_cmd = " ".join(rg_parts) + " 2>/dev/null || true"
-		
-		try:
-			result = self._sandbox.commands.run(rg_cmd, timeout=500)  # rg is much faster
-		except Exception as e:
-			return []
-		
-		# Parse rg output (format: file:line:content)
-		matches = []
-		for line in result.stdout.strip().split('\n'):
-			if not line:
-				continue
-		
-			# Split only on first two colons to preserve colons in content
-			parts = line.split(':', 2)
-			if len(parts) >= 3:
-				file_path = parts[0]
-				# Ensure path starts with /
-				if not file_path.startswith('/'):
-					file_path = f"/{file_path}"
-				try:
-					line_num = int(parts[1])
-				except ValueError:
-					continue
-				content = parts[2]
-				
-				matches.append(GrepMatch(
-					path=file_path,
-					line=line_num,
-					text=content
-				))
-	
-		return matches
-	
-	async def agrep_raw(self, pattern: str, path: str | None = None, glob: str | None = None) -> list[GrepMatch] | str:
-		"""Async version of grep_raw."""
-		return await asyncio.to_thread(self.grep_raw, pattern, path, glob)
+		return responses
 	
 	def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
 		"""Download multiple files from the sandbox."""
@@ -1012,35 +547,25 @@ done
 		
 		return responses
 	
+	async def aupload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+		"""Async version of upload_files."""
+		return await asyncio.to_thread(self.upload_files, files)
+	
 	async def adownload_files(self, paths: list[str]) -> list[FileDownloadResponse]:
 		"""Async version of download_files."""
 		return await asyncio.to_thread(self.download_files, paths)
 	
-	def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
-		"""Upload multiple files to the sandbox."""
-		self._ensure_initialized()
-		responses = []
-		for path, content in files:
-			try:
-				# Decode bytes to string if it's text content
-				if isinstance(content, bytes):
-					try:
-						content_str = content.decode('utf-8')
-						self._sandbox.files.write(path, content_str)
-					except UnicodeDecodeError:
-						# Binary file - write as bytes
-						self._sandbox.files.write(path, content)
-				else:
-					self._sandbox.files.write(path, str(content))
-				responses.append(FileUploadResponse(path=path, error=None))
-			except Exception as e:
-				responses.append(FileUploadResponse(path=path, error="permission_denied"))
-		
-		return responses
+	async def aread(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
+		return await asyncio.to_thread(self.read, file_path, offset, limit)
 	
-	async def aupload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
-		"""Async version of upload_files."""
-		return await asyncio.to_thread(self.upload_files, files)
+	async def awrite(self, file_path: str, content: str) -> WriteResult:
+		return await asyncio.to_thread(self.write, file_path, content)
+	
+	async def agrep_raw(self, pattern: str, path: str | None = None, glob: str | None = None) -> list[GrepMatch] | str:
+		return await asyncio.to_thread(self.grep_raw, pattern, path, glob)
+	
+	async def aglob_info(self, pattern: str, path: str = "/") -> list[FileInfo]:
+		return await asyncio.to_thread(self.glob_info, pattern, path)
 
 	@property
 	def id(self) -> str:

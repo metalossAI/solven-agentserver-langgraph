@@ -118,38 +118,6 @@ template = (
         "Pillow",           # Image processing (used by various skills)
     ])
     # ============================================================================
-    # Filesystem Setup
-    # ============================================================================
-    # Create /mnt/r2 directory and subdirectories for thread-specific mounts
-    .make_dir("/mnt/r2", mode=0o755, user="root")
-    .make_dir("/mnt/r2/threads", mode=0o755, user="root")
-    .make_dir("/mnt/r2/skills", mode=0o755, user="root")
-    .make_dir("/mnt/r2/tickets", mode=0o755, user="root")
-    .run_cmd("chown -R user:user /mnt/r2", user="root")
-    # Create /home/user/workspace directory structure
-    .make_dir("/home/user/workspace", mode=0o755, user="root")
-    .run_cmd("chown -R user:user /home/user/workspace", user="root")
-    # ============================================================================
-    # Local Workspace for Venvs
-    # ============================================================================
-    # Create /tmp/workspace for local venvs (fast, no FUSE issues)
-    # Venvs created here on startup from dependency files on R2
-    .make_dir("/tmp/workspace", mode=0o755, user="root")
-    .run_cmd("chown -R user:user /tmp/workspace", user="root")
-    # Create pyproject.toml template for new workspaces
-    .run_cmd("""cat > /tmp/pyproject.template.toml << 'EOF'
-[project]
-name = "workspace"
-version = "0.1.0"
-requires-python = ">=3.11"
-dependencies = []
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-EOF
-""", user="root")
-    # ============================================================================
     # FUSE Configuration
     # ============================================================================
     # Configure fuse to allow non-root users (needed for rclone with allow_other)
@@ -177,11 +145,7 @@ EOF
         """
         # Note: S3 mounting is now handled by sandbox_backend.py after sandbox creation
         # This start command just prepares the mount point directories
-        echo "[Template] Creating mount point directories..."
-        sudo mkdir -p /mnt/r2/threads /mnt/r2/skills /mnt/r2/tickets
         sudo mkdir -p /root/.config/rclone
-        sudo chown -R user:user /mnt/r2
-        echo "[Template] ✓ Mount points ready"
         echo "[Template] Sandbox initialized (mounts will be configured by backend)"
         """,
         wait_for_timeout(2_000)

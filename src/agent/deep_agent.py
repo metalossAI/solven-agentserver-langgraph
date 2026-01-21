@@ -162,9 +162,9 @@ graph = create_deep_agent(
 		outlook_subagent,
 		catastro_subagent,
 	],
+	skills=["/skills/"],
 	middleware=[
 		build_context,
-		SkillsMiddleware(backend=SandboxBackend, sources=["/mnt/skills/"])
 	],
 	context_schema=AppContext,
 )

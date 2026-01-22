@@ -57,7 +57,7 @@ class DocxXMLEditor(XMLEditor):
     """
 
     def __init__(
-        self, xml_path, rsid: str, author: str = "Claude", initials: str = "C"
+        self, xml_path, rsid: str, author: str = "Solven", initials: str = "C"
     ):
         """Initialize with required RSID and optional author.
 
@@ -617,8 +617,8 @@ class Document:
         unpacked_dir,
         rsid=None,
         track_revisions=False,
-        author="Claude",
-        initials="C",
+        author="Solven",
+        initials="S",
     ):
         """
         Initialize with path to unpacked Word document directory.
@@ -628,7 +628,7 @@ class Document:
             unpacked_dir: Path to unpacked DOCX directory (must contain word/ subdirectory)
             rsid: Optional RSID to use for all comment elements. If not provided, one will be generated.
             track_revisions: If True, enables track revisions in settings.xml (default: False)
-            author: Default author name for comments (default: "Claude")
+            author: Default author name for comments (default: "Solven")
             initials: Default author initials for comments (default: "C")
         """
         self.original_path = Path(unpacked_dir)

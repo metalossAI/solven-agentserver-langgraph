@@ -16,11 +16,11 @@ granite_llm = ChatWatsonx(
 )
 
 xai_grok_4_fast = ChatOpenAI(
-    model="x-ai/grok-4.1-fast",
+    model="x-ai/grok-4-fast",
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
     model_kwargs={
-        "parallel_tool_calls" : False,
+        "reasoning": {"enabled": True}
     }
 )
 
@@ -80,6 +80,6 @@ LLM_SO = xai_grok_4_fast_SO
 
 CODING_LLM = xai_grok_code_fast_1
 
-LLM = google_gemini
+LLM = xai_grok_4_fast
 
 __all__ = ["LLM"]

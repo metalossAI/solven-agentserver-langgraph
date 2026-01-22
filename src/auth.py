@@ -17,13 +17,14 @@ auth = Auth()
 @auth.authenticate
 async def authenticate(headers: dict) -> Auth.types.MinimalUserDict:
     """Validate JWT tokens and extract user information."""
-    
+    print("headers", headers)
     supabase = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
     def _get_header(name: str):
         return headers.get(name) or headers.get(name.lower()) or headers.get(name.upper()) or headers.get(name.encode())
 
-    def _normalize_key(value):
+    def _normalize_bearer(value):
+        """Extract token from Bearer header"""
         if value is None:
             return None
         if isinstance(value, bytes):
@@ -35,21 +36,47 @@ async def authenticate(headers: dict) -> Auth.types.MinimalUserDict:
             value = value[7:].strip()
         return value
 
-    api_key = _normalize_key(_get_header("x-api-key") or _get_header("authorization"))
-
-    if not api_key:
-        raise Auth.exceptions.HTTPException(status_code=401, detail="Missing API key header")
+    # Try to get authentication token from either x-api-key or Authorization header
+    x_api_key = _get_header("x-api-key")
+    authorization = _get_header("authorization")
     
-    if (os.getenv("LANGGRAPH_API_KEY") == api_key):
-        return {
-            "identity": "webhook",
-            "is_authenticated": True,
-            "user_data": None,
-        }
+    # Determine the token to validate
+    token = None
+    
+    if x_api_key:
+        if isinstance(x_api_key, bytes):
+            x_api_key = x_api_key.decode("utf-8")
+        x_api_key = x_api_key.strip()
+        
+        # Check if it's the system API key
+        if os.getenv("LANGGRAPH_API_KEY") == x_api_key:
+            user_data = {
+                "id": "system",
+                "email": "system@metaloss.es",
+                "name": "System",
+                "role": "system",
+                "company_id": "system",
+                "is_active": True,
+                "is_creator": True,
+            }
+            return {
+                "identity": "system",
+                "is_authenticated": True,
+                "user_data": user_data,
+            }
+        
+        # Not the system key, treat as user token (from CopilotKit via langsmithApiKey)
+        token = x_api_key
+    elif authorization:
+        # Extract Bearer token from Authorization header
+        token = _normalize_bearer(authorization)
+    
+    if not token:
+        raise Auth.exceptions.HTTPException(status_code=401, detail="Missing authentication header")
     
     try:
-        # Verify token with Supabase
-        auth_user = await supabase.auth.get_user(api_key)
+        # Verify token with Supabase (works for both x-api-key and Authorization header)
+        auth_user = await supabase.auth.get_user(token)
         
         if not auth_user or not auth_user.user:
             raise Auth.exceptions.HTTPException(status_code=401, detail="Invalid token")
@@ -68,7 +95,7 @@ async def authenticate(headers: dict) -> Auth.types.MinimalUserDict:
             "is_creator": metadata.get("is_creator", False),
         }
 
-        print(user_data)
+        print("user_data",user_data)
         
         return {
             "identity": user.id,

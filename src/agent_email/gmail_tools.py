@@ -39,9 +39,9 @@ async def gmail_fetch_emails(
         "page_token": page_token,
         "user_id": user_id,
     }
-    # Remove None values
     arguments = {k: v for k, v in arguments.items() if v is not None}
     return await execute_composio_tool(GMAIL.tools.FETCH_EMAILS, arguments, runtime)
+
 
 @tool(
     GMAIL.tools.SEND_EMAIL,
@@ -386,6 +386,7 @@ async def gmail_patch_label(
     GMAIL.tools.LIST_THREADS,
 )
 async def gmail_list_threads(
+    runtime: ToolRuntime[AppContext],
     max_results: int = 10,
     page_token: str = "",
     query: str = "",

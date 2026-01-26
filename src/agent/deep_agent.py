@@ -38,7 +38,7 @@ from langchain.agents.middleware import before_agent, AgentState
 from langgraph.runtime import Runtime
 
 # Import email tools
-from src.agent_email.gmail_tools import gmail_tools
+from src.agent_email.gmail_tools import gmail_tools, gmail_send_email
 from src.agent_email.outlook_tools import outlook_tools
 
 

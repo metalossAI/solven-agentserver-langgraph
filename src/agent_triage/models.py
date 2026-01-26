@@ -23,7 +23,7 @@ class InputTriageState(MessagesState):
     outlook_triage_event: dict
 
 class TriageState(InputTriageState):
-    triage_context : str
+    ticket : Ticket
 
 class OutputTriageState(TypedDict):
     ticket: Ticket

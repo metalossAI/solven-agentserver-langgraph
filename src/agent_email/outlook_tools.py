@@ -1,6 +1,11 @@
 """Outlook tool wrappers using Composio direct execution."""
 
+import asyncio
+import json
+import base64
+import os
 from typing import Any, Optional, List, Dict
+from src.sandbox_backend import SandboxBackend
 from langchain_core.tools import tool
 from langchain.tools import ToolRuntime
 from src.composio.types.outlook import OUTLOOK
@@ -435,7 +440,10 @@ async def outlook_download_attachment(
     message_id: str,
     user_id: Optional[str] = "me",
 ) -> str:
-    """Downloads a specific file attachment from an email message in a Microsoft Outlook mailbox; the attachment must contain 'contentBytes' (binary data) and not be a link or embedded item."""
+    """
+    Downloads a specific file attachment from an email message in Outlook and uploads it to S3.
+    Returns the workspace-relative path where the agent can access the file.
+    """
     arguments = {
         "attachment_id": attachment_id,
         "file_name": file_name,
@@ -443,7 +451,93 @@ async def outlook_download_attachment(
         "user_id": user_id,
     }
     arguments = {k: v for k, v in arguments.items() if v is not None}
-    return await execute_composio_tool(OUTLOOK.tools.DOWNLOAD_OUTLOOK_ATTACHMENT, arguments, runtime)
+    result = await execute_composio_tool(OUTLOOK.tools.DOWNLOAD_OUTLOOK_ATTACHMENT, arguments, runtime)
+    
+    try:
+        result_data = json.loads(result)
+        
+        attachment_bytes = None
+        
+        if isinstance(result_data, dict):
+            if "data" in result_data:
+                attachment_data_b64 = result_data["data"]
+                attachment_bytes = base64.b64decode(attachment_data_b64)
+            elif "file" in result_data:
+                local_file_path = result_data["file"]
+                
+                if os.path.exists(local_file_path):
+                    with open(local_file_path, "rb") as f:
+                        attachment_bytes = f.read()
+                else:
+                    return json.dumps({
+                        "success": False,
+                        "message": f"Local file not found: {local_file_path}",
+                        "raw_result": result,
+                    }, indent=2)
+        
+        if attachment_bytes:
+            from datetime import datetime
+            from src.s3_client import S3Client
+            
+            thread_id = runtime.context.thread.id
+            s3_client = S3Client(prefix=f"threads/{thread_id}")
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            safe_filename = file_name.replace(" ", "_").replace("/", "_")
+            file_path = f"adjuntos/{timestamp}_{safe_filename}"
+            
+            upload_result = await asyncio.to_thread(
+                s3_client.upload_file,
+                file_path=file_path,
+                content=attachment_bytes,
+                metadata={
+                    "message_id": message_id,
+                    "attachment_id": attachment_id,
+                    "source": "outlook",
+                    "thread_id": thread_id,
+                    "original_filename": file_name,
+                    "uploaded_at": datetime.now().isoformat(),
+                }
+            )
+            
+            if upload_result["success"]:
+                workspace_path = f"/workspace/{file_path}"
+                
+                return json.dumps({
+                    "success": True,
+                    "message": f"File saved to: {workspace_path}",
+                    "path": workspace_path,
+                    "file_name": file_name,
+                    "message_id": message_id,
+                    "size_bytes": len(attachment_bytes),
+                }, indent=2)
+            else:
+                return json.dumps({
+                    "success": False,
+                    "message": f"S3 upload failed: {upload_result.get('error')}",
+                    "file_name": file_name,
+                    "upload_error": upload_result.get('error'),
+                }, indent=2)
+        else:
+            return json.dumps({
+                "success": False,
+                "message": "Attachment data not found in response (expected 'data' or 'file' field)",
+                "raw_result": result,
+            }, indent=2)
+            
+    except json.JSONDecodeError:
+        return json.dumps({
+            "success": False,
+            "message": "Failed to parse attachment response",
+            "raw_result": result,
+        }, indent=2)
+        
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "message": f"Error processing attachment: {str(e)}",
+            "file_name": file_name,
+        }, indent=2)
 
 
 @tool(
@@ -1241,7 +1335,7 @@ async def outlook_send_email(
     body: str,
     subject: str,
     to: str,
-    attachment: Optional[Dict[str, Any]] = None,
+    attachment_path: Optional[str] = None,
     bcc_emails: Optional[List[str]] = [],
     cc_emails: Optional[List[str]] = [],
     from_address: Optional[str] = None,
@@ -1250,12 +1344,48 @@ async def outlook_send_email(
     to_name: Optional[str] = None,
     user_id: Optional[str] = "me",
 ) -> str:
-    """Sends an email with subject, body, recipients, and an optional attachment via Microsoft Graph API. Supports comma-separated email addresses in the to_email field for multiple recipients. Attachments require a non-empty file with valid name and mimetype."""
+    """Sends an email with subject, body, recipients, and an optional attachment via Microsoft Graph API."""
+    
+    # Process attachment if provided
+    composio_attachment = None
+    temp_file_path = None
+    
+    if attachment_path:
+        backend = SandboxBackend(runtime)
+        
+        try:
+            download_responses = await backend.adownload_files([attachment_path])
+            download_response = download_responses[0] if download_responses else None
+            
+            if not download_response or download_response.error:
+                error_msg = download_response.error if download_response else "unknown error"
+                return json.dumps({
+                    "success": False,
+                    "message": f"Failed to download attachment '{attachment_path}': {error_msg}"
+                }, indent=2)
+            
+            file_content = download_response.content
+            file_name = os.path.basename(attachment_path)
+            
+            import tempfile
+            temp_dir = tempfile.gettempdir()
+            temp_file_path = os.path.join(temp_dir, file_name)
+            
+            with open(temp_file_path, 'wb') as f:
+                f.write(file_content)
+            
+            composio_attachment = temp_file_path
+            
+        except Exception as e:
+            return json.dumps({
+                "success": False,
+                "message": f"Error processing attachment '{attachment_path}': {str(e)}"
+            }, indent=2)
+    
     arguments = {
         "body": body,
         "subject": subject,
         "to": to,
-        "attachment": attachment,
         "bcc_emails": bcc_emails or [],
         "cc_emails": cc_emails or [],
         "from_address": from_address,
@@ -1264,8 +1394,21 @@ async def outlook_send_email(
         "to_name": to_name,
         "user_id": user_id,
     }
+    
+    if composio_attachment:
+        arguments["attachment"] = composio_attachment
+    
     arguments = {k: v for k, v in arguments.items() if v is not None}
-    return await execute_composio_tool(OUTLOOK.tools.SEND_EMAIL, arguments, runtime)
+    
+    try:
+        result = await execute_composio_tool(OUTLOOK.tools.SEND_EMAIL, arguments, runtime)
+        return result
+    finally:
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+            except Exception:
+                pass
 
 
 @tool(

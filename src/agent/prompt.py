@@ -1,9 +1,11 @@
 from datetime import datetime
 from dotenv import load_dotenv
-from langsmith import AsyncClient
+from langsmith import AsyncClient, Client
 from langchain_core.prompts import ChatPromptTemplate
 
 load_dotenv()
+
+client = Client()
 
 def get_prompt_variables(name: str, profile: str, language: str = "español", context_title: str = "", context_description: str = "") -> dict:
     """

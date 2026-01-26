@@ -527,7 +527,7 @@ class SandboxBackend(BaseSandbox):
 		return responses
 	
 	def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
-		"""Download multiple files from the sandbox."""
+		"""Download multiple files from the sandbox using download_url for raw bytes."""
 		self._ensure_initialized()
 		responses = []
 		for path in paths:
@@ -536,14 +536,19 @@ class SandboxBackend(BaseSandbox):
 					responses.append(FileDownloadResponse(path=path, content=None, error="file_not_found"))
 					continue
 				
-				content_bytes = self._sandbox.files.read(path)
-				if isinstance(content_bytes, bytes):
-					responses.append(FileDownloadResponse(path=path, content=content_bytes, error=None))
-				else:
-					# If it's already a string, encode it
-					responses.append(FileDownloadResponse(path=path, content=content_bytes.encode('utf-8'), error=None))
+				# Get download URL from E2B
+				download_url = self._sandbox.download_url(path)
+				
+				# Fetch file content directly via HTTP to get raw bytes
+				import requests
+				response = requests.get(download_url, timeout=30)
+				response.raise_for_status()
+				
+				content_bytes = response.content  # Raw bytes, no encoding
+				responses.append(FileDownloadResponse(path=path, content=content_bytes, error=None))
+				
 			except Exception as e:
-				responses.append(FileDownloadResponse(path=path, content=None, error="permission_denied"))
+				responses.append(FileDownloadResponse(path=path, content=None, error=f"download_error: {str(e)}"))
 		
 		return responses
 	

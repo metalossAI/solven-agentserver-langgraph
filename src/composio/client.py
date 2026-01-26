@@ -135,7 +135,46 @@ async def upload_file_to_composio(
         
         # Auto-detect MIME type if not provided
         if mime_type is None:
-            mime_type, _ = mimetypes.guess_type(file_name)
+            # Get file extension
+            ext = os.path.splitext(file_name)[1].lower()
+            
+            # Common MIME types mapping (especially for Microsoft Office files)
+            mime_type_map = {
+                # Microsoft Office
+                '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                '.doc': 'application/msword',
+                '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                '.xls': 'application/vnd.ms-excel',
+                '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+                '.ppt': 'application/vnd.ms-powerpoint',
+                # PDF
+                '.pdf': 'application/pdf',
+                # Images
+                '.jpg': 'image/jpeg',
+                '.jpeg': 'image/jpeg',
+                '.png': 'image/png',
+                '.gif': 'image/gif',
+                '.webp': 'image/webp',
+                '.svg': 'image/svg+xml',
+                # Text
+                '.txt': 'text/plain',
+                '.csv': 'text/csv',
+                '.html': 'text/html',
+                '.htm': 'text/html',
+                # Archives
+                '.zip': 'application/zip',
+                '.rar': 'application/x-rar-compressed',
+                '.7z': 'application/x-7z-compressed',
+            }
+            
+            # Try custom mapping first
+            mime_type = mime_type_map.get(ext)
+            
+            # Fall back to mimetypes library
+            if mime_type is None:
+                mime_type, _ = mimetypes.guess_type(file_name)
+            
+            # Final fallback
             if mime_type is None:
                 mime_type = "application/octet-stream"
         

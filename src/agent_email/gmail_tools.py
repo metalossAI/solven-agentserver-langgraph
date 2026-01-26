@@ -9,6 +9,7 @@ from src.sandbox_backend import SandboxBackend
 from src.s3_client import S3Client
 from langchain_core.tools import tool
 from langchain.tools import ToolRuntime
+from langgraph.types import interrupt
 from src.composio.types.gmail import GMAIL
 from src.composio.client import composio_client, execute_composio_tool, upload_file_to_composio
 from src.models import AppContext
@@ -84,15 +85,15 @@ async def gmail_send_email(
     user_id: str = "me",
 ) -> str:
     """
-    Sends an email via Gmail API with optional single attachment.
+    Send an email via Gmail with optional attachment.
     
     Args:
         recipient_email: Primary recipient email address
-        subject: Email subject
+        subject: Email subject line
         body: Email body content
         cc: List of CC email addresses
         bcc: List of BCC email addresses
-        extra_recipients: Additional recipients
+        extra_recipients: Additional recipient email addresses
         is_html: Whether the body is HTML formatted
         attachment_path: Single file path from workspace (e.g., "/workspace/adjuntos/file.pdf")
         user_id: Gmail user ID (default: "me")
@@ -101,7 +102,6 @@ async def gmail_send_email(
         JSON string with success status and message details
     """
     
-    # Process attachment if provided
     composio_attachment = None
     temp_file_path = None
     
@@ -117,13 +117,19 @@ async def gmail_send_email(
                 error_msg = download_response.error if download_response else "unknown error"
                 return json.dumps({
                     "success": False,
-                    "message": f"Failed to download attachment '{attachment_path}': {error_msg}"
+                    "message": f"Failed to download attachment: {error_msg}"
                 }, indent=2)
             
             file_content = download_response.content
             file_name = os.path.basename(attachment_path)
             
-            # Write to a temporary file so Composio SDK can handle the upload
+            if not isinstance(file_content, bytes):
+                return json.dumps({
+                    "success": False,
+                    "message": f"Invalid file content type: {type(file_content).__name__}"
+                }, indent=2)
+            
+            # Write to temp file - Composio SDK will handle upload
             import tempfile
             temp_dir = tempfile.gettempdir()
             temp_file_path = os.path.join(temp_dir, file_name)
@@ -131,18 +137,40 @@ async def gmail_send_email(
             with open(temp_file_path, 'wb') as f:
                 f.write(file_content)
             
-            print(f"[SEND_EMAIL] Wrote attachment to temp file: {temp_file_path}")
+            # Verify temp file integrity
+            temp_size = os.path.getsize(temp_file_path)
             
-            # Let Composio SDK handle the upload by passing the local file path
+            # Read back and verify it matches
+            with open(temp_file_path, 'rb') as f:
+                verify_content = f.read()
+            
+            if len(verify_content) != len(file_content):
+                return json.dumps({
+                    "success": False,
+                    "message": f"Temp file size mismatch: written {len(file_content)}, read {len(verify_content)}"
+                }, indent=2)
+            
+            if verify_content != file_content:
+                return json.dumps({
+                    "success": False,
+                    "message": "Temp file content mismatch - file corrupted during write"
+                }, indent=2)
+            
+            # Check DOCX signature (PK zip header)
+            if file_name.endswith('.docx') and not verify_content.startswith(b'PK'):
+                return json.dumps({
+                    "success": False,
+                    "message": f"Invalid DOCX file - missing PK header. First bytes: {verify_content[:10].hex()}"
+                }, indent=2)
+            
             composio_attachment = temp_file_path
             
         except Exception as e:
             return json.dumps({
                 "success": False,
-                "message": f"Error processing attachment '{attachment_path}': {str(e)}"
+                "message": f"Error processing attachment: {str(e)}"
             }, indent=2)
     
-    # Build arguments for Composio
     arguments = {
         "recipient_email": recipient_email,
         "subject": subject,
@@ -154,25 +182,47 @@ async def gmail_send_email(
         "user_id": user_id,
     }
     
-    # Add attachment if processed
     if composio_attachment:
         arguments["attachment"] = composio_attachment
-
+    
     arguments = {k: v for k, v in arguments.items() if v is not None}
     
-    print(f"[SEND_EMAIL] Final arguments to Composio: {json.dumps(arguments, indent=2)}")
+    # # Request user confirmation before sending
+    # confirmation_payload = {
+    #     "action": "confirm_email_send",
+    #     "provider": "gmail",
+    #     "recipient": recipient_email,
+    #     "subject": subject,
+    #     "body": body,
+    #     "has_attachment": attachment_path is not None,
+    #     "attachment_name": os.path.basename(attachment_path) if attachment_path else None,
+    # }
+    # 
+    # confirmation = interrupt(confirmation_payload)
+    # 
+    # # If user didn't confirm, return cancelled message
+    # if not confirmation or confirmation.get("confirmed") != True:
+    #     # Clean up temp file if exists
+    #     if temp_file_path and os.path.exists(temp_file_path):
+    #         try:
+    #             os.remove(temp_file_path)
+    #         except Exception:
+    #             pass
+    #     return json.dumps({
+    #         "success": False,
+    #         "message": "Email sending cancelled by user"
+    #     }, indent=2)
     
     try:
         result = await execute_composio_tool(GMAIL.tools.SEND_EMAIL, arguments, runtime)
         return result
     finally:
-        # Clean up temporary file if it was created
+        # Clean up temp file
         if temp_file_path and os.path.exists(temp_file_path):
             try:
                 os.remove(temp_file_path)
-                print(f"[SEND_EMAIL] Cleaned up temp file: {temp_file_path}")
-            except Exception as e:
-                print(f"[SEND_EMAIL] Failed to clean up temp file: {e}")
+            except Exception:
+                pass
 
 
 @tool(
@@ -247,6 +297,13 @@ async def gmail_reply_to_thread(
             
             file_content = download_response.content
             file_name = os.path.basename(attachment_path)
+            
+            # Validate file content is bytes
+            if not isinstance(file_content, bytes):
+                return json.dumps({
+                    "success": False,
+                    "message": f"Invalid file content type: expected bytes, got {type(file_content).__name__}"
+                }, indent=2)
             
             # Upload to Composio S3 backend
             upload_result = await upload_file_to_composio(

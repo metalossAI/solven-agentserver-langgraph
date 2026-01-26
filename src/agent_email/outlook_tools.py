@@ -8,6 +8,7 @@ from typing import Any, Optional, List, Dict
 from src.sandbox_backend import SandboxBackend
 from langchain_core.tools import tool
 from langchain.tools import ToolRuntime
+from langgraph.types import interrupt
 from src.composio.types.outlook import OUTLOOK
 from src.composio.client import composio_client, execute_composio_tool
 from src.models import AppContext
@@ -1367,12 +1368,47 @@ async def outlook_send_email(
             file_content = download_response.content
             file_name = os.path.basename(attachment_path)
             
+            # Validate file content is bytes
+            if not isinstance(file_content, bytes):
+                return json.dumps({
+                    "success": False,
+                    "message": f"Invalid file content type: expected bytes, got {type(file_content).__name__}"
+                }, indent=2)
+            
+            # Write to temp file preserving the original filename and extension
             import tempfile
             temp_dir = tempfile.gettempdir()
             temp_file_path = os.path.join(temp_dir, file_name)
             
+            # Write binary content to temp file
             with open(temp_file_path, 'wb') as f:
                 f.write(file_content)
+            
+            # Verify temp file integrity
+            temp_size = os.path.getsize(temp_file_path)
+            
+            # Read back and verify it matches
+            with open(temp_file_path, 'rb') as f:
+                verify_content = f.read()
+            
+            if len(verify_content) != len(file_content):
+                return json.dumps({
+                    "success": False,
+                    "message": f"Temp file size mismatch: written {len(file_content)}, read {len(verify_content)}"
+                }, indent=2)
+            
+            if verify_content != file_content:
+                return json.dumps({
+                    "success": False,
+                    "message": "Temp file content mismatch - file corrupted during write"
+                }, indent=2)
+            
+            # Check DOCX signature (PK zip header)
+            if file_name.endswith('.docx') and not verify_content.startswith(b'PK'):
+                return json.dumps({
+                    "success": False,
+                    "message": f"Invalid DOCX file - missing PK header. First bytes: {verify_content[:10].hex()}"
+                }, indent=2)
             
             composio_attachment = temp_file_path
             
@@ -1400,10 +1436,37 @@ async def outlook_send_email(
     
     arguments = {k: v for k, v in arguments.items() if v is not None}
     
+    # # Request user confirmation before sending
+    # confirmation_payload = {
+    #     "action": "confirm_email_send",
+    #     "provider": "outlook",
+    #     "recipient": to,
+    #     "subject": subject,
+    #     "body": body,
+    #     "has_attachment": attachment_path is not None,
+    #     "attachment_name": os.path.basename(attachment_path) if attachment_path else None,
+    # }
+    # 
+    # confirmation = interrupt(confirmation_payload)
+    # 
+    # # If user didn't confirm, return cancelled message
+    # if not confirmation or confirmation.get("confirmed") != True:
+    #     # Clean up temp file if exists
+    #     if temp_file_path and os.path.exists(temp_file_path):
+    #         try:
+    #             os.remove(temp_file_path)
+    #         except Exception:
+    #             pass
+    #     return json.dumps({
+    #         "success": False,
+    #         "message": "Email sending cancelled by user"
+    #     }, indent=2)
+    
     try:
         result = await execute_composio_tool(OUTLOOK.tools.SEND_EMAIL, arguments, runtime)
         return result
     finally:
+        # Clean up temp file
         if temp_file_path and os.path.exists(temp_file_path):
             try:
                 os.remove(temp_file_path)

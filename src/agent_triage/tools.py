@@ -1,3 +1,4 @@
+from re import T
 from typing import Optional
 from langchain.tools import tool, ToolRuntime
 from langgraph.graph.state import Command
@@ -27,7 +28,8 @@ async def buscar_ticket(query: str, runtime: ToolRuntime) -> str:
 @tool
 async def seleccionar_ticket(id: str, runtime: ToolRuntime) -> str:
     """
-    Selecciona un ticket existente por su ID.
+    Selecciona un ticket existente por su ID. Antes de usar esta herramienta deberias usar
+    la herramienta buscar_ticket para buscar el ticket que quieras modificar.
 
     Args:
     - id: ID del ticket a seleccionar
@@ -41,6 +43,13 @@ async def seleccionar_ticket(id: str, runtime: ToolRuntime) -> str:
                 "ticket": ticket
             }
         )
+
+@tool
+async def leer_ticket():
+    """
+    Lee el ticket seleccionado.
+    """
+    return ""
 
 @tool
 async def crear_ticket(titulo: str, descripcion: str, correo_cliente: str, runtime: ToolRuntime) -> str:

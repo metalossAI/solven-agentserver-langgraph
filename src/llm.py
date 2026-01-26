@@ -19,6 +19,7 @@ xai_grok_4_fast = ChatOpenAI(
     model="x-ai/grok-4-fast",
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
+    streaming=True,
     model_kwargs={
         "reasoning": {"enabled": True}
     }

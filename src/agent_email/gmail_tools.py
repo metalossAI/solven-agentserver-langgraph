@@ -2,13 +2,15 @@
 
 import asyncio
 import json
-from typing import Any, Optional, List, Annotated, Dict
-from composio import Composio
-from composio_langchain import LangchainProvider
-from langchain_core.tools import tool, InjectedToolArg
+import base64
+import os
+from typing import Any, Optional, List, Dict
+from src.sandbox_backend import SandboxBackend
+from src.s3_client import S3Client
+from langchain_core.tools import tool
 from langchain.tools import ToolRuntime
 from src.composio.types.gmail import GMAIL
-from src.composio.client import composio_client, execute_composio_tool
+from src.composio.client import composio_client, execute_composio_tool, upload_file_to_composio
 from src.models import AppContext
 
 # Message Operations
@@ -40,7 +42,30 @@ async def gmail_fetch_emails(
         "user_id": user_id,
     }
     arguments = {k: v for k, v in arguments.items() if v is not None}
-    return await execute_composio_tool(GMAIL.tools.FETCH_EMAILS, arguments, runtime)
+    #TODO: revisar!!
+    def compact_email_modifier(data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract only compact email information."""
+        messages = data.get("messages", [])
+        compact_messages = []
+        
+        for msg in messages:
+            compact_msg = {
+                "messageId": msg.get("messageId"),
+                "from": msg.get("sender"),
+                "subject": msg.get("subject"),
+                "attachmentList": msg.get("attachmentList"),
+                "preview": msg.get("preview"),
+            }
+            compact_messages.append(compact_msg)
+        
+        return {
+            "messages": compact_messages,
+            "nextPageToken": data.get("nextPageToken"),
+            "resultSizeEstimate": data.get("resultSizeEstimate"),
+            "composio_execution_message": data.get("composio_execution_message"),
+        }
+    
+    return await execute_composio_tool(GMAIL.tools.FETCH_EMAILS, arguments, runtime, compact_email_modifier)
 
 
 @tool(
@@ -55,10 +80,69 @@ async def gmail_send_email(
     bcc: Optional[List[str]] = None,
     extra_recipients: Optional[List[str]] = None,
     is_html: bool = False,
-    attachment: Optional[Dict[str, Any]] = None,
+    attachment_path: Optional[str] = None,
     user_id: str = "me",
 ) -> str:
-    """Sends an email via Gmail API."""
+    """
+    Sends an email via Gmail API with optional single attachment.
+    
+    Args:
+        recipient_email: Primary recipient email address
+        subject: Email subject
+        body: Email body content
+        cc: List of CC email addresses
+        bcc: List of BCC email addresses
+        extra_recipients: Additional recipients
+        is_html: Whether the body is HTML formatted
+        attachment_path: Single file path from workspace (e.g., "/workspace/adjuntos/file.pdf")
+        user_id: Gmail user ID (default: "me")
+        
+    Returns:
+        JSON string with success status and message details
+    """
+    
+    # Process attachment if provided
+    composio_attachment = None
+    temp_file_path = None
+    
+    if attachment_path:
+        backend = SandboxBackend(runtime)
+        
+        try:
+            # Download file from sandbox
+            download_responses = await backend.adownload_files([attachment_path])
+            download_response = download_responses[0] if download_responses else None
+            
+            if not download_response or download_response.error:
+                error_msg = download_response.error if download_response else "unknown error"
+                return json.dumps({
+                    "success": False,
+                    "message": f"Failed to download attachment '{attachment_path}': {error_msg}"
+                }, indent=2)
+            
+            file_content = download_response.content
+            file_name = os.path.basename(attachment_path)
+            
+            # Write to a temporary file so Composio SDK can handle the upload
+            import tempfile
+            temp_dir = tempfile.gettempdir()
+            temp_file_path = os.path.join(temp_dir, file_name)
+            
+            with open(temp_file_path, 'wb') as f:
+                f.write(file_content)
+            
+            print(f"[SEND_EMAIL] Wrote attachment to temp file: {temp_file_path}")
+            
+            # Let Composio SDK handle the upload by passing the local file path
+            composio_attachment = temp_file_path
+            
+        except Exception as e:
+            return json.dumps({
+                "success": False,
+                "message": f"Error processing attachment '{attachment_path}': {str(e)}"
+            }, indent=2)
+    
+    # Build arguments for Composio
     arguments = {
         "recipient_email": recipient_email,
         "subject": subject,
@@ -67,11 +151,28 @@ async def gmail_send_email(
         "bcc": bcc or [],
         "extra_recipients": extra_recipients or [],
         "is_html": is_html,
-        "attachment": attachment,
         "user_id": user_id,
     }
+    
+    # Add attachment if processed
+    if composio_attachment:
+        arguments["attachment"] = composio_attachment
+
     arguments = {k: v for k, v in arguments.items() if v is not None}
-    return await execute_composio_tool(GMAIL.tools.SEND_EMAIL, arguments, runtime)
+    
+    print(f"[SEND_EMAIL] Final arguments to Composio: {json.dumps(arguments, indent=2)}")
+    
+    try:
+        result = await execute_composio_tool(GMAIL.tools.SEND_EMAIL, arguments, runtime)
+        return result
+    finally:
+        # Clean up temporary file if it was created
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+                print(f"[SEND_EMAIL] Cleaned up temp file: {temp_file_path}")
+            except Exception as e:
+                print(f"[SEND_EMAIL] Failed to clean up temp file: {e}")
 
 
 @tool(
@@ -122,10 +223,61 @@ async def gmail_reply_to_thread(
     bcc: Optional[List[str]] = None,
     extra_recipients: Optional[List[str]] = None,
     is_html: bool = False,
-    attachment: Optional[Dict[str, Any]] = None,
+    attachment_path: Optional[str] = None,
     user_id: str = "me",
 ) -> str:
-    """Sends a reply within a specific Gmail thread."""
+    """Sends a reply within a specific Gmail thread with optional attachment."""
+    
+    # Process attachment if provided
+    composio_attachment = None
+    
+    if attachment_path:
+        backend = SandboxBackend(runtime)
+        
+        try:
+            download_responses = await backend.adownload_files([attachment_path])
+            download_response = download_responses[0] if download_responses else None
+            
+            if not download_response or download_response.error:
+                error_msg = download_response.error if download_response else "unknown error"
+                return json.dumps({
+                    "success": False,
+                    "message": f"Failed to download attachment '{attachment_path}': {error_msg}"
+                }, indent=2)
+            
+            file_content = download_response.content
+            file_name = os.path.basename(attachment_path)
+            
+            # Upload to Composio S3 backend
+            upload_result = await upload_file_to_composio(
+                file_content=file_content,
+                file_name=file_name,
+                app_slug="gmail",
+                action_slug="GMAIL_REPLY_TO_THREAD",
+                runtime=runtime,
+                custom_path=attachment_path
+            )
+            
+            if not upload_result.get('success'):
+                return json.dumps({
+                    "success": False,
+                    "message": f"Failed to upload attachment '{file_name}' to Composio: {upload_result.get('error')}"
+                }, indent=2)
+            
+            # Build attachment object with s3key format
+            storage_key = upload_result.get('storage_location') or upload_result.get('key')
+            composio_attachment = {
+                "s3key": storage_key,
+                "name": file_name,
+                "mimetype": upload_result.get('mime_type', 'application/octet-stream')
+            }
+            
+        except Exception as e:
+            return json.dumps({
+                "success": False,
+                "message": f"Error processing attachment '{attachment_path}': {str(e)}"
+            }, indent=2)
+    
     arguments = {
         "thread_id": thread_id,
         "message_body": message_body,
@@ -134,10 +286,14 @@ async def gmail_reply_to_thread(
         "bcc": bcc or [],
         "extra_recipients": extra_recipients or [],
         "is_html": is_html,
-        "attachment": attachment,
         "user_id": user_id,
     }
+    
+    if composio_attachment:
+        arguments["attachment"] = composio_attachment
+    
     arguments = {k: v for k, v in arguments.items() if v is not None}
+    
     return await execute_composio_tool(GMAIL.tools.REPLY_TO_THREAD, arguments, runtime)
 
 
@@ -436,14 +592,118 @@ async def gmail_get_attachment(
     file_name: str,
     user_id: str = "me",
 ) -> str:
-    """Retrieves a specific attachment by ID from a message in a user's Gmail mailbox."""
+    """
+    Retrieves a specific attachment by ID from a message in a user's Gmail mailbox.
+    Returns the workspace-relative path where the agent can access the file.
+
+    Args:
+        message_id (str): The ID of the message containing the attachment.
+        attachment_id (str): The ID of the attachment to retrieve.
+        file_name (str): The name of the file to save the attachment as.
+        user_id (str, optional): The ID of the user's Gmail account. Defaults to "me".
+        
+    Returns:
+        str: JSON string with success status and workspace path (e.g., /workspace/attachments/file.pdf)
+    """
     arguments = {
         "message_id": message_id,
         "attachment_id": attachment_id,
         "file_name": file_name,
         "user_id": user_id,
     }
-    return await execute_composio_tool(GMAIL.tools.GET_ATTACHMENT, arguments, runtime)
+
+    result = await execute_composio_tool(GMAIL.tools.GET_ATTACHMENT, arguments, runtime)
+    
+    try:
+        result_data = json.loads(result)
+        
+        attachment_bytes = None
+        
+        if isinstance(result_data, dict):
+            if "data" in result_data:
+                attachment_data_b64 = result_data["data"]
+                attachment_bytes = base64.b64decode(attachment_data_b64)
+                source_type = "base64"
+            elif "file" in result_data:
+                import os
+                local_file_path = result_data["file"]
+                
+                if os.path.exists(local_file_path):
+                    file_size = os.path.getsize(local_file_path)
+                    with open(local_file_path, "rb") as f:
+                        attachment_bytes = f.read()
+                    source_type = "local_file"
+                else:
+                    return json.dumps({
+                        "success": False,
+                        "message": f"Local file not found: {local_file_path}",
+                        "raw_result": result,
+                    }, indent=2)
+        
+        if attachment_bytes:
+            from datetime import datetime
+            
+            thread_id = runtime.context.thread.id
+            
+            s3_client = S3Client(prefix=f"threads/{thread_id}")
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            safe_filename = file_name.replace(" ", "_").replace("/", "_")
+            file_path = f"adjuntos/{timestamp}_{safe_filename}"
+            
+            upload_result = await asyncio.to_thread(
+                s3_client.upload_file,
+                file_path=file_path,
+                content=attachment_bytes,
+                metadata={
+                    "message_id": message_id,
+                    "attachment_id": attachment_id,
+                    "source": "gmail",
+                    "thread_id": thread_id,
+                    "original_filename": file_name,
+                    "uploaded_at": datetime.now().isoformat(),
+                }
+            )
+            
+            if upload_result["success"]:
+                workspace_path = f"/workspace/{file_path}"
+                
+                return json.dumps({
+                    "success": True,
+                    "message": f"File saved to: {workspace_path}",
+                    "path": workspace_path,
+                    "file_name": file_name,
+                    "message_id": message_id,
+                    "size_bytes": len(attachment_bytes),
+                }, indent=2)
+            else:
+                return json.dumps({
+                    "success": False,
+                    "message": f"S3 upload failed: {upload_result.get('error')}",
+                    "file_name": file_name,
+                    "upload_error": upload_result.get('error'),
+                }, indent=2)
+        else:
+            return json.dumps({
+                "success": False,
+                "message": "Attachment data not found in response (expected 'data' or 'file' field)",
+                "raw_result": result,
+            }, indent=2)
+            
+    except json.JSONDecodeError:
+        return json.dumps({
+            "success": False,
+            "message": "Failed to parse attachment response",
+            "raw_result": result,
+        }, indent=2)
+        
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "message": f"Error processing attachment: {str(e)}",
+            "file_name": file_name,
+        }, indent=2)
+    
 
 
 # Batch Operations

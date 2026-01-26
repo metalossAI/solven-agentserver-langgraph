@@ -89,6 +89,7 @@ template = (
     # Install to system-wide location so all users can access it
     .run_cmd("curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash", user="root")
     .run_cmd("chmod +x /usr/local/bin/bun", user="root")
+    .npm_install(["docx"])
     # Note: docx will be installed per-thread using bun for better isolation
     # ============================================================================
     # Python Dependencies (pip)

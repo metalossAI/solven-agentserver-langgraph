@@ -1,6 +1,7 @@
 import datetime
 import asyncio
-from deepagents.graph import SkillsMiddleware
+
+from deepagents.graph import SkillsMiddleware, FilesystemMiddleware, SubAgentMiddleware, TodoListMiddleware
 from dotenv import load_dotenv
 from langchain_core.prompts import ChatPromptTemplate
 load_dotenv()
@@ -9,6 +10,10 @@ from langsmith import AsyncClient
 from langchain.tools import ToolRuntime
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, before_model, dynamic_prompt, ModelResponse, wrap_model_call
 
+from langchain_core.messages import SystemMessage
+from langchain.agents import create_agent
+from deepagents.middleware import FilesystemMiddleware, SubAgentMiddleware
+from langchain.agents.middleware import TodoListMiddleware
 
 from src.sandbox_backend import SandboxBackend
 
@@ -75,54 +80,31 @@ async def build_context(state: AgentState, runtime: Runtime):
 		title=metadata.get("title"),
 		description=metadata.get("description"),
 	)
-	
-	# Initialize backend
-	if not runtime.context.backend:
-		runtime.context.backend = await asyncio.to_thread(SandboxBackend(runtime)._ensure_initialized)
-
 
 @dynamic_prompt
 async def build_prompt(request: ModelRequest):
 	# Reuse existing backend instead of creating a new one
 	# Backend is already initialized in build_context
 	runtime : Runtime[AppContext] = request.runtime
-	if not runtime.context.backend:
-		runtime.context.backend = SandboxBackend()
-	
-	backend : SandboxBackend = runtime.context.backend
-	skills_frontmatter = await backend.load_skills_frontmatter()
-	
-	# Safely access ticket attributes, providing defaults if ticket is None
 	ticket = runtime.context.ticket
+	system_prompt : SystemMessage = request.system_message
 
 	client = AsyncClient()
-	base_prompt: ChatPromptTemplate = await client.pull_prompt("solven-main-skills")
-	prompt = base_prompt.format(
+	base_prompt: ChatPromptTemplate = await client.pull_prompt("solven-main")
+	initial_prompt = base_prompt.format(
 		date=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
 		name=runtime.context.user.name,
 		language="español",
 		role=runtime.context.user.role,
 		ticket=ticket,
-		skills=skills_frontmatter,
-		workspace_changes=""
 	)
-	return prompt
-
-
-@dynamic_prompt
-async def build_docx_prompt(request: ModelRequest):
-	runtime : Runtime[AppContext] = request.runtime
-	if not runtime.context.backend:
-		runtime.context.backend = SandboxBackend()
-	
-	backend : SandboxBackend = runtime.context.backend
-	skill_content = await backend.get_skill_content("docx")
-
-	client = AsyncClient()
-	base_prompt : ChatPromptTemplate = await client.pull_prompt("solven-subagent-docx")
-	return base_prompt.format(
-		skill=skill_content
-	)
+	# SystemMessage: append BASE_AGENT_PROMPT to content_blocks
+	new_content = [
+		{"type": "text", "text": f"{initial_prompt}\n\n"},
+		*system_prompt.content_blocks,
+	]
+	final_system_prompt = SystemMessage(content=new_content)
+	return final_system_prompt
 
 gmail_subagent = SubAgent(
 	name="asistente_gmail",
@@ -156,15 +138,17 @@ outlook_subagent = SubAgent(
 
 graph = create_deep_agent(
 	model=llm,
+	system_prompt="",
 	backend=lambda rt: SandboxBackend(rt),
 	subagents=[
 		gmail_subagent,
 		outlook_subagent,
 		catastro_subagent,
 	],
-	skills=["/skills/"],
 	middleware=[
 		build_context,
+		build_prompt,
 	],
+	skills=["/skills/"],
 	context_schema=AppContext,
 )

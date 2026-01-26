@@ -17,7 +17,6 @@ auth = Auth()
 @auth.authenticate
 async def authenticate(headers: dict) -> Auth.types.MinimalUserDict:
     """Validate JWT tokens and extract user information."""
-    print("headers", headers)
     supabase = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
     def _get_header(name: str):
@@ -93,10 +92,7 @@ async def authenticate(headers: dict) -> Auth.types.MinimalUserDict:
             "company_id": metadata.get("company_id"),
             "is_active": metadata.get("is_active", True),
             "is_creator": metadata.get("is_creator", False),
-        }
-
-        print("user_data",user_data)
-        
+        }        
         return {
             "identity": user.id,
             "is_authenticated": True,

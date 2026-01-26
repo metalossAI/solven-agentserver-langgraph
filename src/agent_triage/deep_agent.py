@@ -23,7 +23,7 @@ from src.agent.prompt import generate_prompt_template
 
 from src.agent_catastro.agent import subagent as catastro_subagent
 from src.agent.tools import cargar_habilidad
-from src.utils.tickets import get_ticket, crear_ticket, patch_ticket, listar_tickets
+from src.utils.tickets import get_ticket
 from src.common_tools.files import solicitar_archivo
 
 from langchain.agents.middleware import before_agent, AgentState, after_agent
@@ -33,6 +33,8 @@ from langgraph.runtime import Runtime
 # Import email tools
 from src.agent_email.gmail_tools import gmail_tools
 from src.agent_email.outlook_tools import outlook_tools
+
+from src.agent_triage.models import TriageState
 
 # first identify existing ticket or new ticket.
 
@@ -76,10 +78,6 @@ async def build_context(state: AgentState, runtime: Runtime):
         title=metadata.get("title"),
         description=metadata.get("description"),
     )
-    
-    # Initialize backend
-    if not runtime.context.backend:
-        runtime.context.backend = SandboxBackend(runtime)
 
 @after_agent
 async def update_ticket(state: AgentState, runtime: Runtime):
@@ -88,24 +86,14 @@ async def update_ticket(state: AgentState, runtime: Runtime):
     """
     pass
 
+async def enforce_ticket_selection(state: TriageState, runtime: Runtime):
+    """
+    Forza la selección de un ticket
+    """
+    pass
 
-@dynamic_prompt
-async def build_prompt(request: ModelRequest):
-    # Reuse existing backend instead of creating a new one
-    # Backend is already initialized in build_context
-    if not request.runtime.context.backend:
-        request.runtime.context.backend = SandboxBackend(request.runtime)
-    
-    skills_frontmatter = await request.runtime.context.backend.load_skills_frontmatter()
-    prompt = await generate_prompt_template(
-        name=request.runtime.context.user.name,
-        profile=f"email: {request.runtime.context.user.email} | role: {request.runtime.context.user.role}",
-        language="español",
-        context_title=request.runtime.context.thread.title,
-        context_description=request.runtime.context.thread.description,
-        skills=skills_frontmatter,
-    )
-    return prompt
+
+
 
 gmail_subagent = SubAgent(
     name="asistente_gmail",
@@ -113,7 +101,7 @@ gmail_subagent = SubAgent(
     system_prompt="",
     model=llm,
     tools=gmail_tools,
-    state_schema=SolvenState,
+    state_schema=TriageState,
 )
 
 outlook_subagent = SubAgent(
@@ -122,14 +110,14 @@ outlook_subagent = SubAgent(
     system_prompt="",
     model=llm,
     tools=outlook_tools,
-    state_schema=SolvenState,
+    state_schema=TriageState,
 )
 
 graph = create_deep_agent(
     model=llm,
     backend=lambda rt: SandboxBackend(rt),
     tools=[
-        cargar_habilidad,
+        # seleccionar_ticket
         # crear_ticket,
         # patch_ticket,
         # listar_tickets,
@@ -137,7 +125,6 @@ graph = create_deep_agent(
     subagents=[
         gmail_subagent,
         outlook_subagent,
-        catastro_subagent,
     ],
     middleware=[
         build_context,

@@ -88,12 +88,9 @@ async def update_ticket(state: AgentState, runtime: Runtime):
 
 async def enforce_ticket_selection(state: TriageState, runtime: Runtime):
     """
-    Forza la selección de un ticket
+    Forzar la selección de un ticket
     """
     pass
-
-
-
 
 gmail_subagent = SubAgent(
     name="asistente_gmail",

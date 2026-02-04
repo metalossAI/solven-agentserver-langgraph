@@ -21,7 +21,7 @@ xai_grok_4_fast = ChatOpenAI(
     api_key=os.getenv("OPENROUTER_API_KEY"),
     streaming=True,
     model_kwargs={
-        "reasoning": {"enabled": True}
+        "parallel_tool_calls" : False
     }
 )
 
@@ -81,6 +81,6 @@ LLM_SO = xai_grok_4_fast_SO
 
 CODING_LLM = xai_grok_code_fast_1
 
-LLM = google_gemini #xai_grok_4_fast
+LLM = xai_grok_4_fast
 
 __all__ = ["LLM"]

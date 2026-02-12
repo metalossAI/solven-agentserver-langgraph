@@ -81,6 +81,6 @@ LLM_SO = xai_grok_4_fast_SO
 
 CODING_LLM = xai_grok_code_fast_1
 
-LLM = xai_grok_4_fast
+LLM = google_gemini #xai_grok_4_fast
 
 __all__ = ["LLM"]

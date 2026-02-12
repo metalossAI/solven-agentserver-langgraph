@@ -55,7 +55,7 @@ Debe seguirse el siguiente flujo:
 
 1. **Identificar el tipo de escritura**
   * Ejemplo: compraventa, poder, hipoteca, acta, etc.
-2. **Buscar instrucciones para esta escritura** si estan disponibles `references/[escritura_tipo]/[escritura_tipo].md`.
+2. **Buscar instrucciones para esta escritura** si estan disponibles `references/.md`.
 3. **Seleccionar el modelo adecuada** desde `assets/`.
 4. **Copiar el modelo a rellenar** desde `assets/`
 5. **Editar la plantilla usando la habilidad de docx** usando el workflow de redlining (DOCX).

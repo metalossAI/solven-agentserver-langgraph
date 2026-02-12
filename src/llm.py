@@ -10,7 +10,7 @@ from langchain_openai.chat_models import ChatOpenAI
 load_dotenv()
 
 granite_llm = ChatWatsonx(
-	model_id="ibm/granite-4-h-small",
+    model_id="ibm/granite-4-h-small",
     url="https://eu-de.ml.cloud.ibm.com",
     project_id="1f803e27-a263-42e6-a21b-db988a4f9b40",
 )
@@ -58,7 +58,7 @@ openai_oss_120b = ChatOpenAI(
 )
 
 groq_oss_120b = ChatGroq(
-	model="openai/gpt-oss-120b",
+    model="openai/gpt-oss-120b",
     api_key=os.getenv("GROQ_API_KEY"),
     reasoning_effort="low",
 )
@@ -81,6 +81,7 @@ LLM_SO = xai_grok_4_fast_SO
 
 CODING_LLM = xai_grok_code_fast_1
 
-LLM = google_gemini #xai_grok_4_fast
+LLM = xai_grok_4_fast  # Default model for agent
+
 
 __all__ = ["LLM"]

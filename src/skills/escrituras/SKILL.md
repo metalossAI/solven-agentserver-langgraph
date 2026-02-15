@@ -18,36 +18,10 @@ En /references puedes encontrar instrucciones segun el tipo de escritura; aunque
 ```
 SKILL.md
 references/
-  compraventa/
-    compraventa.md
 assets/
-    compraventa/
-      template.docx
 scripts/
   (inicialmente vacío)
 ```
-
-### references/
-
-Contiene documentos de referencia con carácter autoritativo, con instrucciones detalladas de redacción para cada tipo de escritura.
-
-* Cada subcarpeta corresponde a un tipo concreto de documento notarial.
-* Ejemplo:
-
-  * `references/compraventa/compraventa.md`: normas de redacción, explicación de cláusulas, secciones obligatorias y limitaciones legales específicas de las escrituras de compraventa.
-
-Estos documentos **deben cargarse en contexto** y seguirse estrictamente al trabajar con la escritura correspondiente.
-
-### assets/
-
-Contiene recursos como las plantillas oficiales para cada tipo de escritura. Estos son proporcionados por el usuario. Si necesitas algun modelo notarial que no encuentras pidelo.
-
-* Las plantillas constituyen la única fuente válida para la estructura y el orden de las secciones.
-El asistente nunca debe inventar una estructura que entre en conflicto con la plantilla.
-
-### scripts/
-
-Inicialmente vacío. Aqui podrias crear nuevos scripts que puedan servir en un futuro. Hazlo solo si es estrictamente necesario y puede ser reutilizado en futuras ocasiones.
 
 ## Flujo de trabajo
 
@@ -55,10 +29,10 @@ Debe seguirse el siguiente flujo:
 
 1. **Identificar el tipo de escritura**
   * Ejemplo: compraventa, poder, hipoteca, acta, etc.
-2. **Buscar instrucciones para esta escritura** si estan disponibles `references/.md`.
-3. **Seleccionar el modelo adecuada** desde `assets/`.
-4. **Copiar el modelo a rellenar** desde `assets/`
-5. **Editar la plantilla usando la habilidad de docx** usando el workflow de redlining (DOCX).
+2. **Buscar instrucciones adicionales para el modelo** si estan disponibles en /references.
+3. **Buscar y seleccionar el modelo adecuada** desde `assets/`.
+4. **Copiar el modelo a rellenar** desde `assets/` a /worspace
+5. **Editar la plantilla usando la habilidad de docx**
 
 ### Reglas de edición
 

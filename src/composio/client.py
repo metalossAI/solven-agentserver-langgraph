@@ -30,9 +30,17 @@ async def execute_composio_tool(
     if not runtime:
         return "Error: Runtime context not available."
     
+    # Debug: Check what's in the runtime context
+    print(f"[DEBUG] Runtime context: {runtime.context}")
+    print(f"[DEBUG] Runtime context user: {runtime.context.user if hasattr(runtime.context, 'user') else 'NO USER ATTR'}")
+    
     user_id = runtime.context.user.id if runtime.context.user else None
     if not user_id:
-        return "Error: User ID not found in runtime context."
+        error_msg = f"Error: User ID not found in runtime context. Context: {runtime.context}"
+        print(f"[ERROR] {error_msg}")
+        return error_msg
+    
+    print(f"[DEBUG] Executing Composio tool '{tool_name}' with user_id: {user_id}")
     
     try:
         def _execute_tool():

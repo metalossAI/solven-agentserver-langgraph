@@ -9,5 +9,5 @@ from langchain_cloudflare.embeddings import (
 embeddings = CloudflareWorkersAIEmbeddings(
     account_id=os.getenv("CF_ACCOUNT_ID"),
     api_token=os.getenv("CF_AI_API_TOKEN"),
-    model_name="@cf/qwen/qwen3-embedding-0.6b",
+    model_name="@cf/baai/bge-m3",
 )

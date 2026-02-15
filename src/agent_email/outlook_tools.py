@@ -791,7 +791,6 @@ async def outlook_get_message(
     arguments = {k: v for k, v in arguments.items() if v is not None}
     return await execute_composio_tool(OUTLOOK.tools.GET_MESSAGE, arguments, runtime)
 
-
 @tool(
     OUTLOOK.tools.GET_PROFILE,
 )

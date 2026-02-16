@@ -52,8 +52,15 @@ async def build_context(state: AgentState, runtime: Runtime):
     print(f"[DEBUG build_context] configurable keys: {configurable.keys()}")
     print(f"[DEBUG build_context] metadata keys: {metadata.keys()}")
     
-    # Get user_data from configurable (this is where our context parameter ends up)
+    # PRIORITY 1: Get user_data from configurable (for Composio triggers and system-auth calls)
     user_data = configurable.get("user_data", {})
+    
+    # PRIORITY 2: If no user_data in configurable, try langgraph_auth_user (for authenticated user calls)
+    if not user_data or not user_data.get("id"):
+        langgraph_auth_user = configurable.get("langgraph_auth_user", {})
+        if langgraph_auth_user:
+            user_data = langgraph_auth_user.get("user_data", {})
+            print(f"[DEBUG build_context] Using langgraph_auth_user: {user_data}")
     
     print(f"[DEBUG build_context] user_data extracted: {user_data}")
     

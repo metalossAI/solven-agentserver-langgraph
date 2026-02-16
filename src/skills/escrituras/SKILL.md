@@ -9,19 +9,17 @@ description: Esta skill para la creación, edición y validación de documentos 
 Esta skill permite la creación y modificación estructurada y jurídicamente coherente de documentos notariales españoles, combinando referencias específicas por tipo de documento con plantillas controladas. Todo el trabajo debe partir de las plantillas proporcionadas y ajustarse a estas.
 
 ## Estructura de la skill y organización de recursos
-Trabajar en una escritura requiere tener disponible al menos una plantilla o modelo.
-
-El usuario ha dejado a tu disposición las plantillas en assets/; si no encuentras el modelo requerido para crear una escritura hazlo saber y solicitalo.
-
-En /references puedes encontrar instrucciones segun el tipo de escritura; aunque es opcional, por lo tanto si no encuentras instrucciones especificas a la escritura que se te pide, puedes pedir al usuario que te las proporcione si quiere.
 
 ```
 SKILL.md
 references/
 assets/
 scripts/
-  (inicialmente vacío)
 ```
+### /assets
+El usuario ha dejado a tu disposición las plantillas en assets/, aqui deberas buscar modelos relacionados con la escritura correspondiente.
+
+En /references puedes encontrar instrucciones segun el tipo de escritura; aunque es opcional, por lo tanto si no encuentras instrucciones especificas a la escritura que se te pide, puedes pedir al usuario que te las proporcione si quiere.
 
 ## Flujo de trabajo
 
@@ -30,7 +28,7 @@ Debe seguirse el siguiente flujo:
 1. **Identificar el tipo de escritura**
   * Ejemplo: compraventa, poder, hipoteca, acta, etc.
 2. **Buscar instrucciones adicionales para el modelo** si estan disponibles en /references.
-3. **Buscar y seleccionar el modelo adecuada** desde `assets/`.
+3. **Buscar exhaustivamente y seleccionar el modelo adecuado** en `assets/`.
 4. **Copiar el modelo a rellenar** desde `assets/` a /worspace
 5. **Editar la plantilla usando la habilidad de docx**
 

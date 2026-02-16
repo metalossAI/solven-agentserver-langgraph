@@ -27,52 +27,15 @@ async def execute_composio_tool(
     modifer : Optional[Callable] = None,
 ) -> str:
     """Execute a Composio tool with user context."""
-    print(f"[DEBUG execute_composio_tool] ========== START execute_composio_tool ==========")
-    print(f"[DEBUG execute_composio_tool] Tool: {tool_name}")
-    print(f"[DEBUG execute_composio_tool] Runtime ID: {id(runtime)}")
-    
     if not runtime:
-        print(f"[ERROR execute_composio_tool] Runtime is None!")
         return "Error: Runtime context not available."
+
+    print("[DEBUG execute_composio_tool] Runtime context: ", runtime.context)
     
-    # CHECK 1: Verify runtime has context
-    print(f"[DEBUG execute_composio_tool] Has context attr: {hasattr(runtime, 'context')}")
-    if not hasattr(runtime, 'context'):
-        print(f"[ERROR execute_composio_tool] Runtime has no 'context' attribute!")
-        return "Error: Runtime context attribute not available."
-    
-    # CHECK 2: Inspect context object
-    print(f"[DEBUG execute_composio_tool] Context type: {type(runtime.context)}")
-    print(f"[DEBUG execute_composio_tool] Context attributes: {[attr for attr in dir(runtime.context) if not attr.startswith('_')]}")
-    
-    # CHECK 3: Check for user attribute
-    has_user_attr = hasattr(runtime.context, 'user')
-    print(f"[DEBUG execute_composio_tool] Has 'user' attribute: {has_user_attr}")
-    
-    # Debug: Check what's in the runtime context
-    print(f"[DEBUG execute_composio_tool] Full runtime context: {runtime.context}")
-    
-    if has_user_attr:
-        print(f"[DEBUG execute_composio_tool] runtime.context.user: {runtime.context.user}")
-        print(f"[DEBUG execute_composio_tool] runtime.context.user type: {type(runtime.context.user)}")
-        if runtime.context.user:
-            print(f"[DEBUG execute_composio_tool] runtime.context.user.id: {runtime.context.user.id}")
-        else:
-            print(f"[DEBUG execute_composio_tool] runtime.context.user is None!")
-    else:
-        print(f"[DEBUG execute_composio_tool] Context has NO 'user' attribute!")
-    
-    user_id = runtime.context.user.id if (has_user_attr and runtime.context.user) else None
-    print(f"[DEBUG execute_composio_tool] Extracted user_id: {user_id}")
+    user_id = runtime.context.user.id if runtime.context.user else None
     
     if not user_id:
-        error_msg = f"Error: User ID not found in runtime context. Context: {runtime.context}"
-        print(f"[ERROR execute_composio_tool] {error_msg}")
-        print(f"[ERROR execute_composio_tool] Context repr: {repr(runtime.context)}")
-        print(f"[ERROR execute_composio_tool] ========== END execute_composio_tool (ERROR) ==========")
-        return error_msg
-    
-    print(f"[DEBUG] Executing Composio tool '{tool_name}' with user_id: {user_id}")
+        return "Error: User ID not found in runtime context."
     
     try:
         def _execute_tool():

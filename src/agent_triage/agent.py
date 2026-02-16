@@ -117,16 +117,33 @@ async def build_context(state: AgentState, runtime: Runtime):
     print(f"[DEBUG build_context] Final runtime.context.company_id: {runtime.context.company_id}")
 
 class ForceToolCallMiddleware(AgentMiddleware):
-    """Middleware to force the model to always call at least one tool.
-    This ensures the agent always uses tools instead of generating direct responses.
+    """
+    Middleware to encourage tool usage without preventing graph termination.
+    
+    Strategy:
+    - Forces tool calls only when there are NO tool messages yet (first turn)
+    - Once tools have been called, allows natural model behavior
+    - This lets tools that return Command(goto="__end__") properly terminate the graph
     """
     async def awrap_model_call(
         self,
         request: ModelRequest, 
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]]
     ) -> ModelResponse:
-        forced_request = request.override(tool_choice="any")
-        return await handler(forced_request)
+        messages = request.messages
+        
+        # Check if any tools have been called yet
+        has_tool_messages = any(isinstance(msg, ToolMessage) for msg in messages)
+        
+        # Only force tool calls on the first turn (when no tools have been called yet)
+        # This ensures the agent doesn't just chat, but allows proper termination later
+        if not has_tool_messages:
+            forced_request = request.override(tool_choice="required")
+            return await handler(forced_request)
+        
+        # After the first tool call, let the model decide naturally
+        # This allows Command(goto="__end__") to work properly
+        return await handler(request)
 
 @dynamic_prompt
 async def build_prompt(request: ModelRequest):
@@ -202,7 +219,7 @@ graph = create_deep_agent(
     middleware=[
         build_context,  # Build context from config (must be first)
         ToolCallLimitMiddleware(run_limit=15, exit_behavior="end"),
-        ForceToolCallMiddleware(),
+        ForceToolCallMiddleware(),  # Forces tool calls but respects Command returns
         build_prompt
     ],
     system_prompt="",  # Prompt is built dynamically via @dynamic_prompt middleware

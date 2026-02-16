@@ -19,6 +19,7 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SECRET_KEY")
 
 from src.utils.tickets import get_ticket
+from src.utils.config import get_company_id_from_config, get_user_id_from_config
 
 @tool
 async def buscar_tickets(query: str, runtime: ToolRuntime[AppContext]) -> ToolMessage:
@@ -30,10 +31,8 @@ async def buscar_tickets(query: str, runtime: ToolRuntime[AppContext]) -> ToolMe
     - query: texto de búsqueda para encontrar tickets relacionados
     """
     try:
-        # Get company_id from context (try direct first, then from user)
-        company_id = runtime.context.company_id
-        if not company_id and runtime.context.user:
-            company_id = runtime.context.user.company_id
+        # Get company_id from config
+        company_id = get_company_id_from_config()
         if not company_id:
             return ToolMessage(
                 content="Error: No se encontró el ID de la compañía",
@@ -65,10 +64,8 @@ async def leer_ticket(ticket_id: str, runtime: ToolRuntime[AppContext]) -> ToolM
     Lee el ticket seleccionado y su contenido desde la tabla de documentos.
     """
     try:
-        # Get company_id from context (try direct first, then from user)
-        company_id = runtime.context.company_id
-        if not company_id and runtime.context.user:
-            company_id = runtime.context.user.company_id
+        # Get company_id from config
+        company_id = get_company_id_from_config()
         if not company_id:
             return ToolMessage(
                 content="Error: No se encontró el ID de la compañía",
@@ -190,10 +187,8 @@ async def crear_ticket(
     - prioridad: prioridad del ticket ('low', 'medium', 'high', 'urgent'). Por defecto 'medium'
     """
     try:
-        # Get company_id from context (try direct first, then from user)
-        company_id = runtime.context.company_id
-        if not company_id and runtime.context.user:
-            company_id = runtime.context.user.company_id
+        # Get company_id from config
+        company_id = get_company_id_from_config()
         if not company_id:
             return ToolMessage(
                 content="Error: No se encontró el ID de la compañía",
@@ -201,13 +196,28 @@ async def crear_ticket(
                 tool_call_id=runtime.tool_call_id
             )
         
-        # Get user_id from context.user
-        user_id = None
-        if runtime.context.user:
-            user_id = runtime.context.user.id
+        # Get user_id from config
+        user_id = get_user_id_from_config()
+        if not user_id:
+            # Try to get from metadata as fallback
+            from langgraph.config import get_config
+            config = get_config()
+            metadata = config.get("metadata", {})
+            user_id = metadata.get("user_id")
+        
         if not user_id:
             return ToolMessage(
-                content="Error: No se encontró el ID del usuario",
+                content="Error: No se encontró el ID del usuario en la configuración",
+                status="error",
+                tool_call_id=runtime.tool_call_id
+            )
+        
+        # Validate user_id is a valid UUID format
+        try:
+            uuid.UUID(user_id)
+        except (ValueError, TypeError):
+            return ToolMessage(
+                content=f"Error: ID de usuario inválido: {user_id}",
                 status="error",
                 tool_call_id=runtime.tool_call_id
             )
@@ -313,7 +323,6 @@ async def crear_ticket(
             )
         
         # Now create ticket with document_id
-        print(f"[DEBUG] Inserting ticket into database...", flush=True)
         ticket_data = {
             "id": ticket_id,
             "company_id": company_id,
@@ -327,14 +336,9 @@ async def crear_ticket(
             "status": "open",
             "related_threads": [],
         }
-        
-        print(f"[DEBUG] Ticket data prepared: {ticket_data}", flush=True)
-        print(f"[DEBUG] Calling supabase.table('tickets').insert()...", flush=True)
         ticket_response = await supabase_async.table("tickets").insert(ticket_data).execute()
-        print(f"[DEBUG] Insert response received, type: {type(ticket_response)}", flush=True)
         
         if not ticket_response.data or len(ticket_response.data) == 0:
-            print(f"[ERROR] Failed to insert ticket, rolling back document", flush=True)
             # Rollback document creation if ticket creation fails (delete directly from DB)
             try:
                 await supabase_async.table("documents").delete().eq("id", ticket_id).execute()
@@ -383,10 +387,8 @@ async def patch_ticket(ticket_id: str, prioridad: str = None, descripcion: str =
                 tool_call_id=runtime.tool_call_id
             )
         
-        # Get company_id from context (try direct first, then from user)
-        company_id = runtime.context.company_id
-        if not company_id and runtime.context.user:
-            company_id = runtime.context.user.company_id
+        # Get company_id from config
+        company_id = get_company_id_from_config()
         if not company_id:
             return ToolMessage(
                 content="Error: Usuario sin compañía asignada",
@@ -542,10 +544,8 @@ async def descartar_evento(
     - prioridad: prioridad del ticket ('low', 'medium', 'high', 'urgent'). Por defecto 'low'
     """
     try:
-        # Get company_id from context (try direct first, then from user)
-        company_id = runtime.context.company_id
-        if not company_id and runtime.context.user:
-            company_id = runtime.context.user.company_id
+        # Get company_id from config
+        company_id = get_company_id_from_config()
         if not company_id:
             return Command(
                 goto="__end__",
@@ -560,17 +560,39 @@ async def descartar_evento(
                 }
             )
         
-        # Get user_id from context.user
-        user_id = None
-        if runtime.context.user:
-            user_id = runtime.context.user.id
+        # Get user_id from config
+        user_id = get_user_id_from_config()
+        if not user_id:
+            # Try to get from metadata as fallback
+            from langgraph.config import get_config
+            config = get_config()
+            metadata = config.get("metadata", {})
+            user_id = metadata.get("user_id")
+        
         if not user_id:
             return Command(
                 goto="__end__",
                 update={
                     "messages": [
                         ToolMessage(
-                            content="Error: No se encontró el ID del usuario",
+                            content="Error: No se encontró el ID del usuario en la configuración",
+                            status="error",
+                            tool_call_id=runtime.tool_call_id
+                        )
+                    ]
+                }
+            )
+        
+        # Validate user_id is a valid UUID format
+        try:
+            uuid.UUID(user_id)
+        except (ValueError, TypeError):
+            return Command(
+                goto="__end__",
+                update={
+                    "messages": [
+                        ToolMessage(
+                            content=f"Error: ID de usuario inválido: {user_id}",
                             status="error",
                             tool_call_id=runtime.tool_call_id
                         )
@@ -780,10 +802,8 @@ async def merge_tickets(ticket_ids: list[str], runtime: ToolRuntime[AppContext] 
                 tool_call_id=runtime.tool_call_id
             )
         
-        # Get company_id from context (try direct first, then from user)
-        company_id = runtime.context.company_id
-        if not company_id and runtime.context.user:
-            company_id = runtime.context.user.company_id
+        # Get company_id from config
+        company_id = get_company_id_from_config()
         if not company_id:
             return ToolMessage(
                 content="Error: Usuario sin compañía asignada",
@@ -791,13 +811,28 @@ async def merge_tickets(ticket_ids: list[str], runtime: ToolRuntime[AppContext] 
                 tool_call_id=runtime.tool_call_id
             )
         
-        # Get user_id from context.user
-        user_id = None
-        if runtime.context.user:
-            user_id = runtime.context.user.id
+        # Get user_id from config
+        user_id = get_user_id_from_config()
+        if not user_id:
+            # Try to get from metadata as fallback
+            from langgraph.config import get_config
+            config = get_config()
+            metadata = config.get("metadata", {})
+            user_id = metadata.get("user_id")
+        
         if not user_id:
             return ToolMessage(
-                content="Error: No se encontró el ID del usuario",
+                content="Error: No se encontró el ID del usuario en la configuración",
+                status="error",
+                tool_call_id=runtime.tool_call_id
+            )
+        
+        # Validate user_id is a valid UUID format
+        try:
+            uuid.UUID(user_id)
+        except (ValueError, TypeError):
+            return ToolMessage(
+                content=f"Error: ID de usuario inválido: {user_id}",
                 status="error",
                 tool_call_id=runtime.tool_call_id
             )

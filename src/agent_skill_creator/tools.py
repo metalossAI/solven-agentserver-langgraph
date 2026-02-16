@@ -3,6 +3,7 @@ from langchain_core.tools import tool, InjectedToolArg
 from langgraph.types import interrupt
 from src.sandbox_backend import SandboxBackend
 from src.models import AppContext
+from src.utils.config import get_user_id_from_config, get_thread_id_from_config
 from typing import Annotated
 
 @tool
@@ -21,8 +22,8 @@ async def solicitar_recurso_de_skill(
     """
     print(f"[solicitar_archivo] TOOL CALLED - path: {path}", flush=True)
     
-    user_id = runtime.context.user.id
-    thread_id = runtime.context.thread.id
+    user_id = get_user_id_from_config()
+    thread_id = get_thread_id_from_config()
     
     if not user_id:
         return "Error: No se encontró el ID del usuario"
@@ -48,7 +49,7 @@ async def solicitar_recurso_de_skill(
         local_path = uploaded_file_info.get("local_path", "")  # Path where file was temporarily saved
 
         try:
-            backend : SandboxBackend = runtime.context.backend
+            backend : SandboxBackend = SandboxBackend(runtime)
             runtime.stream_writer(f"Subiendo {filename} al espacio de trabajo...")
             
             # Upload file to workspace using the new upload_file method

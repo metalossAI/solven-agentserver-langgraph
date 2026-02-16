@@ -480,7 +480,8 @@ async def outlook_download_attachment(
             from datetime import datetime
             from src.s3_client import S3Client
             
-            thread_id = runtime.context.thread.id
+            from src.utils.config import get_thread_id_from_config
+            thread_id = get_thread_id_from_config()
             s3_client = S3Client(prefix=f"threads/{thread_id}")
             
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

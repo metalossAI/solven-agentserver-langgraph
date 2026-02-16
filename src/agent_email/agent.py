@@ -37,9 +37,12 @@ from src.agent_email.tools import get_composio_gmail_tools, get_composio_outlook
 
 def create_outlook_subagent(runtime: Runtime[AppContext]) -> SubAgent:
 	"""Sync factory function that creates Outlook subagent with runtime context"""
+	from src.utils.config import get_user_id_from_config, get_thread_id_from_config
 	# Load tools synchronously using asyncio.run for the async function
 	# This is acceptable in factory functions called during setup
 	import asyncio
+	user_id = get_user_id_from_config()
+	thread_id = get_thread_id_from_config()
 	try:
 		loop = asyncio.get_event_loop()
 		if loop.is_running():
@@ -50,15 +53,15 @@ def create_outlook_subagent(runtime: Runtime[AppContext]) -> SubAgent:
 				outlook_tools = executor.submit(
 					lambda: asyncio.run(asyncio.to_thread(
 						get_composio_outlook_tools,
-						runtime.context.user.id,
-						runtime.context.thread.id
+						user_id,
+						thread_id
 					))
 				).result()
 		else:
 			outlook_tools = asyncio.run(asyncio.to_thread(
 				get_composio_outlook_tools,
-				runtime.context.user.id,
-				runtime.context.thread.id
+				user_id,
+				thread_id
 			))
 	except Exception as e:
 		print(f"[Outlook Subagent] Error loading tools: {e}")
@@ -76,7 +79,10 @@ def create_outlook_subagent(runtime: Runtime[AppContext]) -> SubAgent:
 
 def create_gmail_subagent(runtime: Runtime[AppContext]) -> SubAgent:
 	"""Sync factory function that creates Gmail subagent with runtime context"""
+	from src.utils.config import get_user_id_from_config, get_thread_id_from_config
 	import asyncio
+	user_id = get_user_id_from_config()
+	thread_id = get_thread_id_from_config()
 	try:
 		loop = asyncio.get_event_loop()
 		if loop.is_running():
@@ -87,15 +93,15 @@ def create_gmail_subagent(runtime: Runtime[AppContext]) -> SubAgent:
 				gmail_tools = executor.submit(
 					lambda: asyncio.run(asyncio.to_thread(
 						get_composio_gmail_tools, 
-						runtime.context.user.id, 
-						runtime.context.thread.id
+						user_id, 
+						thread_id
 					))
 				).result()
 		else:
 			gmail_tools = asyncio.run(asyncio.to_thread(
 				get_composio_gmail_tools, 
-				runtime.context.user.id, 
-				runtime.context.thread.id
+				user_id, 
+				thread_id
 			))
 	except Exception as e:
 		print(f"[Gmail Subagent] Error loading tools: {e}")

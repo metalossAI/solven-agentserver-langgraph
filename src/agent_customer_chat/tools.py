@@ -6,6 +6,7 @@ import os
 from supabase import create_async_client
 
 from src.models import AppContext
+from src.utils.config import get_user_id_from_config, get_company_id_from_config, get_thread_id_from_config
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SECRET_KEY")
@@ -17,8 +18,8 @@ async def listar_solicitudes_cliente(runtime: ToolRuntime):
     Retorna información sobre el estado, título y descripción de cada solicitud.
     """
     try:
-        user_id = runtime.context.user.id
-        company_id = runtime.context.user.company_id
+        user_id = get_user_id_from_config()
+        company_id = get_company_id_from_config()
         
         if not user_id:
             return "Error: No se encontró el ID del usuario"
@@ -66,8 +67,8 @@ async def crear_solicitud(titulo: str, descripcion: str, runtime: ToolRuntime[Ap
         descripcion: Descripción detallada de la solicitud
     """
     try:
-        user_id = runtime.context.user.id
-        company_id = runtime.context.user.company_id
+        user_id = get_user_id_from_config()
+        company_id = get_company_id_from_config()
         
         if not user_id:
             return "Error: No se encontró el ID del usuario"
@@ -82,7 +83,7 @@ async def crear_solicitud(titulo: str, descripcion: str, runtime: ToolRuntime[Ap
         
         # Create ticket for the company, tracking customer_id but not assigning it
         ticket_data = {
-            'id': runtime.context.thread.id,
+            'id': get_thread_id_from_config(),
             'company_id': company_id,
             'customer_id': user_id,  # Track which customer created it
             'channel': 'chat',  # Ticket created via customer chat
@@ -118,8 +119,8 @@ async def actualizar_solicitud(ticket_id: str, nuevo_estado: str, runtime: ToolR
         nuevo_estado: Nuevo estado ('open', 'ongoing', 'closed')
     """
     try:
-        user_id = runtime.context.user.id
-        company_id = runtime.context.user.company_id
+        user_id = get_user_id_from_config()
+        company_id = get_company_id_from_config()
         
         if not user_id:
             return "Error: No se encontró el ID del usuario"
@@ -174,8 +175,8 @@ async def solicitar_archivo(tipo_documento: str, descripcion: str, runtime: Tool
     Returns:
         Información del archivo subido: nombre, tamaño, tipo, y ruta en S3
     """
-    user_id = runtime.context.user.id
-    thread_id = runtime.context.thread.id
+    user_id = get_user_id_from_config()
+    thread_id = get_thread_id_from_config()
     
     if not user_id:
         return "Error: No se encontró el ID del usuario"

@@ -55,23 +55,22 @@ class SandboxBackend(BaseSandbox):
 		self._writer = get_stream_writer()  # Use LangGraph's get_stream_writer() function
 		
 		# Extract IDs from config instead of runtime context
-		config: RunnableConfig = get_config()
+		from src.utils.config import get_user_id_from_config, get_thread_id_from_config
 		
 		# Thread ID comes from configurable (set by LangGraph SDK)
-		thread_id = config["configurable"].get("thread_id")
+		thread_id = get_thread_id_from_config()
 		if not thread_id:
 			raise RuntimeError("Cannot initialize SandboxBackend: thread_id not found in config")
 		self._thread_id = thread_id
 		
-		# Extract user data from auth
-		user_config = config["configurable"].get("langgraph_auth_user")
-		user_data = user_config.get("user_data") if user_config else {}
-		user_id = user_data.get("id")
+		# Extract user_id using config helper (handles both langgraph_auth_user and user_data)
+		user_id = get_user_id_from_config()
 		if not user_id:
 			raise RuntimeError("Cannot initialize SandboxBackend: user_id not found in config")
 		self._user_id = user_id
 		
 		# Extract ticket_id from metadata
+		config: RunnableConfig = get_config()
 		metadata = config.get("metadata", {})
 		self._ticket_id = metadata.get("ticket_id")
 		

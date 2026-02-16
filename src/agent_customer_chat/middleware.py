@@ -13,8 +13,9 @@ async  def SkillsMiddleware(request: ModelRequest) -> str:
     Middleware that loads skills frontmatter
     """
 
+    from src.agent_customer_chat.backend import S3Backend
     current_skill = getattr(request.state, 'current_skill', None)
-    backend : S3Backend = request.runtime.context.backend
+    backend : S3Backend = S3Backend(request.runtime)
     if current_skill:
         return backend.load_skill_content(request.state.get("current_skill"))
 

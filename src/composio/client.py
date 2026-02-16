@@ -34,6 +34,36 @@ async def execute_composio_tool(
     
     user_id = runtime.context.user.id if runtime.context.user else None
     
+    # FALLBACK: Try to get user_id from config if context is empty (for subagents)
+    if not user_id:
+        try:
+            from langgraph.config import get_config
+            from src.models import User
+            config = get_config()
+            configurable = config.get("configurable", {}) if config else {}
+            user_config = configurable.get("langgraph_auth_user", {})
+            user_data = user_config.get("user_data", {}) if user_config else {}
+            fallback_user_id = user_data.get("id")
+            
+            print(f"[DEBUG execute_composio_tool] Fallback: user_id from config = {fallback_user_id}")
+            
+            if fallback_user_id:
+                # Update runtime context with fallback data
+                runtime.context.user = User(
+                    id=user_data.get("id"),
+                    name=user_data.get("name", "Unknown"),
+                    email=user_data.get("email", ""),
+                    role=user_data.get("role", "user"),
+                    company_id=user_data.get("company_id", ""),
+                )
+                runtime.context.company_id = user_data.get("company_id", "")
+                user_id = fallback_user_id
+                print(f"[DEBUG execute_composio_tool] ✅ Fallback successful! Updated runtime context with user_id: {user_id}")
+        except Exception as e:
+            print(f"[DEBUG execute_composio_tool] Fallback failed: {e}")
+            import traceback
+            print(f"[DEBUG execute_composio_tool] Fallback traceback: {traceback.format_exc()}")
+    
     if not user_id:
         return "Error: User ID not found in runtime context."
     

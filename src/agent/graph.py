@@ -14,7 +14,7 @@ from deepagents import create_deep_agent
 from src.backend import get_user_s3_backend, S3Backend
 
 from src.llm import LLM as llm
-from src.models import Thread, AppContext, SolvenState, User
+from src.models import AppContext, SolvenState
 
 from src.agent.prompt import generate_prompt_template
 
@@ -30,31 +30,12 @@ async def build_context(
 	runtime :  ToolRuntime[AppContext],
 	store : BaseStore,
 ):
-	user_config = config["configurable"].get("langgraph_auth_user")
-	user_data = user_config.get("user_data")
-
 	# Load ticket if ticket_id exists in metadata
 	ticket_id = config.get("metadata", {}).get("ticket_id")
 	if ticket_id:
 		runtime.context.ticket = await get_ticket(ticket_id)
 	else:
 		runtime.context.ticket = None
-
-	runtime.context.user = User(
-		id=user_data.get("id"),
-		name=user_data.get("name"),
-		email=user_data.get("email"),
-		role=user_data.get("role"),
-		company_id=user_data.get("company_id"),
-	)
-	runtime.context.company_id = user_data.get("company_id")
-	runtime.context.thread = Thread(
-		id=config.get("metadata").get("thread_id"),
-		title=config.get("metadata").get("title"),
-		description=config.get("metadata").get("description"),
-	)
-
-	runtime.context.backend = SandboxBackend()
 
 	return Command(
 		goto="run_agent",
@@ -67,16 +48,22 @@ async def run_agent(
 	store : BaseStore
 ):
 	
+	# Get user data and thread data from config
+	user_config = config["configurable"].get("langgraph_auth_user", {})
+	user_data = user_config.get("user_data", {})
+	metadata = config.get("metadata", {})
+	thread_id = config["configurable"].get("thread_id")
+	
 	# Load skills frontmatter directly from backend
-	backend: SandboxBackend = runtime.context.backend
+	backend: SandboxBackend = SandboxBackend(runtime)
 	skills_frontmatter = await backend.load_skills_frontmatter()
 	
 	main_prompt = await generate_prompt_template(
-		name=runtime.context.user.name,
-		profile=f"email: {runtime.context.user.email} | role: {runtime.context.user.role}",
+		name=user_data.get("name", "Usuario"),
+		profile=f"email: {user_data.get('email', '')} | role: {user_data.get('role', 'usuario')}",
 		language="español",
-		context_title=runtime.context.thread.title or "Conversación general",
-		context_description=runtime.context.thread.description or "Conversación general",
+		context_title=metadata.get("title") or "Conversación general",
+		context_description=metadata.get("description") or "Conversación general",
 		skills=skills_frontmatter,
 	)
 
@@ -96,7 +83,7 @@ async def run_agent(
 			catastro_subagent,
 		],
 		store=store,
-		backend=runtime.context.backend,
+		backend=backend,
 		context_schema=AppContext,
 	)
 

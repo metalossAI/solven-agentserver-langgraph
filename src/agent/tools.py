@@ -19,9 +19,7 @@ async def cargar_habilidad(
 	Returns:
 		El contenido completo del skill en formato markdown
 	"""
-	backend: SandboxBackend = runtime.context.backend
-	if not backend:
-		return "Error: No hay backend disponible"
+	backend: SandboxBackend = SandboxBackend(runtime)
 	
 	# Stream status update
 	runtime.stream_writer(f"Cargando instrucciones '{nombre_habilidad}'...")

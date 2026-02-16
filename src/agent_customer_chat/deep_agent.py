@@ -14,7 +14,7 @@ from langgraph.config import get_config
 from deepagents import create_deep_agent, SubAgent
 
 from src.llm import LLM as llm
-from src.models import Thread, AppContext, SolvenState, Ticket, User
+from src.models import AppContext, SolvenState, Ticket
 
 from src.agent_customer_chat.prompt import main_prompt
 
@@ -26,35 +26,20 @@ from langchain.agents.middleware import before_agent, AgentState
 from langchain.messages import AIMessage
 from langgraph.runtime import Runtime
 
-@before_agent
-async def build_context(state: AgentState, runtime: Runtime):
-    
-    config: RunnableConfig = get_config()
-    user_config = config["configurable"].get("langgraph_auth_user")
-    user_data = user_config.get("user_data")
-    
-    runtime.context.user = User(
-        id=user_data.get("id"),
-        name=user_data.get("name"),
-        email=user_data.get("email"),
-        role=user_data.get("role"),
-        company_id=user_data.get("company_id"),
-    )
-
-    runtime.context.thread = Thread(
-        id=config.get("metadata").get("thread_id"),
-        title=config.get("metadata").get("title", ""),
-        description=config.get("metadata").get("description", ""),
-    )
 
 @dynamic_prompt
 async def build_prompt(state: AgentState, runtime: Runtime[AppContext]):
 
+    # Get user data from config
+    config: RunnableConfig = get_config()
+    user_config = config["configurable"].get("langgraph_auth_user", {})
+    user_data = user_config.get("user_data", {})
+    
     client = AsyncClient()
     main_prompt : ChatPromptTemplate = await client.pull_prompt("solven-customer-chat")
     return main_prompt.format(
-        name=runtime.context.user.name,
-        email=runtime.context.user.email,
+        name=user_data.get("name", "Usuario"),
+        email=user_data.get("email", ""),
     )
 
 graph = create_deep_agent(
@@ -66,8 +51,6 @@ graph = create_deep_agent(
         actualizar_solicitud,
         crear_solicitud,
     ],
-    middleware=[
-        build_context,
-    ],
+    middleware=[],
     context_schema=AppContext,
 )

@@ -17,7 +17,7 @@ from deepagents import create_deep_agent, SubAgent
 from src.backend import get_user_s3_backend, S3Backend
 
 from src.llm import LLM as llm
-from src.models import Thread, AppContext, SolvenState, Ticket, User
+from src.models import AppContext, SolvenState, Ticket
 
 from src.agent.prompt import generate_prompt_template
 
@@ -41,43 +41,14 @@ from src.agent_triage.models import TriageState
 
 @before_agent
 async def build_context(state: AgentState, runtime: Runtime):
-    """Build runtime context from config data sent by frontend"""
-    # Get config from the current execution context
+    """Load ticket if ticket_id exists in metadata"""
     config: RunnableConfig = get_config()
-    
-    # Extract user data from auth
-    user_config = config["configurable"].get("langgraph_auth_user")
-    user_data = user_config.get("user_data") if user_config else {}
-    
-    # Extract custom context sent from frontend (via config.metadata or config.configurable)
     metadata = config.get("metadata", {})
-    
-    # Thread ID comes from configurable (set by LangGraph SDK)
-    thread_id = config["configurable"].get("thread_id")
-    
-    # Load ticket if ticket_id exists in metadata
     ticket_id = metadata.get("ticket_id")
     if ticket_id:
         runtime.context.ticket = await get_ticket(ticket_id)
     else:
         runtime.context.ticket = None
-    
-    # Populate user context
-    runtime.context.user = User(
-        id=user_data.get("id"),
-        name=user_data.get("name"),
-        email=user_data.get("email"),
-        role=user_data.get("role"),
-        company_id=user_data.get("company_id"),
-    )
-    runtime.context.company_id = user_data.get("company_id")
-    
-    # Populate thread context
-    runtime.context.thread = Thread(
-        id=thread_id,
-        title=metadata.get("title"),
-        description=metadata.get("description"),
-    )
 
 @after_agent
 async def update_ticket(state: AgentState, runtime: Runtime):

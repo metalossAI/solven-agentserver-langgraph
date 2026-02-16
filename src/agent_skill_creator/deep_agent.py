@@ -20,18 +20,15 @@ from langchain.agents.middleware import (
     wrap_model_call
 )
 from src.llm import LLM
-from src.models import AppContext, SkillCreate, User, Thread
+from src.models import AppContext, SkillCreate
 from src.sandbox_backend import SandboxBackend
 
 @before_agent
 async def build_context(state: AgentState, runtime: Runtime[AppContext]):
     config: RunnableConfig = get_config()
-    user_config = config["configurable"].get("langgraph_auth_user")
-    user_data = user_config.get("user_data")
     
     # Get metadata from config - this should contain skill_name set by frontend
     metadata = config.get("metadata", {})
-    thread_id = config["configurable"].get("thread_id")
     
     # Try to get skill_name from metadata - prioritize skill_name over title
     # skill_name is set by the frontend when creating the thread with the dialog
@@ -50,7 +47,6 @@ async def build_context(state: AgentState, runtime: Runtime[AppContext]):
     
     description = metadata.get("description") or ""
     
-    print(f"[build_context] Thread ID: {thread_id}")
     print(f"[build_context] Metadata: {metadata}")
     print(f"[build_context] Extracted skill_name: {skill_name}")
 
@@ -60,22 +56,6 @@ async def build_context(state: AgentState, runtime: Runtime[AppContext]):
     )
 
     print("[build_context] Skill create: ", runtime.context.skill_create)
-    
-    runtime.context.user = User(
-        id=user_data.get("id"),
-        name=user_data.get("name"),
-        email=user_data.get("email"),
-        role=user_data.get("role"),
-        company_id=user_data.get("company_id"),
-    )
-
-    runtime.context.thread = Thread(
-        id=metadata.get("thread_id"),
-        title=metadata.get("title"),
-        description=metadata.get("description"),
-    )
-
-    runtime.context.backend = SandboxBackend(runtime)
 
 @before_agent
 async def init_skill(state: AgentState, runtime: Runtime[AppContext]):
@@ -83,10 +63,7 @@ async def init_skill(state: AgentState, runtime: Runtime[AppContext]):
     We manually init the skill in a folder with skillname
     init_skill.py <skill-name> --path <path>
     """
-    if runtime.context.backend is None:
-        runtime.context.backend = SandboxBackend(runtime)
-    
-    backend : SandboxBackend = runtime.context.backend
+    backend : SandboxBackend = SandboxBackend(runtime)
     skill_name = runtime.context.skill_create.name
     # Use the bind-mounted path inside bwrap: /.solven/skills/system/skill-creator/scripts/init_skill.py
     init_skill_path = "/.solven/skills/system/skill-creator/scripts/init_skill.py"
@@ -148,12 +125,14 @@ async def validate_skill(state: AgentState, runtime: Runtime[AppContext]):
     """
     Validate the skill content if it returns an error we send it backe to the agent
     """
-    if runtime.context.backend is None:
-        runtime.context.backend = SandboxBackend(runtime)
-    
-    backend : SandboxBackend = runtime.context.backend
+    backend : SandboxBackend = SandboxBackend(runtime)
     skill_name = runtime.context.skill_create.name
-    skill_path = f"/mnt/r2/skills/{runtime.context.user.id}/{skill_name}"
+    # Get user_id from config
+    config: RunnableConfig = get_config()
+    user_config = config["configurable"].get("langgraph_auth_user", {})
+    user_data = user_config.get("user_data", {})
+    user_id = user_data.get("id")
+    skill_path = f"/mnt/r2/skills/{user_id}/{skill_name}"
 
     # run quick_validate.py <skill-path>
     result : CommandResult = await backend._run_isolated(f"uv run ./scripts/quick_validate.py {skill_path}")
@@ -168,17 +147,23 @@ async def save_skill(state: AgentState, runtime: Runtime[AppContext]):
     """
     If there is a dist folder we unzip and save to skill name path
     """
-    if runtime.context.backend is None:
-        runtime.context.backend = SandboxBackend(runtime)
-    
-    backend : SandboxBackend = runtime.context.backend
+    backend : SandboxBackend = SandboxBackend(runtime)
     skill_name = runtime.context.skill_create.name
-    skill_path = f"/mnt/r2/skills/{runtime.context.user.id}/{skill_name}"
+    # Get user_id from config
+    config: RunnableConfig = get_config()
+    user_config = config["configurable"].get("langgraph_auth_user", {})
+    user_data = user_config.get("user_data", {})
+    user_id = user_data.get("id")
+    skill_path = f"/mnt/r2/skills/{user_id}/{skill_name}"
 
+    # Get thread_id from config
+    config: RunnableConfig = get_config()
+    thread_id = config["configurable"].get("thread_id")
+    
     # run quick_validate.py <skill-path>
     runtime.stream_writer(f"Guardando asistente")
     result : CommandResult = await backend.execute(f"\
-        cp -r /mnt/r2/threads/{runtime.context.thread.id}/{skill_name} \
+        cp -r /mnt/r2/threads/{thread_id}/{skill_name} \
             {skill_path} \
     ")
     if result.exit_code != 0:
@@ -200,11 +185,16 @@ async def build_prompt(state: AgentState, runtime: Runtime[AppContext]):
     Build the prompt for the skill creator
     """
     pass
+    # Get user data from config
+    config: RunnableConfig = get_config()
+    user_config = config["configurable"].get("langgraph_auth_user", {})
+    user_data = user_config.get("user_data", {})
+    
     client = AsyncClient()
     main_prompt : ChatPromptTemplate = await client.pull_prompt("solven-skill-creator")
     return main_prompt.format(
-        name=runtime.context.user.name,
-        email=runtime.context.user.email,
+        name=user_data.get("name", "Usuario"),
+        email=user_data.get("email", ""),
     )
 
 graph = create_deep_agent(

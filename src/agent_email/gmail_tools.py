@@ -700,7 +700,8 @@ async def gmail_get_attachment(
         if attachment_bytes:
             from datetime import datetime
             
-            thread_id = runtime.context.thread.id
+            from src.utils.config import get_thread_id_from_config
+            thread_id = get_thread_id_from_config()
             
             s3_client = S3Client(prefix=f"threads/{thread_id}")
             

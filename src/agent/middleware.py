@@ -19,13 +19,14 @@ class LoadSkillsMiddleware(AgentMiddleware[AppContext]):
     
     async def awrap_model_call(self, request: ModelRequest, handler):
         """Link skills from state into backend workspace before model execution"""
-        # Get backend from runtime context
+        # Create backend directly from runtime
         runtime = getattr(request, 'runtime', None)
-        backend = None
-        if runtime and hasattr(runtime, 'context'):
-            backend = runtime.context.backend
+        if not runtime:
+            return await handler(request)
         
-        if not backend or not isinstance(backend, SandboxBackend):
+        backend = SandboxBackend(runtime)
+        
+        if not isinstance(backend, SandboxBackend):
             return await handler(request)
         
         # Ensure backend is initialized

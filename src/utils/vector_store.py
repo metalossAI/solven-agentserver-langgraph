@@ -76,6 +76,13 @@ async def search(
     if not company_id:
         return "Error: No se encontró el ID de la compañía"
     
+    # Truncate query if too long (Cloudflare embeddings API has length limits)
+    # Most embedding models work best with queries under 512 tokens (~2000 chars)
+    MAX_QUERY_LENGTH = 2000
+    if len(query) > MAX_QUERY_LENGTH:
+        print(f"[DEBUG] Query too long ({len(query)} chars), truncating to {MAX_QUERY_LENGTH}", flush=True)
+        query = query[:MAX_QUERY_LENGTH].rsplit(' ', 1)[0]  # Truncate at word boundary
+    
     try:
         supabase_async = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
         
@@ -142,9 +149,18 @@ async def search(
                 return "\n".join(response_lines)
         except Exception as vector_error:
             import traceback
-            print(f"[DEBUG] Vector search failed in utils: {type(vector_error).__name__}: {str(vector_error)}", flush=True)
-            print(f"[DEBUG] Vector search traceback:", flush=True)
-            traceback.print_exc()
+            error_msg = str(vector_error)
+            print(f"[DEBUG] Vector search failed: {type(vector_error).__name__}: {error_msg}", flush=True)
+            
+            # Check for specific error types
+            if "500" in error_msg or "Internal Server Error" in error_msg:
+                print(f"[DEBUG] Cloudflare embeddings API error (likely rate limit or service issue)", flush=True)
+            elif "too long" in error_msg.lower():
+                print(f"[DEBUG] Query too long for embeddings API despite truncation", flush=True)
+            else:
+                print(f"[DEBUG] Vector search traceback:", flush=True)
+                traceback.print_exc()
+            
             # Fallback to text search
             docs_response = await supabase_async.table("documents").select("id, content, metadata").ilike("content", f"%{query}%").execute()
             

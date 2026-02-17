@@ -8,6 +8,10 @@ from langgraph.graph.state import RunnableConfig
 def get_user_data_from_config() -> Dict:
     """Extract user_data dict from config.
     
+    Standardized approach: All clients now pass user data via headers (x-user-id, x-company-id, etc.)
+    and use system API key (x-api-token). The auth middleware extracts this and populates
+    langgraph_auth_user.user_data in the config.
+    
     Returns:
         Dict with user data (id, name, email, role, company_id, etc.)
         Empty dict if not found.
@@ -16,20 +20,46 @@ def get_user_data_from_config() -> Dict:
         config: RunnableConfig = get_config()
         configurable = config.get("configurable", {})
         
-        # Try langgraph_auth_user first (for authenticated user calls)
-        user_config = configurable.get("langgraph_auth_user", {})
-        if user_config:
-            user_data = user_config.get("user_data", {}) if isinstance(user_config, dict) else {}
-            if user_data and user_data.get("id"):
-                return user_data
+        # Primary source: langgraph_auth_user (populated by auth middleware from headers)
+        # LangGraph wraps this in a ProxyUser object, not a plain dict
+        user_config = configurable.get("langgraph_auth_user")
         
-        # Fallback: try user_data directly in configurable (for Composio triggers)
+        if user_config:
+            # Try to access user_data from ProxyUser object (supports both dict and attribute access)
+            user_data = None
+            
+            # Method 1: Try attribute access (for ProxyUser/DotDict objects)
+            if hasattr(user_config, 'user_data'):
+                user_data = user_config.user_data
+            # Method 2: Try dict access
+            elif isinstance(user_config, dict):
+                user_data = user_config.get("user_data", {})
+            # Method 3: Try getitem access
+            else:
+                try:
+                    user_data = user_config["user_data"]
+                except (KeyError, TypeError):
+                    pass
+            
+            # Convert to dict if needed and validate
+            if user_data:
+                # If it's also a ProxyUser/DotDict, convert to dict
+                if hasattr(user_data, '__dict__') and not isinstance(user_data, dict):
+                    user_data = dict(user_data.__dict__)
+                
+                if isinstance(user_data, dict) and user_data.get("id"):
+                    return user_data
+        
+        # Fallback: try user_data directly in configurable (legacy support)
         user_data = configurable.get("user_data", {})
         if user_data and user_data.get("id"):
             return user_data
         
         return {}
-    except Exception:
+    except Exception as e:
+        print(f"[get_user_data_from_config] Exception: {e}")
+        import traceback
+        traceback.print_exc()
         return {}
 
 
@@ -37,8 +67,8 @@ def get_user_id_from_config() -> Optional[str]:
     """Extract user_id from config.
     
     Tries multiple sources:
-    1. user_data.id from langgraph_auth_user.user_data
-    2. user_data.id from configurable.user_data (Composio triggers)
+    1. user_data.id from langgraph_auth_user (populated by auth middleware from headers)
+    2. user_data.id from configurable.user_data (legacy fallback)
     3. user_id from metadata (fallback)
     4. user_id from configurable (fallback)
     
@@ -86,6 +116,7 @@ def get_company_id_from_config() -> Optional[str]:
         # Try user_data.company_id first
         user_data = get_user_data_from_config()
         company_id = user_data.get("company_id")
+        
         if company_id:
             return company_id
         
@@ -95,7 +126,10 @@ def get_company_id_from_config() -> Optional[str]:
             return company_id
         
         return None
-    except Exception:
+    except Exception as e:
+        print(f"[get_company_id_from_config] Exception: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 

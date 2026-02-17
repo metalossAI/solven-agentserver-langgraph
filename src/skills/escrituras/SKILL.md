@@ -32,7 +32,11 @@ Debe seguirse el siguiente flujo:
 4. **Copiar el modelo a rellenar** desde `assets/` a /worspace
 5. **Editar la plantilla usando la habilidad de docx**
 
-### Reglas de edición
+### Cómo editar el modelo de escritura
+1. Leer el contenido del modelo
+2. Identificar campos a rellenar en toda la escritura
+3. Realizar operaciones de edición precisas, pagina por pagina, sin intentar rellenar todo el modelo de una.
+4. Revisar que los datos despues de cada edición esten correctamente.
 
 * Usar comentarios y redlining para indicar cambios al editar escrituras
 * Mantener el estilo original cuando se trabaje sobre plantillas

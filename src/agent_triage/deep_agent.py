@@ -98,5 +98,8 @@ graph = create_deep_agent(
         build_context,
         build_prompt,
     ],
+    skills=[
+        "/skills/",
+    ],
     context_schema=AppContext,
 )

@@ -668,9 +668,41 @@ class SandboxBackend(BaseSandbox):
 		return await asyncio.to_thread(self.write, file_path, content)
 	
 	async def agrep_raw(self, pattern: str, path: str | None = None, glob: str | None = None) -> list[GrepMatch] | str:
+		"""
+		Structured search results or error string for invalid input.
+		
+		Performs a recursive text search using grep with structured output (filename, line number, matching text).
+		This tool is designed for PRECISE searches, not for listing directory contents or broad exploratory searches.
+		
+		IMPORTANT: Avoid generic patterns that would match too many files:
+		- DO NOT use patterns like '*' or '**/*' in the glob parameter
+		- DO NOT use overly broad search patterns that would return thousands of results
+		- Use specific file extensions in glob (e.g., '*.py', '*.tsx') when needed
+		- Use specific search terms in the pattern parameter
+		- Prefer searching in specific directories rather than the entire filesystem
+		
+		For listing directory contents, use list_files() or read_file() instead.
+		"""
 		return await asyncio.to_thread(self.grep_raw, pattern, path, glob)
 	
 	async def aglob_info(self, pattern: str, path: str = "/") -> list[FileInfo]:
+		"""
+		Structured glob matching returning FileInfo dicts.
+		
+		Finds files and directories matching a glob pattern with structured output (path, is_dir).
+		This tool is designed for PRECISE file matching, not for listing entire directory trees or broad searches.
+		
+		IMPORTANT: Avoid generic patterns that would match too many files:
+		- DO NOT use patterns like '**/*' or '*' that would return thousands of files
+		- DO NOT use this tool to list all contents of directories
+		- Use specific file extensions (e.g., '*.py', '*.tsx', '*.md')
+		- Use specific filename patterns (e.g., 'test_*.py', '*.config.js')
+		- Prefer searching in specific subdirectories rather than the root '/'
+		- Limit the scope of your search to relevant directories
+		
+		For listing directory contents, use list_files() instead.
+		For broad exploratory searches, consider using more specific tools or narrowing your search criteria first.
+		"""
 		return await asyncio.to_thread(self.glob_info, pattern, path)
 
 	@property

@@ -36,6 +36,13 @@ async def build_context(
 		runtime.context.ticket = await get_ticket(ticket_id)
 	else:
 		runtime.context.ticket = None
+	
+	# Extract model_name from metadata and set it in runtime context
+	metadata = config.get("metadata", {})
+	model_name = metadata.get("model_name")
+	
+	if model_name:
+		runtime.context.model_name = model_name
 
 	return Command(
 		goto="run_agent",
@@ -47,12 +54,16 @@ async def run_agent(
 	runtime :  Runtime[AppContext],
 	store : BaseStore
 ):
-	
 	# Get user data and thread data from config
 	user_config = config["configurable"].get("langgraph_auth_user", {})
 	user_data = user_config.get("user_data", {})
 	metadata = config.get("metadata", {})
 	thread_id = config["configurable"].get("thread_id")
+	
+	# Ensure model_name is set in runtime context from metadata (in case it wasn't set in build_context)
+	model_name = metadata.get("model_name")
+	if model_name:
+		runtime.context.model_name = model_name
 	
 	# Load skills frontmatter directly from backend
 	backend: SandboxBackend = SandboxBackend(runtime)

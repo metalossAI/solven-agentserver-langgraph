@@ -30,29 +30,27 @@ Debe seguirse el siguiente flujo:
 2. **Buscar instrucciones adicionales para el modelo** si estan disponibles en /references.
 3. **Buscar exhaustivamente y seleccionar el modelo adecuado** en `assets/`.
 4. **Copiar el modelo a rellenar** desde `assets/` a /worspace
-5. **Editar la plantilla usando la habilidad de docx**
+5. **Editar el modelo con el metodo de relleno**
 
-### Cómo editar el modelo de escritura
-1. Leer el contenido del modelo
-2. Identificar campos a rellenar en toda la escritura
-3. Realizar operaciones de edición precisas, pagina por pagina, sin intentar rellenar todo el modelo de una.
-4. Revisar que los datos despues de cada edición esten correctamente.
+### Metodo de relleno de modelos (pagina a pagina)
+#### pasos
+1. Identificar el tipo de archivo del modelo.
+2. Cargar el skill para trabajar con el tipo de archivo identificado.
+3. Utilizando el skill crear o ejecutar scripts para trabajar pagina por pagina.
+#### reglas
+- Evita rellenar un modelo de una sola pasada, esto resultara en un modelo incompleto.
+- Usar comentarios y redlining para indicar cambios al editar escrituras
+- Trabajar siempre con plantillas.
+- Trabajar sobre el mismo archivo evitando versionados.
 
-* Usar comentarios y redlining para indicar cambios al editar escrituras
-* Mantener el estilo original cuando se trabaje sobre plantillas
+## Reglas de validació
 
-## Reglas de validación
-
-Antes de entregar el resultado, el asistente debe:
-* Garantizar la coherencia de nombres, fechas, identificadores e importes.
-* Confirmar la adecuación al documento de referencia del tipo de escritura.
-* Verificar que no falte ninguna cláusula o sección obligatoria.
 
 ## Ejemplos de activación de esta skill
 
-* "Redactar una escritura de compraventa utilizando la plantilla estándar."
-* "Editar la compraventa para modificar el precio y la forma de pago."
-* "Cumplimentar el PDF final de compraventa con los términos acordados."
-* "Validar este PDF firmado frente a la plantilla DOCX original."
-* "Genera la escritura"
-* "Incluye este documento unido"
+- "Redactar una escritura de compraventa utilizando la plantilla estándar."
+- "Editar la compraventa para modificar el precio y la forma de pago."
+- "Cumplimentar el PDF final de compraventa con los términos acordados."
+- "Validar este PDF firmado frente a la plantilla DOCX original."
+- "Genera la escritura"
+- "Incluye este documento unido"

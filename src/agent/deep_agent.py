@@ -207,7 +207,20 @@ async def dynamic_model_router(request: ModelRequest, handler):
     """
     try:
         # Get model name from runtime context (AppContext)
-        model_name = request.runtime.context.model_name
+        runtime_context = request.runtime.context
+        model_name = runtime_context.model_name
+        
+        # Fallback: Also check if model_name is in config metadata
+        if not model_name:
+            try:
+                config = get_config()
+                config_model_name = config.get("metadata", {}).get("model_name")
+                if config_model_name:
+                    model_name = config_model_name
+                    # Also set it in the context for future use
+                    runtime_context.model_name = config_model_name
+            except Exception:
+                pass
         
         if model_name:
             dynamic_llm = ChatOpenAI(
@@ -224,11 +237,9 @@ async def dynamic_model_router(request: ModelRequest, handler):
             modified_request = request.override(model=dynamic_llm)
             return await handler(modified_request)
         else:
-            print("[dynamic_model_router] No model specified in context, using default")
             return await handler(request)
             
-    except Exception as e:
-        print(f"[dynamic_model_router] Error: {e}, using default model")
+    except Exception:
         return await handler(request)
 
 gmail_subagent = SubAgent(
@@ -247,25 +258,25 @@ outlook_subagent = SubAgent(
     tools=outlook_tools,
 )
 
-# docx_subagent = SubAgent(
-#   name="asistente_docx",
-#   description="agente encargado de redactar, editar y analizar documentos de word (.docx)",
-#   system_prompt="",
-#   model=coding_llm,
-#   tools=[
-#       cargar_habilidad,
-#   ],
-#   middleware=[
-#       build_docx_prompt
-#   ],
-#   state_schema=SolvenState,
-# )
+oficial_subagent = SubAgent(
+    name="oficial_notarial",
+    description="asistente para trabajar en escrituras notariales",
+    system_prompt="",
+    model=coding_llm,
+    skills=[
+        "/skills/",
+        "/anthropic/skills/",
+    ],
+	middleware=[
+	]
+)
 
 graph = create_deep_agent(
     model=llm,  # Default model - will be dynamically swapped by middleware
     system_prompt="",
     backend=lambda rt: SandboxBackend(rt),
     subagents=[
+        oficial_subagent,
         gmail_subagent,
         outlook_subagent,
         catastro_subagent,
@@ -277,9 +288,8 @@ graph = create_deep_agent(
         ToolEnforcementMiddleware(),  # Ensure agent makes tool calls first
         #continuation_evaluation_middleware,  # Evaluate results and decide to continue (LAST)
     ],
-    skills=[
+	skills=[
         "/skills/",
-        "/anthropic/skills/",
     ],
     context_schema=AppContext,
 )

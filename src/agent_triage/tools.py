@@ -409,27 +409,27 @@ async def patch_ticket(ticket_id: str, prioridad: str = None, descripcion: str =
         ticket = ticket_check.data[0]
         document_id = ticket.get("document_id")
         
+        # Always update updated_at if any field is being modified
+        update_data = {
+            "updated_at": datetime.now().isoformat()
+        }
+        
         # Update ticket metadata if priority or rejection_reason changed
-        if prioridad or rejection_reason:
-            update_data = {
-                "updated_at": datetime.now().isoformat()
-            }
-            
-            if prioridad:
-                update_data["priority"] = prioridad
-            
-            if rejection_reason:
-                update_data["rejection_reason"] = rejection_reason
-            
-            # Ensure update only affects tickets from this company
-            update_response = await supabase_async.table("tickets").update(update_data).eq("id", ticket_id).eq("company_id", company_id).execute()
-            
-            if not update_response.data:
-                return ToolMessage(
-                    content="Error al actualizar ticket",
-                    status="error",
-                    tool_call_id=runtime.tool_call_id
-                )
+        if prioridad:
+            update_data["priority"] = prioridad
+        
+        if rejection_reason:
+            update_data["rejection_reason"] = rejection_reason
+        
+        # Update the ticket with new data (always updates updated_at)
+        update_response = await supabase_async.table("tickets").update(update_data).eq("id", ticket_id).eq("company_id", company_id).execute()
+        
+        if not update_response.data:
+            return ToolMessage(
+                content="Error al actualizar ticket",
+                status="error",
+                tool_call_id=runtime.tool_call_id
+            )
         
         # Update document content if descripcion is provided
         if descripcion and document_id:

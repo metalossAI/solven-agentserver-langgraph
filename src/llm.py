@@ -39,6 +39,12 @@ xai_grok_code_fast_1 = ChatOpenAI(
     streaming=False,
 )
 
+minimax_m2_5 = ChatOpenAI(
+    model="minimax/minimax-m2.5",
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+)
+
 mistralai_ministral_3b_2512 = ChatOpenAI(
     model="mistralai/ministral-3b-2512",
     base_url="https://openrouter.ai/api/v1",
@@ -79,7 +85,7 @@ LLM_SKILL_MATCHING = xai_grok_4_fast
 
 LLM_SO = xai_grok_4_fast_SO
 
-CODING_LLM = xai_grok_code_fast_1
+CODING_LLM = minimax_m2_5 #ai_grok_code_fast_1
 
 LLM = xai_grok_4_fast  # Default model for agent
 

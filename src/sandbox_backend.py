@@ -81,6 +81,10 @@ class SandboxBackend(BaseSandbox):
 		
 		# State
 		self._initialized = False
+		
+		# Note: Sandbox initialization is deferred to first use (lazy initialization)
+		# This avoids blocking calls during __init__ which runs in async context
+		# All methods that need the sandbox call _ensure_initialized() first
 	
 	@property
 	def id(self) -> str:
@@ -173,12 +177,110 @@ class SandboxBackend(BaseSandbox):
 		# Step 3: Mount R2 buckets for new sandbox
 		self._mount_r2_buckets()
 		
-		# Step 4: Sync local skills to sandbox
+		# Step 4: Update system skills from official repo
+		self._update_system_skills()
+		
+		# Step 5: Sync local skills to sandbox
 		self._sync_local_skills()
 		
 		self._initialized = True
 		self._writer("Espacio de trabajo listo")
 		print(f"[_ensure_initialized] ✓ Initialization complete", flush=True)
+	
+	def _update_system_skills(self) -> None:
+		"""
+		Clone Anthropic skills repo to /anthropic/ at root and keep it updated via git pull.
+		Agent will reference both /skills/ (user skills) and /anthropic/skills/ (system skills).
+		
+		This is the most elegant approach:
+		- No copying or symlinking needed
+		- Fast: git pull is very quick on subsequent runs
+		- Persistent: Repo lives at root directory
+		- Clean: Agent directly references the paths it needs
+		
+		Structure:
+		- /anthropic/              (Anthropic repo at root - git-managed)
+		  └── skills/
+		      ├── docx/
+		      ├── pdf/
+		      ├── xlsx/
+		      └── pptx/
+		- /skills/escrituras/      (User's custom skills)
+		
+		Agent references:
+		- /skills/escrituras/ → User custom skill
+		- /anthropic/skills/docx/ → Office document skills
+		- /anthropic/skills/pdf/ → PDF skills
+		- /anthropic/skills/xlsx/ → Excel skills
+		- /anthropic/skills/pptx/ → PowerPoint skills
+		"""
+		try:
+			repo_url = "https://github.com/anthropics/skills.git"
+			repo_dir = "/anthropic"
+			
+			# Create the directory first if it doesn't exist (use sudo for root directories)
+			print(f"[_update_system_skills] Creating directory {repo_dir}", flush=True)
+			mkdir_result = self._sandbox.commands.run(
+				f"sudo mkdir -p {repo_dir} && sudo chown -R user:user {repo_dir}",
+				timeout=10
+			)
+			if mkdir_result.exit_code != 0:
+				print(f"[_update_system_skills] ⚠️  Failed to create directory: {mkdir_result.stderr}", flush=True)
+			else:
+				print(f"[_update_system_skills] ✓ Directory created: {repo_dir}", flush=True)
+			
+			# Configure git to trust the directory
+			self._sandbox.commands.run(
+				f"git config --global --add safe.directory {repo_dir}",
+				timeout=10
+			)
+			
+			# Check if repo exists
+			repo_check = self._sandbox.commands.run(
+				f"test -d {repo_dir}/.git && echo 'EXISTS' || echo 'NOT_FOUND'",
+				timeout=10
+			)
+			
+			if "EXISTS" in repo_check.stdout:
+				# Repo exists, just pull updates (very fast)
+				print(f"[_update_system_skills] Pulling latest Anthropic skills", flush=True)
+				pull_result = self._sandbox.commands.run(
+					f"cd {repo_dir} && git pull origin main",
+					timeout=60
+				)
+				if pull_result.exit_code == 0:
+					print(f"[_update_system_skills] ✓ System skills updated", flush=True)
+				else:
+					print(f"[_update_system_skills] ⚠️  Git pull failed, using cached version", flush=True)
+			else:
+				# First time: clone the repo (happens once per user)
+				print(f"[_update_system_skills] Cloning Anthropic skills repo (first time setup)", flush=True)
+				clone_result = self._sandbox.git.clone(
+					repo_url,
+					path=repo_dir,
+					depth=1  # Shallow clone for speed
+				)
+				if clone_result.exit_code == 0:
+					print(f"[_update_system_skills] ✓ Anthropic skills cloned to {repo_dir}", flush=True)
+				else:
+					print(f"[_update_system_skills] ✗ Clone failed: {clone_result.stderr}", flush=True)
+					raise Exception(f"Failed to clone Anthropic skills: {clone_result.stderr}")
+			
+			# Verify skills are accessible
+			verify_result = self._sandbox.commands.run(
+				f"ls -d {repo_dir}/skills/*/ 2>/dev/null | wc -l",
+				timeout=10
+			)
+			if verify_result.exit_code == 0:
+				skill_count = verify_result.stdout.strip()
+				print(f"[_update_system_skills] ✓ Found {skill_count} system skills in {repo_dir}/skills/", flush=True)
+			
+			print(f"[_update_system_skills] ✓ System skills ready (agent will reference {repo_dir}/skills/)", flush=True)
+			
+		except Exception as e:
+			print(f"[_update_system_skills] ✗ Error updating system skills: {e}", flush=True)
+			import traceback
+			print(f"[_update_system_skills] Traceback:\n{traceback.format_exc()}", flush=True)
 	
 	def _sync_local_skills(self) -> None:		
 		# Path to local skills directory

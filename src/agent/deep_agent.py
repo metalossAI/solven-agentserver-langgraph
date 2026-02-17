@@ -5,14 +5,15 @@ import os
 from deepagents.graph import SkillsMiddleware, FilesystemMiddleware, SubAgentMiddleware, TodoListMiddleware
 from dotenv import load_dotenv
 from langchain_core.prompts import ChatPromptTemplate
+from langgraph.types import Command
 load_dotenv()
 
 from langchain_openai.chat_models import ChatOpenAI
 from langsmith import AsyncClient
 from langchain.tools import ToolRuntime
-from langchain.agents.middleware import AgentMiddleware, ModelRequest, before_model, dynamic_prompt, ModelResponse, wrap_model_call
+from langchain.agents.middleware import AgentMiddleware, ModelRequest, before_model, dynamic_prompt, ModelResponse, wrap_model_call, after_agent, hook_config
 
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import SystemMessage, ToolMessage, AIMessage, HumanMessage
 from langchain.agents import create_agent
 from deepagents.middleware import FilesystemMiddleware, SubAgentMiddleware
 from langchain.agents.middleware import TodoListMiddleware
@@ -38,10 +39,132 @@ from src.common_tools.files import solicitar_archivo
 
 from langchain.agents.middleware import before_agent, AgentState
 from langgraph.runtime import Runtime
+from typing import Callable, Awaitable
 
 # Import email tools
 from src.agent_email.gmail_tools import gmail_tools, gmail_send_email
 from src.agent_email.outlook_tools import outlook_tools
+
+
+class ToolEnforcementMiddleware(AgentMiddleware):
+	"""
+	Middleware to enforce tool usage when no tools have been called yet.
+	
+	Strategy:
+	- Forces tool calls only on the first turn (when there are NO tool messages)
+	- Once tools have been called, allows natural model behavior
+	- This prevents the agent from just chatting without taking action
+	- Allows tools that return Command(goto="__end__") to properly terminate
+	"""
+	async def awrap_model_call(
+		self,
+		request: ModelRequest,
+		handler: Callable[[ModelRequest], Awaitable[ModelResponse]]
+	) -> ModelResponse:
+		messages = request.messages
+		
+		# Check if any tools have been called yet
+		has_tool_messages = any(isinstance(msg, ToolMessage) for msg in messages)
+		
+		# Only force tool calls on the first turn
+		if not has_tool_messages:
+			return await handler(request.override(tool_choice="required"))
+		
+		# After the first tool call, let the model decide naturally
+		return await handler(request)
+
+
+@after_agent
+@hook_config(can_jump_to=["model"])
+def continuation_evaluation_middleware(state: AgentState, runtime: Runtime[AppContext]) -> dict | None:
+	"""
+	Middleware to encourage agent to evaluate previous work and continue.
+	
+	Logic:
+	- After tools execute and return results, sends an evaluation message
+	- Agent can then decide to make more tool calls or finish
+	- If agent makes more tool calls, those results will also be evaluated
+	- Allows MULTIPLE evaluation cycles (after each set of tool results)
+	- Only ends when agent responds without making new tool calls
+	
+	This enables iterative work where the agent can:
+	1. Use tools → evaluate → continue with more tools → evaluate again → finish
+	"""
+	messages = state.get("messages", [])
+	
+	# Flag: Check if the last message has tool calls
+	has_new_tool_calls = False
+	if messages:
+		last_message = messages[-1]
+		if isinstance(last_message, AIMessage) and last_message.tool_calls:
+			has_new_tool_calls = True
+	
+	# If agent made new tool calls, let them execute (don't evaluate yet)
+	if has_new_tool_calls:
+		return None
+	
+	# Find the last evaluation message index (if any)
+	evaluation_content = "Revisa cuidadosamente los resultados y evalúa si el trabajo está completo o si necesitas continuar con pasos adicionales."
+	last_evaluation_index = -1
+	for i in range(len(messages) - 1, -1, -1):
+		msg = messages[i]
+		if isinstance(msg, SystemMessage) and evaluation_content in msg.content:
+			last_evaluation_index = i
+			break
+	
+	# Flag: Check if there are tool messages AFTER the last evaluation
+	has_new_tool_results = False
+	if last_evaluation_index >= 0:
+		# Check for ToolMessages after the evaluation
+		for msg in messages[last_evaluation_index + 1:]:
+			if isinstance(msg, ToolMessage):
+				has_new_tool_results = True
+				break
+	else:
+		# No evaluation sent yet, check if there are any tool messages at all
+		for msg in messages:
+			if isinstance(msg, ToolMessage):
+				has_new_tool_results = True
+				break
+	
+	# Decision logic:
+	# If there are new tool results AND no new tool calls → send evaluation
+	if has_new_tool_results and not has_new_tool_calls:
+		evaluation_message = SystemMessage(
+			content=evaluation_content
+		)
+		return {
+			"messages": [evaluation_message],
+			"jump_to": "model"
+		}
+	
+	# Otherwise, let it continue normally (will END if no more work)
+	return None
+
+
+@before_agent
+async def initialize_sandbox(state: AgentState, runtime: Runtime[AppContext]):
+	"""
+	Initialize the sandbox before the agent starts working.
+	This ensures the sandbox is fully set up with:
+	- R2 mounts (workspace, skills, ticket)
+	- System skills downloaded from Anthropic repo via SVN
+	- Local skills synced
+	
+	Uses asyncio.to_thread to avoid blocking the async event loop.
+	"""
+	try:
+		backend = SandboxBackend(runtime)
+		await asyncio.to_thread(backend._ensure_initialized)
+		
+	except Exception as e:
+		print(f"[initialize_sandbox] ✗ Error initializing sandbox: {e}", flush=True)
+		import traceback
+		print(f"[initialize_sandbox] Traceback:\n{traceback.format_exc()}", flush=True)
+		# Don't fail the entire agent if sandbox init fails
+		# The agent can still try to work, and _ensure_initialized will be called again later
+	
+	return state
 
 
 @dynamic_prompt
@@ -87,9 +210,6 @@ async def dynamic_model_router(request: ModelRequest, handler):
         model_name = request.runtime.context.model_name
         
         if model_name:
-            print(f"[dynamic_model_router] Switching to model: {model_name}")
-            
-            # Create dynamic ChatOpenAI instance for the selected model
             dynamic_llm = ChatOpenAI(
                 model=model_name,
                 base_url="https://openrouter.ai/api/v1",
@@ -151,9 +271,15 @@ graph = create_deep_agent(
         catastro_subagent,
     ],
     middleware=[
+        initialize_sandbox,  # Initialize sandbox before agent starts (non-blocking)
         build_prompt,
         dynamic_model_router,  # Dynamically route to selected model
+        ToolEnforcementMiddleware(),  # Ensure agent makes tool calls first
+        #continuation_evaluation_middleware,  # Evaluate results and decide to continue (LAST)
     ],
-    skills=["/skills/"],
+    skills=[
+        "/skills/",
+        "/anthropic/skills/",
+    ],
     context_schema=AppContext,
 )

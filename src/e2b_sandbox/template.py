@@ -57,10 +57,11 @@ template = (
         "tesseract-ocr",    # OCR for scanned PDFs (only if OCR requested)
     ])
     # Build tools and utilities
-    .apt_install([
-        "build-essential",
-        "git",
-    ])
+        .apt_install([
+            "build-essential",
+            "git",
+            "rsync",  # For efficient file syncing
+        ])
     # Workspace isolation and utilities
     .apt_install([
         "bubblewrap",    # Filesystem isolation (mount workspace as /)

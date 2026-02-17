@@ -1,9 +1,11 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List, Sequence, Annotated, Any
+from typing import Optional, List, Sequence, Annotated, Any, Dict
 from langgraph.graph import MessagesState
 from langgraph.graph.ui import AnyUIMessage, ui_message_reducer
 from datetime import datetime
 from typing import Literal
+
+from deepagents import SubAgent
 
 class SolvenState(MessagesState):
     """
@@ -23,14 +25,18 @@ class User(BaseModel):
     role : str
     company_id : str
 
+class SkillCreate(BaseModel):
+    name: str
+    description: str
+
 class AppContext(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
-    
-    thread: Optional[Thread] = None
-    user: Optional[User] = None
-    tenant_id: Optional[str] = None
+
+    model_name : Optional[str] = Field(default=None, description="The name of the model to use")
+    company_id: Optional[str] = None
     backend : Optional[Any] = None  # S3Backend - using Any to avoid schema issues
     ticket: Optional['Ticket'] = None # the upstandig ticket context which will serve as link wiht for customer communications
+    skill_create: Optional[SkillCreate] = None
 
 # Store Models to ensure orderd long term memory
 class Event(BaseModel):
@@ -62,7 +68,7 @@ class Ticket(BaseModel):
     title: str
     description: str
     related_threads: Optional[List[str]] = None
-    status: Literal["open", "closed"] = "open"
+    status: Literal["open", "ongoing", "closed", "deleted"] = "open"
     updated_at: datetime = Field(default_factory=datetime.now)
 
 class Skill(BaseModel):

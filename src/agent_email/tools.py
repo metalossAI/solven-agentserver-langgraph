@@ -18,6 +18,8 @@ def get_composio_gmail_tools(user_id, thread_id):
     save_attachment_modifier = create_save_attachment_modifier(user_id, thread_id)
     print("USERID FOR COMPOSIO TOOLS: ", user_id)
     composio = Composio(provider=LangchainProvider())
+    
+    # Get tools WITHOUT modifiers first to avoid schema issues
     tools = composio.tools.get(
         user_id=user_id,
         toolkits=["GMAIL"],
@@ -33,6 +35,8 @@ def get_composio_outlook_tools(user_id, thread_id):
     save_attachment_modifier = create_save_attachment_modifier(user_id, thread_id)
 
     composio = Composio(provider=LangchainProvider())
+    
+    # Get tools WITHOUT modifiers first to avoid schema issues
     tools = composio.tools.get(
         user_id=user_id,
         toolkits=["OUTLOOK"],

@@ -54,11 +54,11 @@ async def buscar_documentos(
     """
     top_k = k if k < 100 else 100
     user_id = runtime.context.user_id
-    tenant_id = runtime.context.tenant_id
+    company_id = runtime.context.company_id
 
     filter_query = {
         "term": {
-            "metadata.tenant_id.keyword": tenant_id
+            "metadata.company_id.keyword": company_id
         }
     }
     

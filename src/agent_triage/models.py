@@ -3,11 +3,11 @@ from typing import TypedDict, Optional, Literal, List
 from dataclasses import dataclass
 from datetime import datetime
 from langgraph.graph import MessagesState
+from src.models import AppContext
 
-@dataclass
-class TriageContext:
-    user_id: str
-    tenant_id : str
+class TriageContext(AppContext):
+    """Triage agent context that extends AppContext with triage-specific fields."""
+    event_message: Optional[str] = Field(default=None, description="The event message for triage processing")
 
 class Ticket(BaseModel):
     id: str
@@ -23,9 +23,7 @@ class InputTriageState(MessagesState):
     outlook_triage_event: dict
 
 class TriageState(InputTriageState):
-    triage_context : str
+    ticket : Ticket
 
 class OutputTriageState(TypedDict):
     ticket: Ticket
-
-

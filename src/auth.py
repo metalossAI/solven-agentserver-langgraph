@@ -31,7 +31,16 @@ async def authenticate(headers: dict) -> Auth.types.MinimalUserDict:
             return None
         # Decode bytes to string if necessary
         if isinstance(value, bytes):
-            return value.decode('utf-8')
+            try:
+                return value.decode('utf-8')
+            except UnicodeDecodeError:
+                # If UTF-8 fails, try latin-1 (which can decode any byte sequence)
+                # then encode back to bytes and decode as utf-8 with error handling
+                try:
+                    return value.decode('latin-1')
+                except (UnicodeDecodeError, AttributeError):
+                    # Last resort: decode with error replacement
+                    return value.decode('utf-8', errors='replace')
         return value
 
     def _normalize_bearer(value):
@@ -39,7 +48,10 @@ async def authenticate(headers: dict) -> Auth.types.MinimalUserDict:
         if value is None:
             return None
         if isinstance(value, bytes):
-            value = value.decode("utf-8")
+            try:
+                value = value.decode("utf-8")
+            except UnicodeDecodeError:
+                value = value.decode("utf-8", errors="replace")
         if not isinstance(value, str):
             value = str(value)
         value = value.strip()
@@ -61,13 +73,19 @@ async def authenticate(headers: dict) -> Auth.types.MinimalUserDict:
     
     if x_api_token:
         if isinstance(x_api_token, bytes):
-            x_api_token = x_api_token.decode("utf-8")
+            try:
+                x_api_token = x_api_token.decode("utf-8")
+            except UnicodeDecodeError:
+                x_api_token = x_api_token.decode("utf-8", errors="replace")
         x_api_token = x_api_token.strip()
         if system_api_key == x_api_token:
             is_system_auth = True
     elif x_api_key:
         if isinstance(x_api_key, bytes):
-            x_api_key = x_api_key.decode("utf-8")
+            try:
+                x_api_key = x_api_key.decode("utf-8")
+            except UnicodeDecodeError:
+                x_api_key = x_api_key.decode("utf-8", errors="replace")
         x_api_key = x_api_key.strip()
         if system_api_key == x_api_key:
             is_system_auth = True

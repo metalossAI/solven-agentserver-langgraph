@@ -171,8 +171,6 @@ async def initialize_sandbox(state: AgentState, runtime: Runtime[AppContext]):
 async def build_prompt(request: ModelRequest):
     # Reuse existing backend instead of creating a new one
     # Backend is already initialized in build_context
-    runtime : Runtime[AppContext] = request.runtime
-    ticket = runtime.context.ticket
     system_prompt : SystemMessage = request.system_message
 
     # Extract user data from config
@@ -181,6 +179,10 @@ async def build_prompt(request: ModelRequest):
     user_data = user_config.get("user_data", {})
     user_name = user_data.get("name", "Usuario")
     user_role = user_data.get("role", "usuario")
+    
+    # Load ticket using thread_id (which is the ticket ID)
+    thread_id = config.get("metadata", {}).get("thread_id")
+    ticket = await get_ticket(thread_id)
 
     client = AsyncClient()
     base_prompt: ChatPromptTemplate = await client.pull_prompt("solven-main")

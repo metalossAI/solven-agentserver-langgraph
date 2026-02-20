@@ -29,7 +29,7 @@ from langchain.agents.middleware.tool_call_limit import ToolCallLimitMiddleware
 from src.llm import LLM as llm
 
 from src.agent_triage.models import InputTriageState, OutputTriageState, TriageState, TriageContext
-from src.agent_triage.tools import crear_ticket, patch_ticket, buscar_tickets, leer_ticket, merge_tickets, descartar_evento
+from src.agent_triage.tools import crear_ticket, patch_ticket, buscar_tickets, leer_ticket, leer_acciones, merge_tickets, descartar_evento, gestionar_acciones
 from src.utils.vector_store import search
 from src.utils.tickets import get_ticket
 
@@ -115,7 +115,7 @@ ticket_triage_subagent = SubAgent(
 	description="Agente para gestión de tickets. Puede buscar, leer, crear y actualizar tickets.",
 	system_prompt="",
 	model=llm,
-	tools=[buscar_tickets, leer_ticket, crear_ticket, patch_ticket, merge_tickets, descartar_evento],
+	tools=[buscar_tickets, leer_ticket, leer_acciones, crear_ticket, patch_ticket, merge_tickets, descartar_evento, gestionar_acciones],
 )
 
 graph = create_deep_agent(
@@ -123,10 +123,12 @@ graph = create_deep_agent(
 	tools=[
 		buscar_tickets,
 		leer_ticket,
+		leer_acciones,
 		crear_ticket,
 		patch_ticket,
 		merge_tickets,
 		descartar_evento,
+		gestionar_acciones,
 	],
 	subagents=[
 		gmail_subagent,

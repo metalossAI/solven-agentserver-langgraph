@@ -30,11 +30,18 @@ async def build_context(
 	runtime :  ToolRuntime[AppContext],
 	store : BaseStore,
 ):
-	# Load ticket if ticket_id exists in metadata
-	ticket_id = config.get("metadata", {}).get("ticket_id")
-	if ticket_id:
-		runtime.context.ticket = await get_ticket(ticket_id)
+	# Load ticket using thread_id (which is the ticket ID)
+	thread_id = config.get("configurable", {}).get("thread_id")
+	print(f"[build_context] Building context for thread_id: {thread_id}", flush=True)
+	if thread_id:
+		print(f"[build_context] Loading ticket for thread_id: {thread_id}", flush=True)
+		runtime.context.ticket = await get_ticket(thread_id)
+		if runtime.context.ticket:
+			print(f"[build_context] Ticket loaded successfully: {runtime.context.ticket.id} - {runtime.context.ticket.title}", flush=True)
+		else:
+			print(f"[build_context] No ticket found for thread_id: {thread_id}", flush=True)
 	else:
+		print(f"[build_context] No thread_id provided, ticket context will be None", flush=True)
 		runtime.context.ticket = None
 	
 	# Extract model_name from metadata and set it in runtime context

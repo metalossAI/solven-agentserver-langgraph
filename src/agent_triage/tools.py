@@ -1,13 +1,13 @@
-from typing import Optional
+from typing import Optional, List
 from langchain.tools import tool, ToolRuntime
 from langchain_core.messages import ToolMessage
 from langchain_core.documents import Document
 
 from langgraph.graph.state import Command
-from src.agent_triage.models import Ticket
+from src.agent_triage.models import Ticket, Accion, CrearTicketInput, GestionarAccionesInput
 from src.models import AppContext
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 
 from src.embeddings import embeddings
@@ -141,6 +141,26 @@ async def leer_ticket(ticket_id: str, runtime: ToolRuntime[AppContext]) -> ToolM
                 tool_call_id=runtime.tool_call_id
             )
         
+        # Fetch actions for this ticket
+        actions_response = await supabase.table("actions").select("*").eq("ticket_id", ticket_id).order("created_at").execute()
+        actions = actions_response.data if actions_response.data else []
+        
+        # Format actions
+        actions_text = ""
+        if actions and len(actions) > 0:
+            actions_text = "\n\nAcciones asociadas:\n"
+            for idx, action in enumerate(actions, 1):
+                action_title = action.get("title", "Sin título")
+                action_description = action.get("description", "")
+                action_status = action.get("status", "pending")
+                action_created_by = action.get("created_by", "AI")
+                actions_text += f"{idx}. [{action_status.upper()}] {action_title}"
+                if action_description:
+                    actions_text += f"\n   Descripción: {action_description}"
+                actions_text += f"\n   Creada por: {action_created_by}\n"
+        else:
+            actions_text = "\n\nAcciones asociadas: Ninguna"
+        
         # Format ticket information
         response = f"""
 Ticket ID: {ticket_id}
@@ -153,6 +173,7 @@ Creado: {ticket_created}
 
 Descripción:
 {content}
+{actions_text}
 """
         return ToolMessage(
             content=response.strip(),
@@ -168,23 +189,19 @@ Descripción:
             tool_call_id=runtime.tool_call_id
         )
 
-@tool
+@tool(args_schema=CrearTicketInput)
 async def crear_ticket(
     titulo: str, 
     descripcion: str,
     nombre_cliente: str,
     correo_cliente: str,
     prioridad: str = "medium",
+    acciones: List[Accion] = [],
     runtime: ToolRuntime[AppContext] = None
 ) -> ToolMessage:
     """
     Crea un ticket con titulo, descripción, email del cliente y prioridad.
-
-    Args:
-    - titulo: titulo del ticket
-    - descripcion: descripción detallada del ticket
-    - correo_cliente: email del cliente que envió la solicitud
-    - prioridad: prioridad del ticket ('low', 'medium', 'high', 'urgent'). Por defecto 'medium'
+    Opcionalmente puede incluir acciones sugeridas para completar el ticket.
     """
     try:
         # Get company_id from config
@@ -287,7 +304,7 @@ async def crear_ticket(
             "title": titulo,
             "priority": prioridad,
             "type": "ticket_description",
-            "created_at": datetime.now().isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat()
         }
         
         # Create LangChain Document object
@@ -350,9 +367,34 @@ async def crear_ticket(
                 tool_call_id=runtime.tool_call_id
             )
         
+        # Create actions if provided
+        if acciones and len(acciones) > 0:
+            print(f"[DEBUG] Creating {len(acciones)} actions for ticket {ticket_id}", flush=True)
+            
+            actions_to_insert = []
+            for accion in acciones:
+                action_data = {
+                    "ticket_id": ticket_id,
+                    "title": accion.title,
+                    "description": accion.description,
+                    "status": accion.status,  # Pydantic validates this is a valid Literal value
+                    "created_by": "AI",
+                    "metadata": accion.metadata,
+                }
+                actions_to_insert.append(action_data)
+            
+            if actions_to_insert:
+                try:
+                    actions_response = await supabase_async.table("actions").insert(actions_to_insert).execute()
+                    print(f"[DEBUG] Created {len(actions_to_insert)} actions successfully", flush=True)
+                except Exception as e:
+                    print(f"[WARNING] Failed to create actions: {str(e)}", flush=True)
+                    # Don't fail ticket creation if actions fail
+        
         print(f"[DEBUG] Ticket created successfully", flush=True)
+        actions_msg = f" con {len(acciones) if acciones else 0} acciones" if acciones else ""
         return ToolMessage(
-            content=f"Ticket creado con id {ticket_id} (prioridad: {prioridad}) para el cliente {correo_cliente}, asignado al usuario {user_id}",
+            content=f"Ticket creado con id {ticket_id} (prioridad: {prioridad}) para el cliente {correo_cliente}, asignado al usuario {user_id}{actions_msg}",
             tool_call_id=runtime.tool_call_id
         )
     except Exception as e:
@@ -366,10 +408,17 @@ async def crear_ticket(
         )
 
 @tool
-async def patch_ticket(ticket_id: str, prioridad: str = None, descripcion: str = None, rejection_reason: str = None, runtime: ToolRuntime[AppContext] = None) -> ToolMessage:
+async def patch_ticket(
+    ticket_id: str,
+    prioridad: str = None, 
+    descripcion: str = None, 
+    rejection_reason: str = None, 
+    runtime: ToolRuntime[AppContext] = None
+) -> ToolMessage:
     """
     Actualiza un ticket existente. Puede actualizar la prioridad, la descripción o la razón de rechazo.
     NOTA: El estado del ticket se gestiona únicamente desde la aplicación, no puede ser modificado por el agente.
+    NOTA: Para gestionar acciones (agregar, modificar), usa el tool 'gestionar_acciones'.
 
     Args:
     - ticket_id: ID del ticket a actualizar
@@ -410,8 +459,9 @@ async def patch_ticket(ticket_id: str, prioridad: str = None, descripcion: str =
         document_id = ticket.get("document_id")
         
         # Always update updated_at if any field is being modified
+        # Use UTC to stay consistent with Next.js which also stores UTC timestamps
         update_data = {
-            "updated_at": datetime.now().isoformat()
+            "updated_at": datetime.now(timezone.utc).isoformat()
         }
         
         # Update ticket metadata if priority or rejection_reason changed
@@ -458,7 +508,7 @@ async def patch_ticket(ticket_id: str, prioridad: str = None, descripcion: str =
             # Update metadata with modification timestamp and new priority if provided
             updated_metadata = {
                 **existing_metadata,
-                "updated_at": datetime.now().isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
                 "modified": True
             }
             
@@ -607,45 +657,15 @@ async def descartar_evento(
         
         supabase_async = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
         
-        # Check if client already exists for this email and company
+        # Note: We don't create clients in descartar_evento - only crear_ticket creates new clients
+        # Check if client exists for logging purposes only
         print(f"[DEBUG] Checking if client exists for email {correo_cliente} and company {company_id}...", flush=True)
         existing_client = await supabase_async.table("clients").select("id, user_id").eq("email", correo_cliente).eq("company_id", company_id).execute()
         
-        client_user_id = None
         if existing_client.data and len(existing_client.data) > 0:
-            # Client already exists, use their user_id
-            client_user_id = existing_client.data[0].get("user_id")
-            print(f"[DEBUG] Client already exists with user_id: {client_user_id}", flush=True)
+            print(f"[DEBUG] Client exists with user_id: {existing_client.data[0].get('user_id')}", flush=True)
         else:
-            # Client doesn't exist, create a new one
-            client_user_id = str(uuid.uuid4())
-            print(f"[DEBUG] Creating new client with user_id: {client_user_id}", flush=True)
-            
-            client_data = {
-                "user_id": client_user_id,
-                "company_id": company_id,
-                "full_name": nombre_cliente,
-                "email": correo_cliente,
-                "phone": None,
-                "address": None,
-                "company": None,
-                "client_type": "individual",
-                "tax_id": None,
-                "notes": f"Cliente creado automáticamente desde evento descartado. Creado por: {user_id}",
-                "is_active": True,
-                "accepted_terms": False,
-                "registration_completed": False,
-            }
-            
-            try:
-                client_response = await supabase_async.table("clients").insert(client_data).execute()
-                if client_response.data and len(client_response.data) > 0:
-                    print(f"[DEBUG] Client created successfully with id: {client_response.data[0].get('id')}", flush=True)
-                else:
-                    print(f"[WARNING] Client insert returned no data, but continuing...", flush=True)
-            except Exception as e:
-                print(f"[ERROR] Failed to create client: {str(e)}", flush=True)
-                # Continue anyway - the ticket creation should still work
+            print(f"[DEBUG] No existing client found for email {correo_cliente}. Client will not be created (only crear_ticket creates clients).", flush=True)
         
         # Generate a UUID for both ticket and document (they share the same ID)
         ticket_id = str(uuid.uuid4())
@@ -664,7 +684,7 @@ async def descartar_evento(
             "type": "ticket_description",
             "status": "discarded",
             "discard_reason": razon_descarte,
-            "created_at": datetime.now().isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat()
         }
         
         # Create LangChain Document object
@@ -888,7 +908,7 @@ async def merge_tickets(ticket_ids: list[str], runtime: ToolRuntime[AppContext] 
             "company_id": company_id,
             "type": "ticket_description",
             "merged_from": ticket_ids,
-            "merged_at": datetime.now().isoformat()
+            "merged_at": datetime.now(timezone.utc).isoformat()
         }
         
         # Priority order: urgent > high > medium > low
@@ -951,7 +971,7 @@ async def merge_tickets(ticket_ids: list[str], runtime: ToolRuntime[AppContext] 
         merged_metadata["customer_email"] = customer_email
         merged_metadata["title"] = merged_title
         merged_metadata["priority"] = highest_priority
-        merged_metadata["created_at"] = datetime.now().isoformat()
+        merged_metadata["created_at"] = datetime.now(timezone.utc).isoformat()
         
         # Create new merged document with embeddings using PGVectorStore
         print(f"[DEBUG] Creating merged document {merged_ticket_id} with embeddings...", flush=True)
@@ -1046,6 +1066,217 @@ async def merge_tickets(ticket_ids: list[str], runtime: ToolRuntime[AppContext] 
         traceback.print_exc()
         return ToolMessage(
             content=f"Error al fusionar tickets: {str(e)}",
+            status="error",
+            tool_call_id=runtime.tool_call_id
+        )
+
+@tool
+async def leer_acciones(ticket_id: str, runtime: ToolRuntime[AppContext]) -> ToolMessage:
+    """
+    Lee todas las acciones asociadas a un ticket. Útil para verificar acciones existentes antes de agregar nuevas.
+    
+    Args:
+    - ticket_id: ID del ticket del cual se quieren leer las acciones
+    """
+    try:
+        # Get company_id from config
+        company_id = get_company_id_from_config()
+        if not company_id:
+            return ToolMessage(
+                content="Error: No se encontró el ID de la compañía",
+                status="error",
+                tool_call_id=runtime.tool_call_id
+            )
+        
+        supabase_async = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        
+        # Verify ticket exists and belongs to user's company
+        ticket_check = await supabase_async.table("tickets").select("id, title").eq("id", ticket_id).eq("company_id", company_id).execute()
+        
+        if not ticket_check.data or len(ticket_check.data) == 0:
+            return ToolMessage(
+                content=f"Error: Ticket {ticket_id} no encontrado o no pertenece a tu compañía",
+                status="error",
+                tool_call_id=runtime.tool_call_id
+            )
+        
+        ticket = ticket_check.data[0]
+        ticket_title = ticket.get("title", "Sin título")
+        
+        # Fetch all actions for this ticket
+        actions_response = await supabase_async.table("actions").select("*").eq("ticket_id", ticket_id).order("created_at").execute()
+        actions = actions_response.data if actions_response.data else []
+        
+        # Format actions response
+        if not actions or len(actions) == 0:
+            response = f"Ticket: {ticket_title} (ID: {ticket_id})\n\nNo hay acciones asociadas a este ticket."
+        else:
+            response = f"Ticket: {ticket_title} (ID: {ticket_id})\n\nAcciones encontradas ({len(actions)}):\n"
+            for idx, action in enumerate(actions, 1):
+                action_title = action.get("title", "Sin título")
+                action_description = action.get("description", "")
+                action_status = action.get("status", "pending")
+                action_created_by = action.get("created_by", "AI")
+                action_id = action.get("id", "")
+                response += f"\n{idx}. ID: {action_id}\n"
+                response += f"   Título: {action_title}\n"
+                if action_description:
+                    response += f"   Descripción: {action_description}\n"
+                response += f"   Estado: {action_status}\n"
+                response += f"   Creada por: {action_created_by}\n"
+        
+        return ToolMessage(
+            content=response.strip(),
+            tool_call_id=runtime.tool_call_id
+        )
+    except Exception as e:
+        print(f"[ERROR] leer_acciones failed: {type(e).__name__}: {str(e)}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return ToolMessage(
+            content=f"Error al leer acciones: {str(e)}",
+            status="error",
+            tool_call_id=runtime.tool_call_id
+        )
+
+@tool(args_schema=GestionarAccionesInput)
+async def gestionar_acciones(
+    ticket_id: str,
+    acciones: List[Accion],
+    modo: str = "append",
+    runtime: ToolRuntime[AppContext] = None
+) -> ToolMessage:
+    """
+    Gestiona las acciones de un ticket existente. Permite agregar nuevas acciones o insertarlas.
+    
+    NOTA: Este tool primero lee las acciones existentes para evitar duplicados.
+          En modo 'append', se agregan las nuevas acciones al final sin eliminar las existentes.
+          En modo 'insert', se insertan las nuevas acciones (comportamiento similar a append).
+    """
+    try:
+        # Get company_id from config
+        company_id = get_company_id_from_config()
+        if not company_id:
+            return ToolMessage(
+                content="Error: No se encontró el ID de la compañía",
+                status="error",
+                tool_call_id=runtime.tool_call_id
+            )
+        
+        # Get user_id from config (for created_by)
+        user_id = get_user_id_from_config()
+        if not user_id:
+            # Try to get from metadata as fallback
+            from langgraph.config import get_config
+            config = get_config()
+            metadata = config.get("metadata", {})
+            user_id = metadata.get("user_id")
+        
+        # Use 'AI' as created_by if user_id not available
+        created_by = user_id if user_id else "AI"
+        
+        supabase_async = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        
+        # Verify ticket exists and belongs to user's company
+        ticket_check = await supabase_async.table("tickets").select("id").eq("id", ticket_id).eq("company_id", company_id).execute()
+        
+        if not ticket_check.data or len(ticket_check.data) == 0:
+            return ToolMessage(
+                content=f"Error: Ticket {ticket_id} no encontrado o no pertenece a tu compañía",
+                status="error",
+                tool_call_id=runtime.tool_call_id
+            )
+        
+        # IMPORTANT: First read existing actions to avoid duplicates
+        print(f"[DEBUG] Reading existing actions for ticket {ticket_id} to avoid duplicates...", flush=True)
+        existing_actions_response = await supabase_async.table("actions").select("title, description").eq("ticket_id", ticket_id).execute()
+        existing_actions = existing_actions_response.data if existing_actions_response.data else []
+        
+        # Create a set of existing action titles (normalized for comparison)
+        existing_titles = set()
+        for existing_action in existing_actions:
+            title = existing_action.get("title", "").strip().lower()
+            if title:
+                existing_titles.add(title)
+        
+        print(f"[DEBUG] Found {len(existing_actions)} existing actions. Existing titles: {existing_titles}", flush=True)
+        
+        # Validate and prepare actions
+        # Both 'append' and 'insert' modes add actions without deleting existing ones
+        if not acciones or len(acciones) == 0:
+            return ToolMessage(
+                content="Error: Se requiere al menos una acción",
+                status="error",
+                tool_call_id=runtime.tool_call_id
+            )
+        
+        actions_to_insert = []
+        skipped_duplicates = []
+        
+        for accion in acciones:
+            # Normalize title for comparison
+            normalized_title = accion.title.strip().lower()
+            
+            # Check if action with same title already exists
+            if normalized_title in existing_titles:
+                skipped_duplicates.append(accion.title)
+                print(f"[DEBUG] Skipping duplicate action: {accion.title}", flush=True)
+                continue
+            
+            action_data = {
+                "ticket_id": ticket_id,
+                "title": accion.title,
+                "description": accion.description,
+                "status": accion.status,  # Pydantic validates this is a valid Literal value
+                "created_by": created_by,
+                "metadata": accion.metadata,
+            }
+            actions_to_insert.append(action_data)
+        
+        if not actions_to_insert:
+            if skipped_duplicates:
+                return ToolMessage(
+                    content=f"Todas las acciones propuestas ya existen en el ticket {ticket_id}. Acciones duplicadas: {', '.join(skipped_duplicates)}. Usa 'leer_acciones' para ver las acciones existentes.",
+                    status="error",
+                    tool_call_id=runtime.tool_call_id
+                )
+            return ToolMessage(
+                content="Error: No se pudo procesar ninguna acción válida",
+                status="error",
+                tool_call_id=runtime.tool_call_id
+            )
+        
+        # Insert actions
+        try:
+            actions_response = await supabase_async.table("actions").insert(actions_to_insert).execute()
+            print(f"[DEBUG] Created {len(actions_to_insert)} actions successfully in mode '{modo}'", flush=True)
+            
+            modo_msg = "agregadas" if modo == "append" else "insertadas"
+            response_msg = f"Se {modo_msg} {len(actions_to_insert)} acción(es) al ticket {ticket_id}"
+            
+            if skipped_duplicates:
+                response_msg += f". Se omitieron {len(skipped_duplicates)} acción(es) duplicada(s): {', '.join(skipped_duplicates)}"
+            
+            return ToolMessage(
+                content=response_msg,
+                tool_call_id=runtime.tool_call_id
+            )
+        except Exception as e:
+            print(f"[ERROR] Failed to insert actions: {str(e)}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return ToolMessage(
+                content=f"Error al insertar acciones: {str(e)}",
+                status="error",
+                tool_call_id=runtime.tool_call_id
+            )
+        
+    except Exception as e:
+        print(f"[ERROR] gestionar_acciones failed: {type(e).__name__}: {str(e)}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return ToolMessage(
+            content=f"Error al gestionar acciones: {str(e)}",
             status="error",
             tool_call_id=runtime.tool_call_id
         )

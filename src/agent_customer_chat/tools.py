@@ -1,7 +1,7 @@
 from langchain.tools import tool, ToolRuntime
 from langgraph.types import interrupt
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 from supabase import create_async_client
 
@@ -93,8 +93,8 @@ async def crear_solicitud(titulo: str, descripcion: str, runtime: ToolRuntime[Ap
             'description': descripcion,
             'status': 'open',
             'related_threads': [],
-            'created_at': datetime.now().isoformat(),
-            'updated_at': datetime.now().isoformat()
+            'created_at': datetime.now(timezone.utc).isoformat(),
+            'updated_at': datetime.now(timezone.utc).isoformat()
         }
         
         response = await supabase.table('tickets').insert(ticket_data).execute()
@@ -142,7 +142,7 @@ async def actualizar_solicitud(ticket_id: str, nuevo_estado: str, runtime: ToolR
         # Update ticket status
         update_data = {
             'status': nuevo_estado,
-            'updated_at': datetime.utcnow().isoformat()
+            'updated_at': datetime.now(timezone.utc).isoformat()
         }
         
         response = await supabase.table('tickets').update(update_data).eq('id', ticket_id).execute()

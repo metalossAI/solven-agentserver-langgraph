@@ -265,6 +265,9 @@ oficial_subagent = SubAgent(
     description="asistente para trabajar en escrituras notariales",
     system_prompt="",
     model=coding_llm,
+    skills=[
+        "/skills/",
+    ],
 )
 
 graph = create_deep_agent(

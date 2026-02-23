@@ -189,94 +189,153 @@ class SandboxBackend(BaseSandbox):
 	
 	def _update_system_skills(self) -> None:
 		"""
-		Clone Anthropic skills repo to /anthropic/ at root and keep it updated via git pull.
-		Agent will reference both /skills/ (user skills) and /anthropic/skills/ (system skills).
-		
-		This is the most elegant approach:
-		- No copying or symlinking needed
-		- Fast: git pull is very quick on subsequent runs
-		- Persistent: Repo lives at root directory
-		- Clean: Agent directly references the paths it needs
-		
-		Structure:
-		- /anthropic/              (Anthropic repo at root - git-managed)
+		Clone Anthropic skills repo to /anthropic/ and rsync selected skills into /skills/.
+
+		Clones (or pulls) the Anthropic skills repo at /anthropic/, then copies only the
+		docx, xlsx, pdf and pptx skills into /skills/ so the agent can find them alongside
+		user skills.
+
+		/skills/ is an R2-backed rclone FUSE mount. Writes go over the network, so we:
+		  - Skip skills that already exist in /skills/ (R2 persists across sandbox restarts
+		    for the same user, so they only need to be uploaded once).
+		  - Batch all four rsyncs into a single shell command to minimise round-trips.
+		  - Use a generous single timeout (300 s) for the whole operation.
+
+		Structure after sync:
+		- /anthropic/              (Anthropic repo - git-managed, staging area)
 		  └── skills/
 		      ├── docx/
 		      ├── pdf/
 		      ├── xlsx/
 		      └── pptx/
-		- /skills/escrituras/      (User's custom skills)
-		
-		Agent references:
-		- /skills/escrituras/ → User custom skill
-		- /anthropic/skills/docx/ → Office document skills
-		- /anthropic/skills/pdf/ → PDF skills
-		- /anthropic/skills/xlsx/ → Excel skills
-		- /anthropic/skills/pptx/ → PowerPoint skills
+		- /skills/                 (R2-mounted user skills bucket)
+		  ├── docx/                ← rsynced from /anthropic/skills/docx/
+		  ├── xlsx/                ← rsynced from /anthropic/skills/xlsx/
+		  ├── pdf/                 ← rsynced from /anthropic/skills/pdf/
+		  ├── pptx/                ← rsynced from /anthropic/skills/pptx/
+		  └── escrituras/          (user custom skill)
 		"""
+		SKILLS_TO_SYNC = ["docx", "xlsx", "pdf", "pptx"]
+		ALLOWED_SKILLS = SKILLS_TO_SYNC + ["escrituras"]
+
 		try:
 			repo_url = "https://github.com/anthropics/skills.git"
 			repo_dir = "/anthropic"
-			
-			# Create the directory first if it doesn't exist (use sudo for root directories)
-			print(f"[_update_system_skills] Creating directory {repo_dir}", flush=True)
+
+			# ── 1. Ensure staging directory exists ───────────────────────────
 			mkdir_result = self._sandbox.commands.run(
 				f"sudo mkdir -p {repo_dir} && sudo chown -R user:user {repo_dir}",
-				timeout=10
+				timeout=30
 			)
 			if mkdir_result.exit_code != 0:
-				print(f"[_update_system_skills] ⚠️  Failed to create directory: {mkdir_result.stderr}", flush=True)
+				print(f"[_update_system_skills] ⚠️  mkdir failed: {mkdir_result.stderr}", flush=True)
 			else:
-				print(f"[_update_system_skills] ✓ Directory created: {repo_dir}", flush=True)
-			
-			# Configure git to trust the directory
+				print(f"[_update_system_skills] ✓ Staging dir ready: {repo_dir}", flush=True)
+
 			self._sandbox.commands.run(
 				f"git config --global --add safe.directory {repo_dir}",
 				timeout=10
 			)
-			
-			# Check if repo exists
+
+			# ── 2. Clone or pull ─────────────────────────────────────────────
 			repo_check = self._sandbox.commands.run(
-				f"test -d {repo_dir}/.git && echo 'EXISTS' || echo 'NOT_FOUND'",
+				f"test -d {repo_dir}/.git && echo EXISTS || echo NOT_FOUND",
 				timeout=10
 			)
-			
+
 			if "EXISTS" in repo_check.stdout:
-				# Repo exists, just pull updates (very fast)
 				print(f"[_update_system_skills] Pulling latest Anthropic skills", flush=True)
 				pull_result = self._sandbox.commands.run(
 					f"cd {repo_dir} && git pull origin main",
-					timeout=60
+					timeout=90
 				)
 				if pull_result.exit_code == 0:
-					print(f"[_update_system_skills] ✓ System skills updated", flush=True)
+					print(f"[_update_system_skills] ✓ Repo updated", flush=True)
 				else:
-					print(f"[_update_system_skills] ⚠️  Git pull failed, using cached version", flush=True)
+					print(f"[_update_system_skills] ⚠️  git pull failed, using cached version", flush=True)
 			else:
-				# First time: clone the repo (happens once per user)
-				print(f"[_update_system_skills] Cloning Anthropic skills repo (first time setup)", flush=True)
+				print(f"[_update_system_skills] Cloning Anthropic skills repo (first time)", flush=True)
 				clone_result = self._sandbox.git.clone(
 					repo_url,
 					path=repo_dir,
-					depth=1  # Shallow clone for speed
+					depth=1
 				)
 				if clone_result.exit_code == 0:
-					print(f"[_update_system_skills] ✓ Anthropic skills cloned to {repo_dir}", flush=True)
+					print(f"[_update_system_skills] ✓ Cloned to {repo_dir}", flush=True)
 				else:
 					print(f"[_update_system_skills] ✗ Clone failed: {clone_result.stderr}", flush=True)
 					raise Exception(f"Failed to clone Anthropic skills: {clone_result.stderr}")
-			
-			# Verify skills are accessible
-			verify_result = self._sandbox.commands.run(
-				f"ls -d {repo_dir}/skills/*/ 2>/dev/null | wc -l",
-				timeout=10
+
+			# ── 3. Rsync all skills in one batched shell command ─────────────
+			# /skills/ is an rclone FUSE mount (R2). Writes are slow because each
+			# file goes over the network. To keep things fast on subsequent runs we
+			# skip any skill whose destination directory is already populated — R2
+			# persists across sandbox restarts for the same user.
+			#
+			# All four rsyncs run in a single commands.run call so we only pay the
+			# round-trip overhead once and use a single, generous timeout.
+			batch_script = ""
+			for skill in SKILLS_TO_SYNC:
+				src = f"{repo_dir}/skills/{skill}/"
+				dst = f"/skills/{skill}/"
+				batch_script += (
+					f"if [ -d {dst} ] && [ \"$(ls -A {dst} 2>/dev/null)\" ]; then "
+					f"  echo 'SKIP:{skill} already in /skills/'; "
+					f"else "
+					f"  mkdir -p {dst} && "
+					f"  rsync -a {src} {dst} && echo 'OK:{skill}' || echo 'FAIL:{skill}'; "
+					f"fi; "
+				)
+
+			print(f"[_update_system_skills] Syncing skills {SKILLS_TO_SYNC} → /skills/", flush=True)
+			sync_result = self._sandbox.commands.run(
+				f"bash -c '{batch_script}'",
+				timeout=300  # generous: writing to R2 via FUSE can be slow on first run
 			)
-			if verify_result.exit_code == 0:
-				skill_count = verify_result.stdout.strip()
-				print(f"[_update_system_skills] ✓ Found {skill_count} system skills in {repo_dir}/skills/", flush=True)
-			
-			print(f"[_update_system_skills] ✓ System skills ready (agent will reference {repo_dir}/skills/)", flush=True)
-			
+
+			for line in sync_result.stdout.splitlines():
+				line = line.strip()
+				if line.startswith("OK:"):
+					print(f"[_update_system_skills] ✓ Synced {line[3:]}", flush=True)
+				elif line.startswith("SKIP:"):
+					print(f"[_update_system_skills] ↩ {line[5:]}", flush=True)
+				elif line.startswith("FAIL:"):
+					print(f"[_update_system_skills] ⚠️  rsync failed for {line[5:]}", flush=True)
+
+			if sync_result.exit_code != 0:
+				print(f"[_update_system_skills] ⚠️  Batch sync stderr: {sync_result.stderr}", flush=True)
+
+			# ── 4. Purge any unexpected skill directories from /skills/ ──────
+			# /skills/ must contain ONLY the skills in ALLOWED_SKILLS. Anything
+			# else (stale uploads, leftover dirs, etc.) is removed so the agent's
+			# skill context stays clean and predictable.
+			allowed_list = " ".join(ALLOWED_SKILLS)
+			purge_script = (
+				f"ALLOWED='{allowed_list}'; "
+				"for dir in /skills/*/; do "
+				"  [ -d \"$dir\" ] || continue; "
+				"  name=$(basename \"$dir\"); "
+				"  if ! echo \"$ALLOWED\" | grep -qw \"$name\"; then "
+				"    rm -rf \"$dir\" && echo \"REMOVED:$name\" || echo \"REMOVE_FAIL:$name\"; "
+				"  fi; "
+				"done"
+			)
+			print(f"[_update_system_skills] Purging unexpected dirs from /skills/ (allowed: {ALLOWED_SKILLS})", flush=True)
+			purge_result = self._sandbox.commands.run(
+				f"bash -c '{purge_script}'",
+				timeout=60
+			)
+			for line in purge_result.stdout.splitlines():
+				line = line.strip()
+				if line.startswith("REMOVED:"):
+					print(f"[_update_system_skills] 🗑️  Removed unexpected skill: {line[8:]}", flush=True)
+				elif line.startswith("REMOVE_FAIL:"):
+					print(f"[_update_system_skills] ⚠️  Failed to remove: {line[12:]}", flush=True)
+			if not purge_result.stdout.strip():
+				print(f"[_update_system_skills] ✓ No unexpected dirs found", flush=True)
+
+			print(f"[_update_system_skills] ✓ System skills ready at /skills/", flush=True)
+
 		except Exception as e:
 			print(f"[_update_system_skills] ✗ Error updating system skills: {e}", flush=True)
 			import traceback
@@ -376,7 +435,7 @@ class SandboxBackend(BaseSandbox):
 				# Show rclone log if available
 				try:
 					log_result = self._sandbox.commands.run(
-						"tail -100 /tmp/rclone-thread.log 2>&1 || echo 'No log file'",
+						"sudo tail -100 /tmp/rclone-thread.log 2>&1 || echo 'No log file'",
 						timeout=10
 					)
 					log_output = log_result.stdout if log_result else "No log available"
@@ -411,7 +470,7 @@ class SandboxBackend(BaseSandbox):
 			
 			try:
 				log_result = self._sandbox.commands.run(
-					"tail -100 /tmp/rclone-thread.log 2>&1 || echo 'No log file'",
+					"sudo tail -100 /tmp/rclone-thread.log 2>&1 || echo 'No log file'",
 					timeout=10
 				)
 				ps_result = self._sandbox.commands.run(
@@ -446,7 +505,7 @@ class SandboxBackend(BaseSandbox):
 			# Catch any other exceptions and provide context
 			try:
 				log_result = self._sandbox.commands.run(
-					"tail -100 /tmp/rclone-thread.log 2>&1 || echo 'No log file'",
+					"sudo tail -100 /tmp/rclone-thread.log 2>&1 || echo 'No log file'",
 					timeout=10
 				)
 				log_output = log_result.stdout if log_result else "No log available"
@@ -667,12 +726,52 @@ class SandboxBackend(BaseSandbox):
 	async def awrite(self, file_path: str, content: str) -> WriteResult:
 		return await asyncio.to_thread(self.write, file_path, content)
 	
+	# ── Search-path guard ────────────────────────────────────────────────────
+	# Tools like glob_info / grep_raw operate recursively. Allowing path="/"
+	# (the base-class default) causes them to traverse the entire filesystem
+	# (including /anthropic/, /usr/, FUSE mounts, etc.) which is both slow and
+	# unsafe. All searches are restricted to /workspace and /skills.
+
+	_ALLOWED_SEARCH_ROOTS = ("/workspace", "/skills")
+
+	def _sanitize_search_path(self, path: str | None) -> str:
+		"""Clamp a search path to /workspace or /skills.
+
+		- None / empty / "." / "/" → /workspace (safe default)
+		- Already inside /workspace or /skills → returned as-is
+		- Anything else → /workspace (with a warning log)
+		"""
+		if not path or path in ("/", "."):
+			return self._workspace
+		for root in self._ALLOWED_SEARCH_ROOTS:
+			if path == root or path.startswith(root + "/"):
+				return path
+		print(
+			f"[SandboxBackend] ⚠️  Search path '{path}' is outside allowed roots "
+			f"{self._ALLOWED_SEARCH_ROOTS}, redirecting to /workspace",
+			flush=True,
+		)
+		return self._workspace
+
+	def glob_info(self, pattern: str, path: str = "/workspace") -> list[FileInfo]:
+		"""Glob within /workspace or /skills only (never the full filesystem)."""
+		return super().glob_info(pattern, self._sanitize_search_path(path))
+
+	def grep_raw(
+		self, pattern: str, path: str | None = None, glob: str | None = None
+	) -> list[GrepMatch] | str:
+		"""Grep within /workspace or /skills only (never the full filesystem)."""
+		return super().grep_raw(pattern, self._sanitize_search_path(path), glob)
+
 	async def agrep_raw(self, pattern: str, path: str | None = None, glob: str | None = None) -> list[GrepMatch] | str:
 		"""
 		Structured search results or error string for invalid input.
 		
 		Performs a recursive text search using grep with structured output (filename, line number, matching text).
 		This tool is designed for PRECISE searches, not for listing directory contents or broad exploratory searches.
+		
+		Search is restricted to /workspace and /skills. Any other path (including '/')
+		is silently redirected to /workspace.
 		
 		IMPORTANT: Avoid generic patterns that would match too many files:
 		- DO NOT use patterns like '*' or '**/*' in the glob parameter
@@ -685,12 +784,15 @@ class SandboxBackend(BaseSandbox):
 		"""
 		return await asyncio.to_thread(self.grep_raw, pattern, path, glob)
 	
-	async def aglob_info(self, pattern: str, path: str = "/") -> list[FileInfo]:
+	async def aglob_info(self, pattern: str, path: str = "/workspace") -> list[FileInfo]:
 		"""
 		Structured glob matching returning FileInfo dicts.
 		
 		Finds files and directories matching a glob pattern with structured output (path, is_dir).
 		This tool is designed for PRECISE file matching, not for listing entire directory trees or broad searches.
+		
+		Search is restricted to /workspace and /skills. Any other path (including '/')
+		is silently redirected to /workspace.
 		
 		IMPORTANT: Avoid generic patterns that would match too many files:
 		- DO NOT use patterns like '**/*' or '*' that would return thousands of files

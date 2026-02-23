@@ -50,21 +50,21 @@ sleep 3
 if ! ps -p ${RCLONE_PID} > /dev/null 2>&1; then
     echo "ERROR: rclone process died immediately" >&2
     echo "Check log file: ${LOG_FILE}" >&2
-    tail -20 "${LOG_FILE}" >&2 2>/dev/null || echo "No log available" >&2
+    sudo tail -20 "${LOG_FILE}" >&2 2>/dev/null || echo "No log available" >&2
     exit 1
 fi
 
-# Verify mount is accessible (with retry)
+# Verify mount is accessible (with retry). Use sudo so we run as same user that owns the mount.
 echo "[mount] Verifying mount accessibility..."
 for i in 1 2 3 4 5; do
-    if ls "${MOUNT_POINT}" >/dev/null 2>&1; then
+    if sudo ls "${MOUNT_POINT}" >/dev/null 2>&1; then
         echo "[mount] Mount verified on attempt $i"
         break
     fi
     if [ $i -eq 5 ]; then
         echo "ERROR: Mount point ${MOUNT_POINT} is not accessible after 5 attempts" >&2
         echo "Check log file: ${LOG_FILE}" >&2
-        tail -20 "${LOG_FILE}" >&2 2>/dev/null || echo "No log available" >&2
+        sudo tail -20 "${LOG_FILE}" >&2 2>/dev/null || echo "No log available" >&2
         exit 1
     fi
     echo "[mount] Attempt $i failed, retrying..."

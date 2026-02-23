@@ -639,7 +639,7 @@ class SandboxBackend(BaseSandbox):
 				exit_code=1,
 				truncated=False
 			)
-		wrapped_command = f"cd {shlex.quote(self._workspace)} && {command}"
+		wrapped_command = f"{command}"
 		try:
 			result = self._sandbox.commands.run(wrapped_command, timeout=500)
 		except Exception as e:
@@ -664,7 +664,7 @@ class SandboxBackend(BaseSandbox):
 	async def aexecute(self, command: str) -> ExecuteResponse:
 		"""Async version of execute."""
 		return await asyncio.to_thread(self.execute, command)
-	
+
 	def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
 		"""Upload multiple files to the sandbox."""
 		self._ensure_initialized()
@@ -720,91 +720,19 @@ class SandboxBackend(BaseSandbox):
 		"""Async version of download_files."""
 		return await asyncio.to_thread(self.download_files, paths)
 	
+	async def als_info(self, path: str = "/workspace") -> list[FileInfo]:
+		return await asyncio.to_thread(self.ls_info, path)
+	
 	async def aread(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
 		return await asyncio.to_thread(self.read, file_path, offset, limit)
 	
 	async def awrite(self, file_path: str, content: str) -> WriteResult:
 		return await asyncio.to_thread(self.write, file_path, content)
-	
-	# ── Search-path guard ────────────────────────────────────────────────────
-	# Tools like glob_info / grep_raw operate recursively. Allowing path="/"
-	# (the base-class default) causes them to traverse the entire filesystem
-	# (including /anthropic/, /usr/, FUSE mounts, etc.) which is both slow and
-	# unsafe. All searches are restricted to /workspace and /skills.
 
-	_ALLOWED_SEARCH_ROOTS = ("/workspace", "/skills")
-
-	def _sanitize_search_path(self, path: str | None) -> str:
-		"""Clamp a search path to /workspace or /skills.
-
-		- None / empty / "." / "/" → /workspace (safe default)
-		- Already inside /workspace or /skills → returned as-is
-		- Anything else → /workspace (with a warning log)
-		"""
-		if not path or path in ("/", "."):
-			return self._workspace
-		for root in self._ALLOWED_SEARCH_ROOTS:
-			if path == root or path.startswith(root + "/"):
-				return path
-		print(
-			f"[SandboxBackend] ⚠️  Search path '{path}' is outside allowed roots "
-			f"{self._ALLOWED_SEARCH_ROOTS}, redirecting to /workspace",
-			flush=True,
-		)
-		return self._workspace
-
-	def glob_info(self, pattern: str, path: str = "/workspace") -> list[FileInfo]:
-		"""Glob within /workspace or /skills only (never the full filesystem)."""
-		return super().glob_info(pattern, self._sanitize_search_path(path))
-
-	def grep_raw(
-		self, pattern: str, path: str | None = None, glob: str | None = None
-	) -> list[GrepMatch] | str:
-		"""Grep within /workspace or /skills only (never the full filesystem)."""
-		return super().grep_raw(pattern, self._sanitize_search_path(path), glob)
-
-	async def agrep_raw(self, pattern: str, path: str | None = None, glob: str | None = None) -> list[GrepMatch] | str:
-		"""
-		Structured search results or error string for invalid input.
-		
-		Performs a recursive text search using grep with structured output (filename, line number, matching text).
-		This tool is designed for PRECISE searches, not for listing directory contents or broad exploratory searches.
-		
-		Search is restricted to /workspace and /skills. Any other path (including '/')
-		is silently redirected to /workspace.
-		
-		IMPORTANT: Avoid generic patterns that would match too many files:
-		- DO NOT use patterns like '*' or '**/*' in the glob parameter
-		- DO NOT use overly broad search patterns that would return thousands of results
-		- Use specific file extensions in glob (e.g., '*.py', '*.tsx') when needed
-		- Use specific search terms in the pattern parameter
-		- Prefer searching in specific directories rather than the entire filesystem
-		
-		For listing directory contents, use list_files() or read_file() instead.
-		"""
+	async def agrep_raw(self, pattern: str, path: str | None = "/workspace", glob: str | None = None) -> list[GrepMatch] | str:
 		return await asyncio.to_thread(self.grep_raw, pattern, path, glob)
 	
 	async def aglob_info(self, pattern: str, path: str = "/workspace") -> list[FileInfo]:
-		"""
-		Structured glob matching returning FileInfo dicts.
-		
-		Finds files and directories matching a glob pattern with structured output (path, is_dir).
-		This tool is designed for PRECISE file matching, not for listing entire directory trees or broad searches.
-		
-		Search is restricted to /workspace and /skills. Any other path (including '/')
-		is silently redirected to /workspace.
-		
-		IMPORTANT: Avoid generic patterns that would match too many files:
-		- DO NOT use patterns like '**/*' or '*' that would return thousands of files
-		- DO NOT use this tool to list all contents of directories
-		- Use specific file extensions (e.g., '*.py', '*.tsx', '*.md')
-		- Use specific filename patterns (e.g., 'test_*.py', '*.config.js')
-		- Prefer searching in specific subdirectories rather than the root '/'
-		- Limit the scope of your search to relevant directories
-		
-		For listing directory contents, use list_files() instead.
-		For broad exploratory searches, consider using more specific tools or narrowing your search criteria first.
-		"""
 		return await asyncio.to_thread(self.glob_info, pattern, path)
 
 	@property

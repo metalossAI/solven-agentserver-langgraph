@@ -282,50 +282,31 @@ class SandboxBackend(BaseSandbox):
 						raise
 					_time.sleep(2)
 
-			# ── 3. Rsync all skills in one batched shell command ─────────────
-			# /skills/ is an rclone FUSE mount (R2). Writes are slow because each
-			# file goes over the network. To keep things fast on subsequent runs we
-			# skip any skill whose destination directory is already populated — R2
-			# persists across sandbox restarts for the same user.
-			#
-			# All four rsyncs run in a single commands.run call so we only pay the
-			# round-trip overhead once and use a single, generous timeout.
-			batch_script = ""
+			# ── 3. Copy anthropic skills into /skills/ using standard cp ─────
+			# /skills/ is an rclone FUSE mount (R2). Use cp -r instead of rsync for
+			# reliable copying; skip if destination already populated (R2 persists).
+			print(f"[_update_system_skills] Copying skills {SKILLS_TO_SYNC} → /skills/ (cp)", flush=True)
 			for skill in SKILLS_TO_SYNC:
-				src = f"{repo_dir}/skills/{skill}/"
-				dst = f"/skills/{skill}/"
-				batch_script += (
-					f"if [ -d {dst} ] && [ \"$(ls -A {dst} 2>/dev/null)\" ]; then "
-					f"  echo 'SKIP:{skill} already in /skills/'; "
-					f"else "
-					f"  mkdir -p {dst} && "
-					f"  rsync -a {src} {dst} && echo 'OK:{skill}' || echo 'FAIL:{skill}'; "
-					f"fi; "
+				src = f"{repo_dir}/skills/{skill}"
+				dst_dir = f"/skills/{skill}"
+				# Skip if destination already has content
+				check = self._sandbox.commands.run(
+					f"test -d {dst_dir} && ls -A {dst_dir} 2>/dev/null | head -1",
+					timeout=10
 				)
-
-			print(f"[_update_system_skills] Syncing skills {SKILLS_TO_SYNC} → /skills/", flush=True)
-			max_sync_retries = 2
-			sync_result = None
-			for sync_attempt in range(max_sync_retries + 1):
-				sync_result = self._sandbox.commands.run(
-					f"bash -c '{batch_script}'",
-					timeout=300  # generous: writing to R2 via FUSE can be slow on first run
+				if check.exit_code == 0 and (check.stdout or "").strip():
+					print(f"[_update_system_skills] ↩ {skill} already in /skills/", flush=True)
+					continue
+				self._sandbox.commands.run(f"mkdir -p {dst_dir}", timeout=10)
+				# cp -r src/. dst/ copies all contents (including hidden) into dst
+				copy_result = self._sandbox.commands.run(
+					f"cp -r {src}/. {dst_dir}/",
+					timeout=120
 				)
-				if sync_result.exit_code == 0:
-					break
-				if sync_attempt < max_sync_retries:
-					_time.sleep(2)
-			for line in (sync_result.stdout or "").splitlines():
-				line = line.strip()
-				if line.startswith("OK:"):
-					print(f"[_update_system_skills] ✓ Synced {line[3:]}", flush=True)
-				elif line.startswith("SKIP:"):
-					print(f"[_update_system_skills] ↩ {line[5:]}", flush=True)
-				elif line.startswith("FAIL:"):
-					print(f"[_update_system_skills] ⚠️  rsync failed for {line[5:]}", flush=True)
-
-			if sync_result.exit_code != 0:
-				print(f"[_update_system_skills] ⚠️  Batch sync stderr: {sync_result.stderr}", flush=True)
+				if copy_result.exit_code == 0:
+					print(f"[_update_system_skills] ✓ Copied {skill}", flush=True)
+				else:
+					print(f"[_update_system_skills] ⚠️  Copy failed for {skill}: {copy_result.stderr or copy_result.stdout}", flush=True)
 
 			# ── 4. Purge any unexpected skill directories from /skills/ ──────
 			# /skills/ must contain ONLY the skills in ALLOWED_SKILLS. Anything
@@ -654,8 +635,8 @@ class SandboxBackend(BaseSandbox):
 	def execute(self, command: str) -> ExecuteResponse:
 		"""Execute command directly in sandbox.
 		
-		Commands run from /workspace directory (default cwd). When ENABLE_SRT_ISOLATION is set,
-		commands are wrapped with SRT to restrict writes to /workspace and /skills.
+		Commands run from /workspace directory (default cwd). SRT is not used so that
+		the FUSE-mounted /workspace remains writable (SRT allowWrite fails with this setup).
 		"""
 		self._ensure_initialized()
 		
@@ -667,21 +648,13 @@ class SandboxBackend(BaseSandbox):
 				truncated=False
 			)
 		
-		# Default working directory is /workspace so agent-relative paths resolve correctly
+		# Default working directory is /workspace so agent-relative paths resolve correctly.
+		# We do not wrap with SRT here: SRT's allowWrite (allow-only pattern) does not work
+		# correctly with our FUSE-mounted /workspace under bubblewrap—writes are denied with
+		# "Read-only file system". Running without SRT keeps /workspace writable.
 		run_command = f"cd {self._workspace} && {command}"
-		use_srt = os.getenv("ENABLE_SRT_ISOLATION", "").lower() in ("1", "true", "yes")
-		
 		try:
-			if use_srt:
-				srt_cmd = f'srt --settings /root/.srt-settings.json bash -c {shlex.quote(run_command)}'
-				result = self._sandbox.commands.run(srt_cmd, timeout=500)
-				# Only fall back when SRT is missing (exit 127 / "command not found"), not when user command failed
-				stderr = (result.stderr or "")
-				if result.exit_code == 127 or "command not found" in stderr or "srt: not found" in stderr:
-					print("[execute] SRT unavailable, falling back to plain execution", flush=True)
-					result = self._sandbox.commands.run(run_command, timeout=500)
-			else:
-				result = self._sandbox.commands.run(run_command, timeout=500)
+			result = self._sandbox.commands.run(run_command, timeout=500)
 		except Exception as e:
 			return ExecuteResponse(
 				output=f"Error executing command: {str(e)}",

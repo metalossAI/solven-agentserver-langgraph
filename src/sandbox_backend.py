@@ -141,16 +141,18 @@ class SandboxBackend(BaseSandbox):
 			"USER_ID": str(self._user_id),
 		}
 		
-		# Add R2 credentials if present
-		if bucket := os.getenv("R2_BUCKET_NAME"):
+		# Env vars must match .env: S3_BUCKET_NAME, S3_ACCESS_KEY, S3_ACCESS_SECRET, S3_ENDPOINT_URL, S3_REGION
+		if bucket := os.getenv("S3_BUCKET_NAME") or os.getenv("R2_BUCKET_NAME"):
 			env_vars["S3_BUCKET_NAME"] = bucket
-		if access_key := os.getenv("R2_ACCESS_KEY_ID"):
+		access_key = os.getenv("S3_ACCESS_KEY") or os.getenv("R2_ACCESS_KEY_ID")
+		if access_key:
 			env_vars["S3_ACCESS_KEY_ID"] = access_key
-		if secret := os.getenv("R2_SECRET_ACCESS_KEY"):
+		secret = os.getenv("S3_ACCESS_SECRET") or os.getenv("R2_SECRET_ACCESS_KEY")
+		if secret:
 			env_vars["S3_ACCESS_SECRET"] = secret
-		if endpoint := os.getenv("R2_ENDPOINT_URL"):
+		if endpoint := os.getenv("S3_ENDPOINT_URL") or os.getenv("R2_ENDPOINT_URL"):
 			env_vars["S3_ENDPOINT_URL"] = endpoint
-		if region := os.getenv("R2_REGION"):
+		if region := os.getenv("S3_REGION") or os.getenv("R2_REGION"):
 			env_vars["S3_REGION"] = region
 		
 		self._sandbox = Sandbox.create(
@@ -305,16 +307,18 @@ class SandboxBackend(BaseSandbox):
 			print(f"[_sync_local_skills] ✗ Error syncing skills: {e}", flush=True)
 	
 	def _mount_r2_buckets(self) -> None:
-		"""Mount R2 buckets using rclone."""
+		"""Mount R2 buckets using rclone. /workspace = threads/{thread_id}, /skills = skills/{user_id}."""
+		print(f"[Mount] Ensuring R2 mounts: /workspace (threads/{self._thread_id}), /skills", flush=True)
 		
-		# Get credentials from environment (support both R2_ and S3_ prefixes)
-		bucket = os.getenv("R2_BUCKET_NAME") or os.getenv("S3_BUCKET_NAME", "solven-testing")
-		access_key = os.getenv("R2_ACCESS_KEY_ID") or os.getenv("S3_ACCESS_KEY_ID")
-		secret = os.getenv("R2_SECRET_ACCESS_KEY") or os.getenv("S3_ACCESS_SECRET")
-		endpoint = os.getenv("R2_ENDPOINT_URL") or os.getenv("S3_ENDPOINT_URL", "")
-		region = os.getenv("R2_REGION") or os.getenv("S3_REGION", "auto")
+		# Env vars must match .env: S3_BUCKET_NAME, S3_ACCESS_KEY, S3_ACCESS_SECRET, S3_ENDPOINT_URL, S3_REGION
+		bucket = os.getenv("S3_BUCKET_NAME") or os.getenv("R2_BUCKET_NAME") or "solven-testing"
+		access_key = os.getenv("S3_ACCESS_KEY") or os.getenv("R2_ACCESS_KEY_ID")
+		secret = os.getenv("S3_ACCESS_SECRET") or os.getenv("R2_SECRET_ACCESS_KEY")
+		endpoint = os.getenv("S3_ENDPOINT_URL") or os.getenv("R2_ENDPOINT_URL") or ""
+		region = os.getenv("S3_REGION") or os.getenv("R2_REGION") or "auto"
 		
 		if not access_key or not secret:
+			print("[Mount] Skipping R2 mount: S3_ACCESS_KEY or S3_ACCESS_SECRET not set", flush=True)
 			return
 	
 		# Upload mount scripts from files

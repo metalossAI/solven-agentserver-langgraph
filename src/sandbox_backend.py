@@ -124,16 +124,8 @@ class SandboxBackend(BaseSandbox):
 						self._sandbox = Sandbox.connect(sandbox_id)
 						print(f"[_ensure_initialized] ✓ Connected to existing sandbox: {sandbox_id}", flush=True)
 						
-						# Verify mounts are accessible
-						try:
-							check_result = self._sandbox.commands.run("test -d /skills && echo 'MOUNT_OK' || echo 'MOUNT_MISSING'", timeout=5)
-							mount_status = check_result.stdout.strip()
-							if "MOUNT_MISSING" in mount_status:
-								print(f"[_ensure_initialized] Mounts missing, remounting...", flush=True)
-								self._mount_r2_buckets()
-						except Exception as e:
-							print(f"[_ensure_initialized] Error checking mounts: {e}, attempting to mount...", flush=True)
-							self._mount_r2_buckets()
+						# Always mount R2 on startup: /workspace = threads/{thread_id}, /skills = skills/{user_id}
+						self._mount_r2_buckets()
 						
 						self._initialized = True
 						print(f"[_ensure_initialized] ✓ Reused existing sandbox", flush=True)
@@ -340,6 +332,7 @@ class SandboxBackend(BaseSandbox):
 			raise
 		
 		# Mount thread workspace to /workspace - critical, must succeed
+		print(f"[Mount] Mounting R2 workspace at {self._workspace} (threads/{self._thread_id})", flush=True)
 		# First ensure workspace directory exists
 		self._sandbox.commands.run(f"sudo mkdir -p {self._workspace}", timeout=30)
 		
@@ -406,6 +399,7 @@ class SandboxBackend(BaseSandbox):
 					f"Rclone process status: {ps_result.stdout}\n"
 					f"Check log: /tmp/rclone-thread.log"
 				)
+			print(f"[Mount] ✓ {self._workspace} mounted (threads/{self._thread_id})", flush=True)
 		except Exception as timeout_exc:
 			# Timeout or other exception occurred - try to get diagnostic info
 			is_timeout = isinstance(timeout_exc, TimeoutError) or "timeout" in str(timeout_exc).lower()

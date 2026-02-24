@@ -7,13 +7,13 @@ ARCHITECTURE OVERVIEW:
 Direct R2 Mounts:
 - **R2 Mounts**:
   - threads/{thread_id} -> /workspace
-  - skills/{user_id} -> /skills
+  - skills/{user_id} -> /skills/escrituras (user skills mount)
   - threads/{ticket_id} -> /ticket (optional, read-only)
 
 - **Agent View**:
-  - Works from /workspace directory
-  - Can access /skills and /ticket directly
-  - System directories available at root for python/node
+  - /skills contains only skill subdirs: Anthropic (docx, pdf, xlsx, pptx, ...) from repo's skills/ folder,
+    plus escrituras (S3 mount). Repo is cloned to a temp dir; only its skills/ contents are copied to /skills.
+  - Works from /workspace; can access /skills and /ticket directly
 """
 import json
 import os
@@ -42,13 +42,13 @@ class SandboxBackend(BaseSandbox):
 	
 	R2 Mounts:
 	- /workspace - threads/{thread_id}
-	- /skills - skills/{user_id}
+	- /skills/escrituras - skills/{user_id} (user skills mount)
 	- /ticket - threads/{ticket_id} (optional, read-only)
 	
-	Agent works from /workspace directory and can access:
-	- /workspace - user workspace files
-	- /skills - user skills
-	- /ticket - ticket files (read-only)
+	/skills contains only skill subdirs (docx, pdf, pptx, escrituras, ...). Repo is cloned to
+	a temp dir and only its skills/ folder is copied to /skills; escrituras is the S3 mount.
+	
+	Agent works from /workspace and can access /workspace, /skills, /ticket.
 	"""
 	
 	def __init__(self, runtime: ToolRuntime[AppContext]):
@@ -77,7 +77,9 @@ class SandboxBackend(BaseSandbox):
 		
 		# R2 mount paths
 		self._workspace = "/workspace"  # threads/{thread_id}
-		self._skills_mount = "/skills"  # skills/{user_id}
+		self._skills_base = "/skills"  # Only skill subdirs (docx, pdf, escrituras, ...); no repo root
+		self._skills_mount = "/skills/escrituras"  # S3 mount: skills/{user_id}
+		self._repo_clone_dir = "/tmp/anthropic-skills-repo"  # Full repo clone; we copy only skills/ to /skills
 		self._ticket_mount = "/ticket"  # threads/{ticket_id}
 		
 		# State
@@ -125,14 +127,19 @@ class SandboxBackend(BaseSandbox):
 						self._sandbox = Sandbox.connect(sandbox_id)
 						print(f"[_ensure_initialized] ✓ Connected to existing sandbox: {sandbox_id}", flush=True)
 						
-						# Verify mounts are accessible
+						# Verify mounts are accessible (escrituras mount must be present)
 						try:
-							check_result = self._sandbox.commands.run("test -d /skills && echo 'MOUNT_OK' || echo 'MOUNT_MISSING'", timeout=5)
+							check_result = self._sandbox.commands.run(
+								f"test -d {self._skills_mount} && ls {self._skills_mount} >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_MISSING'",
+								timeout=5
+							)
 							mount_status = check_result.stdout.strip()
 							if "MOUNT_MISSING" in mount_status:
 								print(f"[_ensure_initialized] Mounts missing, remounting...", flush=True)
 								self._mount_r2_buckets()
 								self._upload_srt_settings()
+								self._update_system_skills()
+								self._mount_user_skills()
 						except Exception as e:
 							print(f"[_ensure_initialized] Error checking mounts: {e}, attempting to mount...", flush=True)
 							self._mount_r2_buckets()
@@ -176,16 +183,19 @@ class SandboxBackend(BaseSandbox):
 		
 		print(f"[_ensure_initialized] ✓ Created new sandbox: {self._sandbox.sandbox_id}", flush=True)
 		
-		# Step 3: Mount R2 buckets for new sandbox
+		# Step 3: Mount workspace and prepare /skills (user skills mount is after clone)
 		self._mount_r2_buckets()
 		
 		# Step 3b: Upload SRT settings for command isolation (allow write only /workspace, /skills)
 		self._upload_srt_settings()
 		
-		# Step 4: Update system skills from official repo
+		# Step 4: Clone Anthropic repo to /skills (creates /skills/skills/ with docx, pdf, etc.)
 		self._update_system_skills()
 		
-		# Step 5: Sync local skills to sandbox
+		# Step 5: Mount user skills at /skills/escrituras (must be after _update_system_skills)
+		self._mount_user_skills()
+		
+		# Step 6: Sync local skills to sandbox
 		self._sync_local_skills()
 		
 		self._initialized = True
@@ -194,57 +204,32 @@ class SandboxBackend(BaseSandbox):
 	
 	def _update_system_skills(self) -> None:
 		"""
-		Clone Anthropic skills repo to /anthropic/ and rsync selected skills into /skills/.
-
-		Clones (or pulls) the Anthropic skills repo at /anthropic/, then copies only the
-		docx, xlsx, pdf and pptx skills into /skills/ so the agent can find them alongside
-		user skills.
-
-		/skills/ is an R2-backed rclone FUSE mount. Writes go over the network, so we:
-		  - Skip skills that already exist in /skills/ (R2 persists across sandbox restarts
-		    for the same user, so they only need to be uploaded once).
-		  - Batch all four rsyncs into a single shell command to minimise round-trips.
-		  - Use a generous single timeout (300 s) for the whole operation.
-
-		Structure after sync:
-		- /anthropic/              (Anthropic repo - git-managed, staging area)
-		  └── skills/
-		      ├── docx/
-		      ├── pdf/
-		      ├── xlsx/
-		      └── pptx/
-		- /skills/                 (R2-mounted user skills bucket)
-		  ├── docx/                ← rsynced from /anthropic/skills/docx/
-		  ├── xlsx/                ← rsynced from /anthropic/skills/xlsx/
-		  ├── pdf/                 ← rsynced from /anthropic/skills/pdf/
-		  ├── pptx/                ← rsynced from /anthropic/skills/pptx/
-		  └── escrituras/          (user custom skill)
+		Clone Anthropic repo to a temp dir and copy only the skills/ folder into /skills.
+		Result: /skills contains only skill subdirs (docx, pdf, pptx, ...). User skills
+		are mounted at /skills/escrituras in _mount_user_skills.
 		"""
-		SKILLS_TO_SYNC = ["docx", "xlsx", "pdf", "pptx"]
-		ALLOWED_SKILLS = SKILLS_TO_SYNC + ["escrituras"]
-
 		try:
 			repo_url = "https://github.com/anthropics/skills.git"
-			repo_dir = "/anthropic"
+			clone_dir = self._repo_clone_dir
+			skills_dest = self._skills_base  # /skills
 
-			# ── 1. Ensure staging directory exists ───────────────────────────
+			# Ensure /skills exists for the copy
 			mkdir_result = self._sandbox.commands.run(
-				f"sudo mkdir -p {repo_dir} && sudo chown -R user:user {repo_dir}",
+				f"sudo mkdir -p {skills_dest} && sudo chown -R user:user {skills_dest}",
 				timeout=30
 			)
 			if mkdir_result.exit_code != 0:
 				print(f"[_update_system_skills] ⚠️  mkdir failed: {mkdir_result.stderr}", flush=True)
 			else:
-				print(f"[_update_system_skills] ✓ Staging dir ready: {repo_dir}", flush=True)
+				print(f"[_update_system_skills] ✓ Dest dir ready: {skills_dest}", flush=True)
 
 			self._sandbox.commands.run(
-				f"git config --global --add safe.directory {repo_dir}",
+				f"git config --global --add safe.directory {clone_dir}",
 				timeout=10
 			)
 
-			# ── 2. Clone or pull (with retry) ───────────────────────────────
 			repo_check = self._sandbox.commands.run(
-				f"test -d {repo_dir}/.git && echo EXISTS || echo NOT_FOUND",
+				f"test -d {clone_dir}/.git && echo EXISTS || echo NOT_FOUND",
 				timeout=10
 			)
 			import time as _time
@@ -252,9 +237,9 @@ class SandboxBackend(BaseSandbox):
 			for repo_attempt in range(max_repo_retries + 1):
 				try:
 					if "EXISTS" in repo_check.stdout:
-						print(f"[_update_system_skills] Pulling latest Anthropic skills (attempt {repo_attempt + 1})", flush=True)
+						print(f"[_update_system_skills] Pulling latest (attempt {repo_attempt + 1})", flush=True)
 						pull_result = self._sandbox.commands.run(
-							f"cd {repo_dir} && git pull origin main",
+							f"cd {clone_dir} && git pull origin main",
 							timeout=90
 						)
 						if pull_result.exit_code == 0:
@@ -263,17 +248,17 @@ class SandboxBackend(BaseSandbox):
 						if repo_attempt < max_repo_retries:
 							_time.sleep(2)
 							continue
-						print(f"[_update_system_skills] ⚠️  git pull failed, using cached version", flush=True)
+						print(f"[_update_system_skills] ⚠️  git pull failed, using cached", flush=True)
 						break
 					else:
-						print(f"[_update_system_skills] Cloning Anthropic skills repo (attempt {repo_attempt + 1})", flush=True)
+						print(f"[_update_system_skills] Cloning to {clone_dir} (attempt {repo_attempt + 1})", flush=True)
 						clone_result = self._sandbox.git.clone(
 							repo_url,
-							path=repo_dir,
+							path=clone_dir,
 							depth=1
 						)
 						if clone_result.exit_code == 0:
-							print(f"[_update_system_skills] ✓ Cloned to {repo_dir}", flush=True)
+							print(f"[_update_system_skills] ✓ Cloned to {clone_dir}", flush=True)
 							break
 						raise Exception(clone_result.stderr or "Clone failed")
 				except Exception as repo_err:
@@ -282,62 +267,15 @@ class SandboxBackend(BaseSandbox):
 						raise
 					_time.sleep(2)
 
-			# ── 3. Copy anthropic skills into /skills/ using standard cp ─────
-			# /skills/ is an rclone FUSE mount (R2). Use cp -r instead of rsync for
-			# reliable copying; skip if destination already populated (R2 persists).
-			print(f"[_update_system_skills] Copying skills {SKILLS_TO_SYNC} → /skills/ (cp)", flush=True)
-			for skill in SKILLS_TO_SYNC:
-				src = f"{repo_dir}/skills/{skill}"
-				dst_dir = f"/skills/{skill}"
-				# Skip if destination already has content
-				check = self._sandbox.commands.run(
-					f"test -d {dst_dir} && ls -A {dst_dir} 2>/dev/null | head -1",
-					timeout=10
-				)
-				if check.exit_code == 0 and (check.stdout or "").strip():
-					print(f"[_update_system_skills] ↩ {skill} already in /skills/", flush=True)
-					continue
-				self._sandbox.commands.run(f"mkdir -p {dst_dir}", timeout=10)
-				# cp -r src/. dst/ copies all contents (including hidden) into dst
-				copy_result = self._sandbox.commands.run(
-					f"cp -r {src}/. {dst_dir}/",
-					timeout=120
-				)
-				if copy_result.exit_code == 0:
-					print(f"[_update_system_skills] ✓ Copied {skill}", flush=True)
-				else:
-					print(f"[_update_system_skills] ⚠️  Copy failed for {skill}: {copy_result.stderr or copy_result.stdout}", flush=True)
-
-			# ── 4. Purge any unexpected skill directories from /skills/ ──────
-			# /skills/ must contain ONLY the skills in ALLOWED_SKILLS. Anything
-			# else (stale uploads, leftover dirs, etc.) is removed so the agent's
-			# skill context stays clean and predictable.
-			allowed_list = " ".join(ALLOWED_SKILLS)
-			purge_script = (
-				f"ALLOWED='{allowed_list}'; "
-				"for dir in /skills/*/; do "
-				"  [ -d \"$dir\" ] || continue; "
-				"  name=$(basename \"$dir\"); "
-				"  if ! echo \"$ALLOWED\" | grep -qw \"$name\"; then "
-				"    rm -rf \"$dir\" && echo \"REMOVED:$name\" || echo \"REMOVE_FAIL:$name\"; "
-				"  fi; "
-				"done"
+			# Copy only repo's skills/ contents into /skills (exclude escrituras so mount is not overwritten)
+			copy_result = self._sandbox.commands.run(
+				f"rsync -a --exclude=escrituras {clone_dir}/skills/ {skills_dest}/",
+				timeout=120
 			)
-			print(f"[_update_system_skills] Purging unexpected dirs from /skills/ (allowed: {ALLOWED_SKILLS})", flush=True)
-			purge_result = self._sandbox.commands.run(
-				f"bash -c '{purge_script}'",
-				timeout=60
-			)
-			for line in purge_result.stdout.splitlines():
-				line = line.strip()
-				if line.startswith("REMOVED:"):
-					print(f"[_update_system_skills] 🗑️  Removed unexpected skill: {line[8:]}", flush=True)
-				elif line.startswith("REMOVE_FAIL:"):
-					print(f"[_update_system_skills] ⚠️  Failed to remove: {line[12:]}", flush=True)
-			if not purge_result.stdout.strip():
-				print(f"[_update_system_skills] ✓ No unexpected dirs found", flush=True)
-
-			print(f"[_update_system_skills] ✓ System skills ready at /skills/", flush=True)
+			if copy_result.exit_code != 0:
+				print(f"[_update_system_skills] ⚠️  rsync failed: {copy_result.stderr}", flush=True)
+			else:
+				print(f"[_update_system_skills] ✓ Synced skills to {skills_dest}", flush=True)
 
 		except Exception as e:
 			print(f"[_update_system_skills] ✗ Error updating system skills: {e}", flush=True)
@@ -359,11 +297,8 @@ class SandboxBackend(BaseSandbox):
 				with open(escrituras_skill_path, 'r', encoding='utf-8') as f:
 					skill_content = f.read()
 				
-				# Ensure /skills/escrituras directory exists
-				self._sandbox.commands.run("mkdir -p /skills/escrituras", timeout=10)
-				
-				# Write skill file to sandbox
-				self._sandbox.files.write("/skills/escrituras/SKILL.md", skill_content)
+				# Write skill file into user skills mount (/skills/escrituras)
+				self._sandbox.files.write(f"{self._skills_mount}/SKILL.md", skill_content)
 				print(f"[_sync_local_skills] ✓ Synced escrituras/SKILL.md", flush=True)
 			else:
 				print(f"[_sync_local_skills] escrituras/SKILL.md not found at {escrituras_skill_path}", flush=True)
@@ -520,24 +455,8 @@ class SandboxBackend(BaseSandbox):
 				f"Log output:\n{log_output}"
 			)
 		
-		# Mount user skills directory to /skills
-		try:
-			result = self._sandbox.commands.run(
-				f'bash /tmp/mount_s3_path.sh "{bucket}" "skills/{self._user_id}" "{self._skills_mount}" "/tmp/rclone-skills-user.log"',
-				timeout=500
-			)
-			if result.exit_code != 0:
-				raise RuntimeError(f"Failed to mount user skills (exit {result.exit_code})")
-			
-			import time
-			time.sleep(2)
-			verify_mount = self._sandbox.commands.run(
-				f"test -d {self._skills_mount} && ls {self._skills_mount} >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
-				timeout=10
-			)
-			print(f"[Mount] {self._skills_mount} mount check: {verify_mount.stdout}", flush=True)
-		except Exception as e:
-			raise
+		# User skills mount is at /skills/escrituras (done in _mount_user_skills after _update_system_skills)
+		self._sandbox.commands.run(f"sudo mkdir -p {self._skills_base}", timeout=30)
 		
 		# Mount ticket if exists (optional, read-only) to /ticket
 		if self._ticket_id:
@@ -565,6 +484,27 @@ class SandboxBackend(BaseSandbox):
 				print(f"[Mount] {self._ticket_mount} mount check: {verify_mount.stdout}", flush=True)
 			except Exception as e:
 				pass
+	
+	def _mount_user_skills(self) -> None:
+		"""Mount S3 skills/{user_id} at /skills/escrituras. Call after _update_system_skills so /skills exists."""
+		bucket = os.getenv("R2_BUCKET_NAME") or os.getenv("S3_BUCKET_NAME", "solven-testing")
+		self._sandbox.commands.run(f"sudo mkdir -p {self._skills_mount}", timeout=30)
+		try:
+			result = self._sandbox.commands.run(
+				f'bash /tmp/mount_s3_path.sh "{bucket}" "skills/{self._user_id}" "{self._skills_mount}" "/tmp/rclone-skills-user.log"',
+				timeout=500
+			)
+			if result.exit_code != 0:
+				raise RuntimeError(f"Failed to mount user skills (exit {result.exit_code})")
+			import time
+			time.sleep(2)
+			verify_mount = self._sandbox.commands.run(
+				f"test -d {self._skills_mount} && ls {self._skills_mount} >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
+				timeout=10
+			)
+			print(f"[Mount] {self._skills_mount} mount check: {verify_mount.stdout}", flush=True)
+		except Exception as e:
+			raise
 	
 	def _upload_mount_scripts(self) -> None:
 		"""Upload rclone mount scripts to sandbox from files."""
@@ -604,8 +544,8 @@ class SandboxBackend(BaseSandbox):
 		SRT_SETTINGS = {
 			"filesystem": {
 				"denyRead": [],
-				"allowWrite": [self._workspace, self._skills_mount],
-				"denyWrite": [self._ticket_mount, "/anthropic", "/root", "/etc", "/usr"],
+				"allowWrite": [self._workspace, self._skills_base],
+				"denyWrite": [self._ticket_mount, "/root", "/etc", "/usr"],
 			},
 			"network": {
 				"allowedDomains": [
@@ -654,7 +594,7 @@ class SandboxBackend(BaseSandbox):
 		# "Read-only file system". Running without SRT keeps /workspace writable.
 		run_command = f"cd {self._workspace} && {command}"
 		try:
-			result = self._sandbox.commands.run(run_command, timeout=500)
+			result = self._sandbox.commands.run(run_command, timeout=1200)
 		except Exception as e:
 			return ExecuteResponse(
 				output=f"Error executing command: {str(e)}",

@@ -5,11 +5,12 @@
 #   $2: S3 path (e.g., "threads/thread-123")
 #   $3: Local mount point (e.g., "/mnt/r2/threads/thread-123")
 #   $4: Log file path (e.g., "/tmp/rclone-thread.log")
+#   $5: Optional. If "read-only", mount is read-only.
 
 set -e
 
-if [ $# -ne 4 ]; then
-    echo "ERROR: Usage: $0 <bucket> <s3_path> <mount_point> <log_file>" >&2
+if [ $# -lt 4 ]; then
+    echo "ERROR: Usage: $0 <bucket> <s3_path> <mount_point> <log_file> [read-only]" >&2
     exit 1
 fi
 
@@ -17,6 +18,10 @@ BUCKET="$1"
 S3_PATH="$2"
 MOUNT_POINT="$3"
 LOG_FILE="$4"
+READONLY_ARG=""
+if [ $# -ge 5 ] && [ "$5" = "read-only" ]; then
+    READONLY_ARG="--read-only"
+fi
 
 echo "[mount] Creating mount point: ${MOUNT_POINT}"
 # Create mount point
@@ -25,12 +30,13 @@ if ! sudo mkdir -p "${MOUNT_POINT}"; then
     exit 1
 fi
 
-echo "[mount] Mounting s3remote:${BUCKET}/${S3_PATH} to ${MOUNT_POINT}"
+echo "[mount] Mounting s3remote:${BUCKET}/${S3_PATH} to ${MOUNT_POINT} ${READONLY_ARG}"
 # Mount with rclone in background using nohup (more reliable than --daemon)
 nohup sudo rclone --config /root/.config/rclone/rclone.conf mount \
   "s3remote:${BUCKET}/${S3_PATH}" \
   "${MOUNT_POINT}" \
   --allow-other \
+  ${READONLY_ARG} \
   --vfs-cache-mode full \
   --vfs-write-back 1s \
   --poll-interval 2s \

@@ -65,8 +65,11 @@ template = (
     # Workspace isolation and utilities
     .apt_install([
         "bubblewrap",    # Filesystem isolation (mount workspace as /)
-        "ripgrep",       # Fast file search (rg) - useful for grep operations
+        "ripgrep",      # Fast file search (rg) - useful for grep operations
+        "socat",        # SRT proxy bridging on Linux
     ])
+    # Anthropic Sandbox Runtime (SRT) for command isolation
+    .npm_install(["@anthropic-ai/sandbox-runtime"], g=True)
     # ============================================================================
     # Python Package Manager (uv)
     # ============================================================================

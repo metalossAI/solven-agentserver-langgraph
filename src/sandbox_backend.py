@@ -15,6 +15,7 @@ Direct R2 Mounts:
   - Can access /skills and /ticket directly
   - System directories available at root for python/node
 """
+import json
 import os
 import re
 import shlex
@@ -131,6 +132,7 @@ class SandboxBackend(BaseSandbox):
 							if "MOUNT_MISSING" in mount_status:
 								print(f"[_ensure_initialized] Mounts missing, remounting...", flush=True)
 								self._mount_r2_buckets()
+								self._upload_srt_settings()
 						except Exception as e:
 							print(f"[_ensure_initialized] Error checking mounts: {e}, attempting to mount...", flush=True)
 							self._mount_r2_buckets()
@@ -176,6 +178,9 @@ class SandboxBackend(BaseSandbox):
 		
 		# Step 3: Mount R2 buckets for new sandbox
 		self._mount_r2_buckets()
+		
+		# Step 3b: Upload SRT settings for command isolation (allow write only /workspace, /skills)
+		self._upload_srt_settings()
 		
 		# Step 4: Update system skills from official repo
 		self._update_system_skills()
@@ -237,34 +242,45 @@ class SandboxBackend(BaseSandbox):
 				timeout=10
 			)
 
-			# ── 2. Clone or pull ─────────────────────────────────────────────
+			# ── 2. Clone or pull (with retry) ───────────────────────────────
 			repo_check = self._sandbox.commands.run(
 				f"test -d {repo_dir}/.git && echo EXISTS || echo NOT_FOUND",
 				timeout=10
 			)
-
-			if "EXISTS" in repo_check.stdout:
-				print(f"[_update_system_skills] Pulling latest Anthropic skills", flush=True)
-				pull_result = self._sandbox.commands.run(
-					f"cd {repo_dir} && git pull origin main",
-					timeout=90
-				)
-				if pull_result.exit_code == 0:
-					print(f"[_update_system_skills] ✓ Repo updated", flush=True)
-				else:
-					print(f"[_update_system_skills] ⚠️  git pull failed, using cached version", flush=True)
-			else:
-				print(f"[_update_system_skills] Cloning Anthropic skills repo (first time)", flush=True)
-				clone_result = self._sandbox.git.clone(
-					repo_url,
-					path=repo_dir,
-					depth=1
-				)
-				if clone_result.exit_code == 0:
-					print(f"[_update_system_skills] ✓ Cloned to {repo_dir}", flush=True)
-				else:
-					print(f"[_update_system_skills] ✗ Clone failed: {clone_result.stderr}", flush=True)
-					raise Exception(f"Failed to clone Anthropic skills: {clone_result.stderr}")
+			import time as _time
+			max_repo_retries = 2
+			for repo_attempt in range(max_repo_retries + 1):
+				try:
+					if "EXISTS" in repo_check.stdout:
+						print(f"[_update_system_skills] Pulling latest Anthropic skills (attempt {repo_attempt + 1})", flush=True)
+						pull_result = self._sandbox.commands.run(
+							f"cd {repo_dir} && git pull origin main",
+							timeout=90
+						)
+						if pull_result.exit_code == 0:
+							print(f"[_update_system_skills] ✓ Repo updated", flush=True)
+							break
+						if repo_attempt < max_repo_retries:
+							_time.sleep(2)
+							continue
+						print(f"[_update_system_skills] ⚠️  git pull failed, using cached version", flush=True)
+						break
+					else:
+						print(f"[_update_system_skills] Cloning Anthropic skills repo (attempt {repo_attempt + 1})", flush=True)
+						clone_result = self._sandbox.git.clone(
+							repo_url,
+							path=repo_dir,
+							depth=1
+						)
+						if clone_result.exit_code == 0:
+							print(f"[_update_system_skills] ✓ Cloned to {repo_dir}", flush=True)
+							break
+						raise Exception(clone_result.stderr or "Clone failed")
+				except Exception as repo_err:
+					if repo_attempt >= max_repo_retries:
+						print(f"[_update_system_skills] ✗ Clone failed: {repo_err}", flush=True)
+						raise
+					_time.sleep(2)
 
 			# ── 3. Rsync all skills in one batched shell command ─────────────
 			# /skills/ is an rclone FUSE mount (R2). Writes are slow because each
@@ -288,12 +304,18 @@ class SandboxBackend(BaseSandbox):
 				)
 
 			print(f"[_update_system_skills] Syncing skills {SKILLS_TO_SYNC} → /skills/", flush=True)
-			sync_result = self._sandbox.commands.run(
-				f"bash -c '{batch_script}'",
-				timeout=300  # generous: writing to R2 via FUSE can be slow on first run
-			)
-
-			for line in sync_result.stdout.splitlines():
+			max_sync_retries = 2
+			sync_result = None
+			for sync_attempt in range(max_sync_retries + 1):
+				sync_result = self._sandbox.commands.run(
+					f"bash -c '{batch_script}'",
+					timeout=300  # generous: writing to R2 via FUSE can be slow on first run
+				)
+				if sync_result.exit_code == 0:
+					break
+				if sync_attempt < max_sync_retries:
+					_time.sleep(2)
+			for line in (sync_result.stdout or "").splitlines():
 				line = line.strip()
 				if line.startswith("OK:"):
 					print(f"[_update_system_skills] ✓ Synced {line[3:]}", flush=True)
@@ -517,17 +539,8 @@ class SandboxBackend(BaseSandbox):
 				f"Log output:\n{log_output}"
 			)
 		
-		# Mount user skills directory to /mnt/skills
+		# Mount user skills directory to /skills
 		try:
-			# Ensure parent directory exists and is visible
-			self._sandbox.commands.run("sudo mkdir -p /mnt", timeout=30)
-			# Verify mnt directory exists and is accessible
-			verify_mnt = self._sandbox.commands.run(
-				"test -d /mnt && ls -la /mnt >/dev/null 2>&1 && echo 'MNT_OK' || echo 'MNT_FAILED'",
-				timeout=10
-			)
-			print(f"[Mount] /mnt directory check: {verify_mnt.stdout}", flush=True)
-			
 			result = self._sandbox.commands.run(
 				f'bash /tmp/mount_s3_path.sh "{bucket}" "skills/{self._user_id}" "{self._skills_mount}" "/tmp/rclone-skills-user.log"',
 				timeout=500
@@ -535,44 +548,40 @@ class SandboxBackend(BaseSandbox):
 			if result.exit_code != 0:
 				raise RuntimeError(f"Failed to mount user skills (exit {result.exit_code})")
 			
-			# Verify mount is accessible
 			import time
 			time.sleep(2)
 			verify_mount = self._sandbox.commands.run(
-				"test -d /mnt/skills && ls /mnt/skills >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
+				f"test -d {self._skills_mount} && ls {self._skills_mount} >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
 				timeout=10
 			)
-			print(f"[Mount] /mnt/skills mount check: {verify_mount.stdout}", flush=True)
+			print(f"[Mount] {self._skills_mount} mount check: {verify_mount.stdout}", flush=True)
 		except Exception as e:
 			raise
 		
-		# Mount ticket if exists (optional) to /.ticket
+		# Mount ticket if exists (optional, read-only) to /ticket
 		if self._ticket_id:
 			try:
-				# Ensure parent directory exists and is visible
-				self._sandbox.commands.run("sudo mkdir -p /.ticket", timeout=30)
-				# Verify .ticket directory exists
+				self._sandbox.commands.run(f"sudo mkdir -p {self._ticket_mount}", timeout=30)
 				verify_ticket = self._sandbox.commands.run(
-					"test -d /.ticket && ls -la /.ticket >/dev/null 2>&1 && echo 'TICKET_OK' || echo 'TICKET_FAILED'",
+					f"test -d {self._ticket_mount} && ls -la {self._ticket_mount} >/dev/null 2>&1 && echo 'TICKET_OK' || echo 'TICKET_FAILED'",
 					timeout=10
 				)
-				print(f"[Mount] .ticket directory check: {verify_ticket.stdout}", flush=True)
+				print(f"[Mount] {self._ticket_mount} directory check: {verify_ticket.stdout}", flush=True)
 				
 				result = self._sandbox.commands.run(
-					f'bash /tmp/mount_s3_path.sh "{bucket}" "threads/{self._ticket_id}" "{self._ticket_mount}" "/tmp/rclone-ticket.log"',
+					f'bash /tmp/mount_s3_path.sh "{bucket}" "threads/{self._ticket_id}" "{self._ticket_mount}" "/tmp/rclone-ticket.log" "read-only"',
 					timeout=500
 				)
 				if result.exit_code != 0:
 					raise RuntimeError(f"Failed to mount ticket workspace (exit {result.exit_code})")
 				
-				# Verify mount is accessible
 				import time
 				time.sleep(2)
 				verify_mount = self._sandbox.commands.run(
-					"test -d /.ticket && ls /.ticket >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
+					f"test -d {self._ticket_mount} && ls {self._ticket_mount} >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
 					timeout=10
 				)
-				print(f"[Mount] .ticket mount check: {verify_mount.stdout}", flush=True)
+				print(f"[Mount] {self._ticket_mount} mount check: {verify_mount.stdout}", flush=True)
 			except Exception as e:
 				pass
 	
@@ -609,6 +618,26 @@ class SandboxBackend(BaseSandbox):
 		if chmod_result.exit_code != 0:
 			raise RuntimeError(f"Failed to make scripts executable: {chmod_result.stderr}")
 	
+	def _upload_srt_settings(self) -> None:
+		"""Upload SRT (Anthropic Sandbox Runtime) settings to sandbox. Restricts writes to /workspace and /skills."""
+		SRT_SETTINGS = {
+			"filesystem": {
+				"denyRead": [],
+				"allowWrite": [self._workspace, self._skills_mount],
+				"denyWrite": [self._ticket_mount, "/anthropic", "/root", "/etc", "/usr"],
+			},
+			"network": {
+				"allowedDomains": [
+					"pypi.org", "*.pypi.org", "files.pythonhosted.org",
+					"npmjs.org", "*.npmjs.org", "registry.npmjs.org",
+					"github.com", "*.github.com",
+				],
+				"deniedDomains": [],
+			},
+		}
+		self._sandbox.files.write("/root/.srt-settings.json", json.dumps(SRT_SETTINGS, indent=2))
+		print("[_upload_srt_settings] ✓ SRT settings written to /root/.srt-settings.json", flush=True)
+	
 	def _filter_unwanted_commands(self, command: str) -> Optional[str]:
 		"""Block dangerous commands."""
 		unwanted = {
@@ -625,10 +654,8 @@ class SandboxBackend(BaseSandbox):
 	def execute(self, command: str) -> ExecuteResponse:
 		"""Execute command directly in sandbox.
 		
-		Commands run from /workspace directory where:
-		- /workspace contains user workspace files
-		- /skills contains user skills
-		- /ticket contains ticket files (read-only)
+		Commands run from /workspace directory (default cwd). When ENABLE_SRT_ISOLATION is set,
+		commands are wrapped with SRT to restrict writes to /workspace and /skills.
 		"""
 		self._ensure_initialized()
 		
@@ -639,9 +666,22 @@ class SandboxBackend(BaseSandbox):
 				exit_code=1,
 				truncated=False
 			)
-		wrapped_command = f"{command}"
+		
+		# Default working directory is /workspace so agent-relative paths resolve correctly
+		run_command = f"cd {self._workspace} && {command}"
+		use_srt = os.getenv("ENABLE_SRT_ISOLATION", "").lower() in ("1", "true", "yes")
+		
 		try:
-			result = self._sandbox.commands.run(wrapped_command, timeout=500)
+			if use_srt:
+				srt_cmd = f'srt --settings /root/.srt-settings.json bash -c {shlex.quote(run_command)}'
+				result = self._sandbox.commands.run(srt_cmd, timeout=500)
+				# Only fall back when SRT is missing (exit 127 / "command not found"), not when user command failed
+				stderr = (result.stderr or "")
+				if result.exit_code == 127 or "command not found" in stderr or "srt: not found" in stderr:
+					print("[execute] SRT unavailable, falling back to plain execution", flush=True)
+					result = self._sandbox.commands.run(run_command, timeout=500)
+			else:
+				result = self._sandbox.commands.run(run_command, timeout=500)
 		except Exception as e:
 			return ExecuteResponse(
 				output=f"Error executing command: {str(e)}",
@@ -652,7 +692,7 @@ class SandboxBackend(BaseSandbox):
 		# Flush filesystem changes to ensure FUSE mounts see them
 		try:
 			self._sandbox.commands.run("sync", timeout=500)
-		except:
+		except Exception:
 			pass  # Sync failures are not critical
 		
 		return ExecuteResponse(
@@ -734,11 +774,4 @@ class SandboxBackend(BaseSandbox):
 	
 	async def aglob_info(self, pattern: str, path: str = "/workspace") -> list[FileInfo]:
 		return await asyncio.to_thread(self.glob_info, pattern, path)
-
-	@property
-	def id(self) -> str:
-		"""Unique identifier for the sandbox backend instance."""
-		if self._sandbox:
-			return self._sandbox.sandbox_id
-		return "uninitialized"
 

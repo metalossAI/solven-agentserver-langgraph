@@ -69,7 +69,7 @@ template = (
         "socat",        # SRT proxy bridging on Linux
     ])
     # Anthropic Sandbox Runtime (SRT) for command isolation
-    .npm_install(["@anthropic-ai/sandbox-runtime"], global=True)
+    .npm_install(["@anthropic-ai/sandbox-runtime"], g=True)
     # ============================================================================
     # Python Package Manager (uv)
     # ============================================================================

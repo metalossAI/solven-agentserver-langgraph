@@ -189,34 +189,11 @@ class SandboxBackend(BaseSandbox):
 	
 	def _update_system_skills(self) -> None:
 		"""
-		Clone Anthropic skills repo to /anthropic/ and rsync selected skills into /skills/.
-
-		Clones (or pulls) the Anthropic skills repo at /anthropic/, then copies only the
-		docx, xlsx, pdf and pptx skills into /skills/ so the agent can find them alongside
-		user skills.
-
-		/skills/ is an R2-backed rclone FUSE mount. Writes go over the network, so we:
-		  - Skip skills that already exist in /skills/ (R2 persists across sandbox restarts
-		    for the same user, so they only need to be uploaded once).
-		  - Batch all four rsyncs into a single shell command to minimise round-trips.
-		  - Use a generous single timeout (300 s) for the whole operation.
-
-		Structure after sync:
-		- /anthropic/              (Anthropic repo - git-managed, staging area)
-		  └── skills/
-		      ├── docx/
-		      ├── pdf/
-		      ├── xlsx/
-		      └── pptx/
-		- /skills/                 (R2-mounted user skills bucket)
-		  ├── docx/                ← rsynced from /anthropic/skills/docx/
-		  ├── xlsx/                ← rsynced from /anthropic/skills/xlsx/
-		  ├── pdf/                 ← rsynced from /anthropic/skills/pdf/
-		  ├── pptx/                ← rsynced from /anthropic/skills/pptx/
-		  └── escrituras/          (user custom skill)
+		Ensure Anthropic skills repo at /anthropic: clone if missing, pull if present.
+		Then rsync only the skills we need (docx, pdf) into /skills. (R2 FUSE does not support symlinks on the mount.)
 		"""
-		SKILLS_TO_SYNC = ["docx", "xlsx", "pdf", "pptx"]
-		ALLOWED_SKILLS = SKILLS_TO_SYNC + ["escrituras"]
+		SKILLS_TO_LINK = ["docx", "pdf"]
+		ALLOWED_SKILLS = SKILLS_TO_LINK + ["escrituras"]
 
 		try:
 			repo_url = "https://github.com/anthropics/skills.git"
@@ -237,7 +214,7 @@ class SandboxBackend(BaseSandbox):
 				timeout=10
 			)
 
-			# ── 2. Clone or pull ─────────────────────────────────────────────
+			# ── 2. Clone if not found, else pull (using E2B sandbox.git API) ─
 			repo_check = self._sandbox.commands.run(
 				f"test -d {repo_dir}/.git && echo EXISTS || echo NOT_FOUND",
 				timeout=10
@@ -245,96 +222,61 @@ class SandboxBackend(BaseSandbox):
 
 			if "EXISTS" in repo_check.stdout:
 				print(f"[_update_system_skills] Pulling latest Anthropic skills", flush=True)
-				pull_result = self._sandbox.commands.run(
-					f"cd {repo_dir} && git pull origin main",
-					timeout=90
-				)
-				if pull_result.exit_code == 0:
+				try:
+					self._sandbox.git.pull(repo_dir, remote="origin", branch="main")
 					print(f"[_update_system_skills] ✓ Repo updated", flush=True)
-				else:
-					print(f"[_update_system_skills] ⚠️  git pull failed, using cached version", flush=True)
+				except Exception as pull_err:
+					print(f"[_update_system_skills] ⚠️  git pull failed, using cached version: {pull_err}", flush=True)
 			else:
-				print(f"[_update_system_skills] Cloning Anthropic skills repo (first time)", flush=True)
-				clone_result = self._sandbox.git.clone(
-					repo_url,
-					path=repo_dir,
-					depth=1
-				)
-				if clone_result.exit_code == 0:
+				print(f"[_update_system_skills] Cloning Anthropic skills repo", flush=True)
+				try:
+					self._sandbox.git.clone(repo_url, path=repo_dir, depth=1, branch="main")
 					print(f"[_update_system_skills] ✓ Cloned to {repo_dir}", flush=True)
-				else:
-					print(f"[_update_system_skills] ✗ Clone failed: {clone_result.stderr}", flush=True)
-					raise Exception(f"Failed to clone Anthropic skills: {clone_result.stderr}")
+				except Exception as clone_err:
+					print(f"[_update_system_skills] ✗ Clone failed: {clone_err}", flush=True)
+					raise
 
-			# ── 3. Rsync all skills in one batched shell command ─────────────
-			# /skills/ is an rclone FUSE mount (R2). Writes are slow because each
-			# file goes over the network. To keep things fast on subsequent runs we
-			# skip any skill whose destination directory is already populated — R2
-			# persists across sandbox restarts for the same user.
-			#
-			# All four rsyncs run in a single commands.run call so we only pay the
-			# round-trip overhead once and use a single, generous timeout.
-			batch_script = ""
-			for skill in SKILLS_TO_SYNC:
+			# ── 3. Copy skills we need (docx, pdf) into /skills ─────────────────
+			# R2 FUSE mount does not support creating symlinks; use rsync instead.
+			for skill in SKILLS_TO_LINK:
 				src = f"{repo_dir}/skills/{skill}/"
 				dst = f"/skills/{skill}/"
-				batch_script += (
-					f"if [ -d {dst} ] && [ \"$(ls -A {dst} 2>/dev/null)\" ]; then "
-					f"  echo 'SKIP:{skill} already in /skills/'; "
-					f"else "
-					f"  mkdir -p {dst} && "
-					f"  rsync -a {src} {dst} && echo 'OK:{skill}' || echo 'FAIL:{skill}'; "
-					f"fi; "
+				result = self._sandbox.commands.run(
+					f"sudo mkdir -p {dst} && sudo rsync -a {src} {dst} && sudo chown -R user:user {dst}",
+					timeout=120
 				)
+				if result.exit_code == 0:
+					print(f"[_update_system_skills] ✓ Synced {skill} → /skills/{skill}", flush=True)
+				else:
+					print(f"[_update_system_skills] ⚠️  Sync failed for {skill}: {result.stderr}", flush=True)
 
-			print(f"[_update_system_skills] Syncing skills {SKILLS_TO_SYNC} → /skills/", flush=True)
-			sync_result = self._sandbox.commands.run(
-				f"bash -c '{batch_script}'",
-				timeout=300  # generous: writing to R2 via FUSE can be slow on first run
-			)
-
-			for line in sync_result.stdout.splitlines():
-				line = line.strip()
-				if line.startswith("OK:"):
-					print(f"[_update_system_skills] ✓ Synced {line[3:]}", flush=True)
-				elif line.startswith("SKIP:"):
-					print(f"[_update_system_skills] ↩ {line[5:]}", flush=True)
-				elif line.startswith("FAIL:"):
-					print(f"[_update_system_skills] ⚠️  rsync failed for {line[5:]}", flush=True)
-
-			if sync_result.exit_code != 0:
-				print(f"[_update_system_skills] ⚠️  Batch sync stderr: {sync_result.stderr}", flush=True)
-
-			# ── 4. Purge any unexpected skill directories from /skills/ ──────
-			# /skills/ must contain ONLY the skills in ALLOWED_SKILLS. Anything
-			# else (stale uploads, leftover dirs, etc.) is removed so the agent's
-			# skill context stays clean and predictable.
+			# ── 4. Purge unexpected entries from /skills/ ────────────────────
 			allowed_list = " ".join(ALLOWED_SKILLS)
 			purge_script = (
-				f"ALLOWED='{allowed_list}'; "
-				"for dir in /skills/*/; do "
-				"  [ -d \"$dir\" ] || continue; "
-				"  name=$(basename \"$dir\"); "
-				"  if ! echo \"$ALLOWED\" | grep -qw \"$name\"; then "
-				"    rm -rf \"$dir\" && echo \"REMOVED:$name\" || echo \"REMOVE_FAIL:$name\"; "
+				f"ALLOWED=\\\"{allowed_list}\\\"; "
+				"for e in /skills/*/; do "
+				"  [ -e \\\"$e\\\" ] || continue; "
+				"  name=$(basename \\\"$e\\\"); "
+				"  if ! echo \\\"$ALLOWED\\\" | grep -qw \\\"$name\\\"; then "
+				"    sudo rm -rf \\\"$e\\\" && echo \\\"REMOVED:$name\\\" || echo \\\"REMOVE_FAIL:$name\\\"; "
 				"  fi; "
 				"done"
 			)
 			print(f"[_update_system_skills] Purging unexpected dirs from /skills/ (allowed: {ALLOWED_SKILLS})", flush=True)
 			purge_result = self._sandbox.commands.run(
-				f"bash -c '{purge_script}'",
+				f"bash -c \"{purge_script}\"",
 				timeout=60
 			)
-			for line in purge_result.stdout.splitlines():
+			for line in (purge_result.stdout or "").splitlines():
 				line = line.strip()
 				if line.startswith("REMOVED:"):
 					print(f"[_update_system_skills] 🗑️  Removed unexpected skill: {line[8:]}", flush=True)
 				elif line.startswith("REMOVE_FAIL:"):
 					print(f"[_update_system_skills] ⚠️  Failed to remove: {line[12:]}", flush=True)
-			if not purge_result.stdout.strip():
+			if not (purge_result.stdout or "").strip():
 				print(f"[_update_system_skills] ✓ No unexpected dirs found", flush=True)
 
-			print(f"[_update_system_skills] ✓ System skills ready at /skills/", flush=True)
+			print(f"[_update_system_skills] ✓ System skills ready at /skills/ (docx, pdf)", flush=True)
 
 		except Exception as e:
 			print(f"[_update_system_skills] ✗ Error updating system skills: {e}", flush=True)
@@ -517,32 +459,22 @@ class SandboxBackend(BaseSandbox):
 				f"Log output:\n{log_output}"
 			)
 		
-		# Mount user skills directory to /mnt/skills
+		# Mount user skills directory to /skills
 		try:
-			# Ensure parent directory exists and is visible
-			self._sandbox.commands.run("sudo mkdir -p /mnt", timeout=30)
-			# Verify mnt directory exists and is accessible
-			verify_mnt = self._sandbox.commands.run(
-				"test -d /mnt && ls -la /mnt >/dev/null 2>&1 && echo 'MNT_OK' || echo 'MNT_FAILED'",
-				timeout=10
-			)
-			print(f"[Mount] /mnt directory check: {verify_mnt.stdout}", flush=True)
-			
+			self._sandbox.commands.run(f"sudo mkdir -p {self._skills_mount}", timeout=30)
 			result = self._sandbox.commands.run(
 				f'bash /tmp/mount_s3_path.sh "{bucket}" "skills/{self._user_id}" "{self._skills_mount}" "/tmp/rclone-skills-user.log"',
 				timeout=500
 			)
 			if result.exit_code != 0:
-				raise RuntimeError(f"Failed to mount user skills (exit {result.exit_code})")
-			
-			# Verify mount is accessible
+				raise RuntimeError(f"Failed to mount user skills (exit {result.exit_code}): {result.stderr or result.stdout}")
 			import time
 			time.sleep(2)
 			verify_mount = self._sandbox.commands.run(
-				"test -d /mnt/skills && ls /mnt/skills >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
+				f"test -d {self._skills_mount} && ls {self._skills_mount} >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
 				timeout=10
 			)
-			print(f"[Mount] /mnt/skills mount check: {verify_mount.stdout}", flush=True)
+			print(f"[Mount] {self._skills_mount} mount check: {verify_mount.stdout}", flush=True)
 		except Exception as e:
 			raise
 		

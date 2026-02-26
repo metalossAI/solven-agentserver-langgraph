@@ -1,19 +1,16 @@
 """
-E2B Sandbox backend for DeepAgents using Cloudflare R2.
+E2B Sandbox backend for DeepAgents using S3.
 Implements the BackendProtocol for filesystem operations in an isolated sandbox environment.
 
 ARCHITECTURE OVERVIEW:
 ======================
-Direct R2 Mounts:
-- **R2 Mounts**:
-  - threads/{thread_id} -> /workspace
-  - skills/{user_id} -> /skills/escrituras (user skills mount)
-  - threads/{ticket_id} -> /ticket (optional, read-only)
+Sandbox paths:
+- /home/user              - LOCAL workspace (agent works here; symlink support for npm). Synced to/from S3 (excluding .solven).
+- /home/user/.solven/skills - S3 skills/{user_id} mounted here; Anthropic docx/xlsx/pptx/pdf copied in. Excluded from workspace sync.
+- /mnt/workspace-s3       - S3 mount threads/{thread_id} (rclone). Used only for sync.
+- /ticket                 - S3 mount: threads/{ticket_id} (optional, read-only)
 
-- **Agent View**:
-  - /skills contains only skill subdirs: Anthropic (docx, pdf, xlsx, pptx, ...) from repo's skills/ folder,
-    plus escrituras (S3 mount). Repo is cloned to a temp dir; only its skills/ contents are copied to /skills.
-  - Works from /workspace; can access /skills and /ticket directly
+rclone mounts do NOT support symlinks (EIO). We use local /home/user and sync to/from S3; .solven is excluded.
 """
 import json
 import os
@@ -38,560 +35,453 @@ SANDBOX_TEMPLATE = "solven-sandbox-v1"
 
 class SandboxBackend(BaseSandbox):
 	"""
-	E2B Sandbox backend with direct R2 mounts.
-	
-	R2 Mounts:
-	- /workspace - threads/{thread_id}
-	- /skills/escrituras - skills/{user_id} (user skills mount)
-	- /ticket - threads/{ticket_id} (optional, read-only)
-	
-	/skills contains only skill subdirs (docx, pdf, pptx, escrituras, ...). Repo is cloned to
-	a temp dir and only its skills/ folder is copied to /skills; escrituras is the S3 mount.
-	
-	Agent works from /workspace and can access /workspace, /skills, /ticket.
+	E2B Sandbox backend with S3 mounts and local workspace.
+
+	Paths:
+	- /home/user              - LOCAL workspace (agent works here). Synced to/from S3; .solven excluded.
+	- /home/user/.solven/skills - S3 skills/{user_id} mount + Anthropic docx/xlsx/pptx/pdf (escrituras, docx, pptx, pdf, xlsx). Use for glob/ls.
+	- /mnt/workspace-s3       - S3 mount threads/{thread_id} (sync only)
+	- /ticket                 - S3 mount threads/{ticket_id} (optional, read-only)
 	"""
-	
+
 	def __init__(self, runtime: ToolRuntime[AppContext]):
 		self._sandbox: Optional[Sandbox] = None
-		self._writer = get_stream_writer()  # Use LangGraph's get_stream_writer() function
-		
-		# Extract IDs from config instead of runtime context
+		self._writer = get_stream_writer()
+
 		from src.utils.config import get_user_id_from_config, get_thread_id_from_config
-		
-		# Thread ID comes from configurable (set by LangGraph SDK)
+
 		thread_id = get_thread_id_from_config()
 		if not thread_id:
 			raise RuntimeError("Cannot initialize SandboxBackend: thread_id not found in config")
 		self._thread_id = thread_id
-		
-		# Extract user_id using config helper (handles both langgraph_auth_user and user_data)
+
 		user_id = get_user_id_from_config()
 		if not user_id:
 			raise RuntimeError("Cannot initialize SandboxBackend: user_id not found in config")
 		self._user_id = user_id
-		
-		# Extract ticket_id from metadata
+
 		config: RunnableConfig = get_config()
 		metadata = config.get("metadata", {})
 		self._ticket_id = metadata.get("ticket_id")
-		
-		# R2 mount paths
-		self._workspace = "/workspace"  # threads/{thread_id}
-		self._skills_base = "/skills"  # Only skill subdirs (docx, pdf, escrituras, ...); no repo root
-		self._skills_mount = "/skills/escrituras"  # S3 mount: skills/{user_id}
-		self._repo_clone_dir = "/tmp/anthropic-skills-repo"  # Full repo clone; we copy only skills/ to /skills
-		self._ticket_mount = "/ticket"  # threads/{ticket_id}
-		
-		# State
+
+		# Mount paths
+		self._workspace = "/home/user"           # LOCAL workspace (agent works here; scripts run here)
+		self._workspace_s3_mount = "/mnt/workspace-s3"  # S3 mount: threads/{thread_id} (sync only)
+		self._workspace_skills_dir = "/home/user/.solven/skills"  # S3 skills/{user_id} mounted here; anthropic skills copied in
+		self._ticket_mount = "/ticket"           # S3: threads/{ticket_id} (optional)
+
 		self._initialized = False
-		
-		# Note: Sandbox initialization is deferred to first use (lazy initialization)
-		# This avoids blocking calls during __init__ which runs in async context
-		# All methods that need the sandbox call _ensure_initialized() first
-	
+
+	ANTHROPIC_SKILLS_SUBDIRS = ("docx", "xlsx", "pptx", "pdf")
+	TMP_ANTHROPIC_CLONE = "/tmp/anthropic-skills"
+
 	@property
 	def id(self) -> str:
 		"""Unique identifier for the sandbox backend instance."""
 		if self._sandbox:
 			return self._sandbox.sandbox_id
 		return f"sandbox-{self._thread_id}"
-	
+
 	def _ensure_initialized(self) -> None:
-		"""Ensure sandbox is initialized (idempotent)."""
-		if self._sandbox is not None:
+		"""Ensure sandbox is initialized (idempotent). Uses self._initialized as guard."""
+		if self._initialized:
 			return
-		self._writer("Preparando espacio de trabajo...")
-		
-		# Step 1: Try to find existing sandbox (query by threadId only)
-		print(f"[_ensure_initialized] Searching for sandboxes with threadId={self._thread_id}", flush=True)
-		print(f"[_ensure_initialized] threadId type: {type(self._thread_id)}, value: '{self._thread_id}'", flush=True)
+
+		# Step 1: Try to connect to an existing RUNNING sandbox for this thread.
+		# We only query RUNNING — connecting to PAUSED sandboxes triggers an E2B resume
+		# that can hang indefinitely.
+		print(f"[_ensure_initialized] Searching for sandbox threadId={self._thread_id}", flush=True)
+		existing_sandboxes = []
 		try:
-			sandbox_paginator = Sandbox.list(
+			paginator = Sandbox.list(
 				query=SandboxQuery(
 					metadata={"threadId": self._thread_id},
-					state=[SandboxState.RUNNING, SandboxState.PAUSED]
+					state=[SandboxState.RUNNING],
 				)
 			)
-			existing_sandboxes = sandbox_paginator.next_items()
-			print(f"[_ensure_initialized] Found {len(existing_sandboxes)} existing sandboxes", flush=True)
-			if len(existing_sandboxes) > 0:
-				for idx, sb in enumerate(existing_sandboxes):
-					print(f"[_ensure_initialized] Sandbox {idx}: id={sb.sandbox_id}, metadata={getattr(sb, 'metadata', 'N/A')}", flush=True)
-			
-			if existing_sandboxes and len(existing_sandboxes) > 0:
-				existing_sandbox = existing_sandboxes[0]
-				sandbox_id = existing_sandbox.sandbox_id
-				
-				if sandbox_id:
-					try:
-						self._sandbox = Sandbox.connect(sandbox_id)
-						print(f"[_ensure_initialized] ✓ Connected to existing sandbox: {sandbox_id}", flush=True)
-						
-						# Verify mounts are accessible (escrituras mount must be present)
-						try:
-							check_result = self._sandbox.commands.run(
-								f"test -d {self._skills_mount} && ls {self._skills_mount} >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_MISSING'",
-								timeout=5
-							)
-							mount_status = check_result.stdout.strip()
-							if "MOUNT_MISSING" in mount_status:
-								print(f"[_ensure_initialized] Mounts missing, remounting...", flush=True)
-								self._mount_r2_buckets()
-								self._upload_srt_settings()
-								self._update_system_skills()
-								self._mount_user_skills()
-						except Exception as e:
-							print(f"[_ensure_initialized] Error checking mounts: {e}, attempting to mount...", flush=True)
-							self._mount_r2_buckets()
-						
-						self._initialized = True
-						print(f"[_ensure_initialized] ✓ Reused existing sandbox", flush=True)
-						return
-					except Exception as e:
-						print(f"[_ensure_initialized] ✗ Failed to connect to existing sandbox {sandbox_id}: {e}", flush=True)
+			existing_sandboxes = paginator.next_items()
+			print(f"[_ensure_initialized] Found {len(existing_sandboxes)} running sandbox(es)", flush=True)
+			for idx, sb in enumerate(existing_sandboxes):
+				print(f"[_ensure_initialized]   [{idx}] id={sb.sandbox_id} metadata={getattr(sb, 'metadata', {})}", flush=True)
 		except Exception as e:
 			print(f"[_ensure_initialized] ✗ Error listing sandboxes: {e}", flush=True)
-		
-		# Step 2: Create new sandbox if not found
+
+		for sb_info in existing_sandboxes:
+			sandbox_id = sb_info.sandbox_id
+			if not sandbox_id:
+				continue
+			try:
+				print(f"[_ensure_initialized] Connecting to {sandbox_id}...", flush=True)
+				self._sandbox = Sandbox.connect(sandbox_id)
+				print(f"[_ensure_initialized] ✓ Connected to existing sandbox: {sandbox_id}", flush=True)
+
+				# Verify workspace S3 mount is accessible (agent works in /home/user)
+				try:
+					check = self._sandbox.commands.run(
+						f"mountpoint -q {self._workspace_s3_mount} && echo 'MOUNT_OK' || echo 'MOUNT_MISSING'",
+						timeout=10,
+					)
+					mount_status = check.stdout.strip()
+				except Exception as check_err:
+					print(f"[_ensure_initialized] Mount check error: {check_err}", flush=True)
+					mount_status = "MOUNT_MISSING"
+
+				if "MOUNT_MISSING" in mount_status:
+					print(f"[_ensure_initialized] Mounts missing, remounting...", flush=True)
+					self._mount_s3_buckets()
+					self._mount_user_skills()
+					self._sync_local_skills()
+					self._build_workspace_skills()
+
+				self._initialized = True
+				self._writer("Espacio de trabajo listo")
+				print(f"[_ensure_initialized] ✓ Reused existing sandbox", flush=True)
+				return
+			except Exception as e:
+				print(f"[_ensure_initialized] ✗ Failed to use sandbox {sandbox_id}: {e}", flush=True)
+				self._sandbox = None  # reset so guard doesn't fire on next attempt
+
+		# Step 2: No usable existing sandbox — create a new one
+		print(f"[_ensure_initialized] Creating new sandbox...", flush=True)
 		env_vars = {
 			"THREAD_ID": self._thread_id,
 			"USER_ID": str(self._user_id),
 		}
-		
-		# Add R2 credentials if present
-		if bucket := os.getenv("R2_BUCKET_NAME"):
+		if bucket := os.getenv("S3_BUCKET_NAME"):
 			env_vars["S3_BUCKET_NAME"] = bucket
-		if access_key := os.getenv("R2_ACCESS_KEY_ID"):
+		if access_key := os.getenv("S3_ACCESS_KEY_ID"):
 			env_vars["S3_ACCESS_KEY_ID"] = access_key
-		if secret := os.getenv("R2_SECRET_ACCESS_KEY"):
+		if secret := os.getenv("S3_ACCESS_SECRET"):
 			env_vars["S3_ACCESS_SECRET"] = secret
-		if endpoint := os.getenv("R2_ENDPOINT_URL"):
+		if endpoint := os.getenv("S3_ENDPOINT_URL"):
 			env_vars["S3_ENDPOINT_URL"] = endpoint
-		if region := os.getenv("R2_REGION"):
+		if region := os.getenv("S3_REGION"):
 			env_vars["S3_REGION"] = region
-		
+
 		self._sandbox = Sandbox.create(
 			template=SANDBOX_TEMPLATE,
 			envs=env_vars,
-			timeout=180,
+			timeout=3600,
 			metadata={
 				"threadId": self._thread_id,
 				"userId": str(self._user_id),
 				"ticketId": str(self._ticket_id) if self._ticket_id else "",
 			},
 		)
-		
 		print(f"[_ensure_initialized] ✓ Created new sandbox: {self._sandbox.sandbox_id}", flush=True)
-		
-		# Step 3: Mount workspace and prepare /skills (user skills mount is after clone)
-		self._mount_r2_buckets()
-		
-		# Step 3b: Upload SRT settings for command isolation (allow write only /workspace, /skills)
-		self._upload_srt_settings()
-		
-		# Step 4: Clone Anthropic repo to /skills (creates /skills/skills/ with docx, pdf, etc.)
-		self._update_system_skills()
-		
-		# Step 5: Mount user skills at /skills/escrituras (must be after _update_system_skills)
+
+		self._writer("Preparando espacio de trabajo...")
+		# Step 3: Mount workspace-s3 + optional ticket
+		self._mount_s3_buckets()
+
+		# Step 4: Mount user skills at /home/user/.solven/skills; seed escrituras and copy Anthropic skills into the mount
 		self._mount_user_skills()
-		
-		# Step 6: Sync local skills to sandbox
 		self._sync_local_skills()
-		
+		self._build_workspace_skills()
+
 		self._initialized = True
 		self._writer("Espacio de trabajo listo")
 		print(f"[_ensure_initialized] ✓ Initialization complete", flush=True)
-	
-	def _update_system_skills(self) -> None:
+
+	ANTHROPIC_SKILLS_SUBDIRS = ("docx", "xlsx", "pptx", "pdf")
+	TMP_ANTHROPIC_CLONE = "/tmp/anthropic-skills"
+
+	def _build_workspace_skills(self) -> None:
 		"""
-		Clone Anthropic repo to a temp dir and copy only the skills/ folder into /skills.
-		Result: /skills contains only skill subdirs (docx, pdf, pptx, ...). User skills
-		are mounted at /skills/escrituras in _mount_user_skills.
+		Copy Anthropic skills (docx, xlsx, pptx, pdf) from repo in /tmp into /home/user/.solven/skills (the user S3 mount).
+		Runs after _mount_user_skills. End result: .solven/skills has escrituras (from S3) + docx, pptx, pdf, xlsx.
 		"""
 		try:
+			solven_skills = self._workspace_skills_dir
+			# Clone anthropics/skills to temp, copy only docx, xlsx, pptx, pdf into the mount
 			repo_url = "https://github.com/anthropics/skills.git"
-			clone_dir = self._repo_clone_dir
-			skills_dest = self._skills_base  # /skills
-
-			# Ensure /skills exists for the copy
-			mkdir_result = self._sandbox.commands.run(
-				f"sudo mkdir -p {skills_dest} && sudo chown -R user:user {skills_dest}",
-				timeout=30
-			)
-			if mkdir_result.exit_code != 0:
-				print(f"[_update_system_skills] ⚠️  mkdir failed: {mkdir_result.stderr}", flush=True)
-			else:
-				print(f"[_update_system_skills] ✓ Dest dir ready: {skills_dest}", flush=True)
-
-			self._sandbox.commands.run(
-				f"git config --global --add safe.directory {clone_dir}",
-				timeout=10
-			)
+			clone_dir = self.TMP_ANTHROPIC_CLONE
+			self._sandbox.commands.run(f"mkdir -p {clone_dir}", timeout=10, user="root")
+			self._sandbox.commands.run(f"git config --global --add safe.directory {clone_dir}", timeout=10)
 
 			repo_check = self._sandbox.commands.run(
 				f"test -d {clone_dir}/.git && echo EXISTS || echo NOT_FOUND",
-				timeout=10
+				timeout=10,
 			)
 			import time as _time
-			max_repo_retries = 2
-			for repo_attempt in range(max_repo_retries + 1):
+			max_retries = 2
+			for attempt in range(max_retries + 1):
 				try:
 					if "EXISTS" in repo_check.stdout:
-						print(f"[_update_system_skills] Pulling latest (attempt {repo_attempt + 1})", flush=True)
-						pull_result = self._sandbox.commands.run(
+						self._sandbox.commands.run(
 							f"cd {clone_dir} && git pull origin main",
-							timeout=90
+							timeout=90,
 						)
-						if pull_result.exit_code == 0:
-							print(f"[_update_system_skills] ✓ Repo updated", flush=True)
-							break
-						if repo_attempt < max_repo_retries:
-							_time.sleep(2)
-							continue
-						print(f"[_update_system_skills] ⚠️  git pull failed, using cached", flush=True)
 						break
 					else:
-						print(f"[_update_system_skills] Cloning to {clone_dir} (attempt {repo_attempt + 1})", flush=True)
 						clone_result = self._sandbox.git.clone(
 							repo_url,
 							path=clone_dir,
-							depth=1
+							depth=1,
+							user="root",
 						)
-						if clone_result.exit_code == 0:
-							print(f"[_update_system_skills] ✓ Cloned to {clone_dir}", flush=True)
-							break
-						raise Exception(clone_result.stderr or "Clone failed")
+						if clone_result.exit_code != 0:
+							raise Exception(clone_result.stderr or "Clone failed")
+						break
 				except Exception as repo_err:
-					if repo_attempt >= max_repo_retries:
-						print(f"[_update_system_skills] ✗ Clone failed: {repo_err}", flush=True)
+					if attempt >= max_retries:
 						raise
 					_time.sleep(2)
 
-			# Copy only repo's skills/ contents into /skills (exclude escrituras so mount is not overwritten)
-			copy_result = self._sandbox.commands.run(
-				f"rsync -a --exclude=escrituras {clone_dir}/skills/ {skills_dest}/",
-				timeout=120
-			)
-			if copy_result.exit_code != 0:
-				print(f"[_update_system_skills] ⚠️  rsync failed: {copy_result.stderr}", flush=True)
-			else:
-				print(f"[_update_system_skills] ✓ Synced skills to {skills_dest}", flush=True)
+			for subdir in self.ANTHROPIC_SKILLS_SUBDIRS:
+				src = f"{clone_dir}/skills/{subdir}"
+				self._sandbox.commands.run(
+					f"test -d {src} && cp -a {src} {solven_skills}/ 2>/dev/null || true",
+					timeout=30,
+					user="root",
+				)
 
+			self._sandbox.commands.run(f"chown -R user:user {solven_skills}", timeout=15, user="root")
+			print(f"[_build_workspace_skills] ✓ {solven_skills} ready", flush=True)
 		except Exception as e:
-			print(f"[_update_system_skills] ✗ Error updating system skills: {e}", flush=True)
+			print(f"[_build_workspace_skills] ✗ Error: {e}", flush=True)
 			import traceback
-			print(f"[_update_system_skills] Traceback:\n{traceback.format_exc()}", flush=True)
-	
-	def _sync_local_skills(self) -> None:		
-		# Path to local skills directory
+			print(traceback.format_exc(), flush=True)
+
+	def _sync_local_skills(self) -> None:
+		"""Copy local escrituras/SKILL.md into /home/user/.solven/skills/escrituras/ (user S3 mount)."""
 		local_skills_dir = os.path.join(os.path.dirname(__file__), "skills")
-		
+
 		if not os.path.exists(local_skills_dir):
 			print(f"[_sync_local_skills] Local skills directory not found: {local_skills_dir}", flush=True)
 			return
-		
+
 		try:
-			# Sync escrituras skill
 			escrituras_skill_path = os.path.join(local_skills_dir, "escrituras", "SKILL.md")
 			if os.path.exists(escrituras_skill_path):
-				with open(escrituras_skill_path, 'r', encoding='utf-8') as f:
+				with open(escrituras_skill_path, "r", encoding="utf-8") as f:
 					skill_content = f.read()
-				
-				# Write skill file into user skills mount (/skills/escrituras)
-				self._sandbox.files.write(f"{self._skills_mount}/SKILL.md", skill_content)
-				print(f"[_sync_local_skills] ✓ Synced escrituras/SKILL.md", flush=True)
+				# .solven/skills is the user S3 mount; copy SKILL.md into escrituras there
+				escrituras_dir = f"{self._workspace_skills_dir}/escrituras"
+				self._sandbox.commands.run(f"mkdir -p {escrituras_dir}", timeout=10)
+				self._sandbox.files.write(f"{escrituras_dir}/SKILL.md", skill_content)
+				print(f"[_sync_local_skills] ✓ Synced escrituras/SKILL.md to {escrituras_dir}/", flush=True)
 			else:
 				print(f"[_sync_local_skills] escrituras/SKILL.md not found at {escrituras_skill_path}", flush=True)
-			
-			# TODO: Add more skills here as needed
-			
 		except Exception as e:
 			print(f"[_sync_local_skills] ✗ Error syncing skills: {e}", flush=True)
-	
-	def _mount_r2_buckets(self) -> None:
-		"""Mount R2 buckets using rclone."""
-		
-		# Get credentials from environment (support both R2_ and S3_ prefixes)
-		bucket = os.getenv("R2_BUCKET_NAME") or os.getenv("S3_BUCKET_NAME", "solven-testing")
-		access_key = os.getenv("R2_ACCESS_KEY_ID") or os.getenv("S3_ACCESS_KEY_ID")
-		secret = os.getenv("R2_SECRET_ACCESS_KEY") or os.getenv("S3_ACCESS_SECRET")
-		endpoint = os.getenv("R2_ENDPOINT_URL") or os.getenv("S3_ENDPOINT_URL", "")
-		region = os.getenv("R2_REGION") or os.getenv("S3_REGION", "auto")
-		
+
+	def _mount_s3_buckets(self) -> None:
+		"""Mount S3 buckets using rclone. All privileged operations use user='root'."""
+
+		bucket = os.getenv("S3_BUCKET_NAME", "solven-testing")
+		access_key = os.getenv("S3_ACCESS_KEY_ID")
+		secret = os.getenv("S3_ACCESS_SECRET")
+		endpoint = os.getenv("S3_ENDPOINT_URL", "")
+		region = os.getenv("S3_REGION", "auto")
+
 		if not access_key or not secret:
+			print("[Mount] ✗ S3 credentials missing, skipping mounts", flush=True)
 			return
-	
-		# Upload mount scripts from files
+
 		self._upload_mount_scripts()
-		
+
 		try:
 			env_vars = f"S3_ENDPOINT_URL='{endpoint}' S3_ACCESS_KEY_ID='{access_key}' S3_ACCESS_SECRET='{secret}' S3_REGION='{region}'"
 			result = self._sandbox.commands.run(
-				f"{env_vars} sudo -E bash /tmp/create_rclone_config.sh",
-				timeout=180
+				f"{env_vars} bash /tmp/create_rclone_config.sh",
+				timeout=180,
+				user="root",
 			)
 			if result.exit_code != 0:
 				raise RuntimeError(f"Failed to create rclone config (exit {result.exit_code}): {result.stderr or result.stdout}")
 		except Exception as e:
 			raise
-		
-		# Mount thread workspace to /workspace - critical, must succeed
-		# First ensure workspace directory exists
-		self._sandbox.commands.run(f"sudo mkdir -p {self._workspace}", timeout=30)
-		
-		# Check if workspace is already mounted
+
+		# Mount thread workspace to /mnt/workspace-s3 (rclone does not support symlinks; agent uses local /home/user)
+		self._sandbox.commands.run(f"mkdir -p {self._workspace_s3_mount} {self._workspace}", timeout=30, user="root")
+		self._sandbox.commands.run(f"chown -R user:user {self._workspace}", timeout=10, user="root")
+
 		try:
 			check_mount = self._sandbox.commands.run(
-				f"mountpoint -q {self._workspace} 2>/dev/null && echo 'ALREADY_MOUNTED' || echo 'NOT_MOUNTED'",
-				timeout=10
+				f"mountpoint -q {self._workspace_s3_mount} 2>/dev/null && echo 'ALREADY_MOUNTED' || echo 'NOT_MOUNTED'",
+				timeout=10,
 			)
 			if "ALREADY_MOUNTED" in check_mount.stdout:
-				print(f"[Mount] {self._workspace} is already mounted, skipping mount", flush=True)
-				# Verify it's accessible
-				verify_result = self._sandbox.commands.run(
-					f"test -d {self._workspace} && ls {self._workspace} >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
-					timeout=10
+				print(f"[Mount] {self._workspace_s3_mount} already mounted", flush=True)
+				verify = self._sandbox.commands.run(
+					f"ls {self._workspace_s3_mount} >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
+					timeout=10,
 				)
-				if "MOUNT_OK" in verify_result.stdout:
-					return  # Already mounted and working
-				# Mount exists but not accessible, try to unmount and remount
-				print(f"[Mount] Existing mount not accessible, attempting to unmount and remount", flush=True)
+				if "MOUNT_OK" in verify.stdout:
+					self._sync_workspace_from_s3()
+					return
+				print(f"[Mount] Existing mount not accessible, remounting", flush=True)
 				self._sandbox.commands.run(
-					f"sudo umount {self._workspace} 2>/dev/null || true",
-					timeout=30
+					f"umount {self._workspace_s3_mount} 2>/dev/null || true",
+					timeout=30,
+					user="root",
 				)
 		except Exception as e:
-			# If check fails, continue with mount attempt
 			print(f"[Mount] Could not check existing mount: {e}", flush=True)
-		
-		mount_cmd = f'bash /tmp/mount_s3_path.sh "{bucket}" "threads/{self._thread_id}" "{self._workspace}" "/tmp/rclone-thread.log"'
+
+		mount_cmd = f'bash /tmp/mount_s3_path.sh "{bucket}" "threads/{self._thread_id}" "{self._workspace_s3_mount}" "/tmp/rclone-thread.log"'
+		print(f"[Mount] Starting: {mount_cmd}", flush=True)
 		try:
-			# Run mount command with longer timeout (rclone mounts can take time)
-			print(f"[Mount] Starting mount command: {mount_cmd}", flush=True)
-			result = self._sandbox.commands.run(mount_cmd, timeout=600)
+			result = self._sandbox.commands.run(mount_cmd, timeout=600, user="root")
 			if result.exit_code != 0:
-				# Show rclone log if available
 				try:
-					log_result = self._sandbox.commands.run(
-						"sudo tail -100 /tmp/rclone-thread.log 2>&1 || echo 'No log file'",
-						timeout=10
+					log = self._sandbox.commands.run(
+						"tail -100 /tmp/rclone-thread.log 2>&1 || echo 'No log file'",
+						timeout=10,
+						user="root",
 					)
-					log_output = log_result.stdout if log_result else "No log available"
-				except:
+					log_output = log.stdout if log else "No log available"
+				except Exception:
 					log_output = "Could not read log file"
 				raise RuntimeError(
 					f"Failed to mount thread workspace (exit {result.exit_code}): "
-					f"{result.stderr or result.stdout}\n\nLog output:\n{log_output}"
+					f"{result.stderr or result.stdout}\n\nLog:\n{log_output}"
 				)
-			
-			# Verify mount is actually accessible (wait a bit for mount to stabilize)
+
 			import time
 			time.sleep(2)
-			verify_result = self._sandbox.commands.run(
-				f"test -d {self._workspace} && ls {self._workspace} >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
-				timeout=30
+			verify = self._sandbox.commands.run(
+				f"ls {self._workspace_s3_mount} >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
+				timeout=30,
 			)
-			if "MOUNT_OK" not in verify_result.stdout:
-				# Check if rclone process is still running
-				ps_result = self._sandbox.commands.run(
+			if "MOUNT_OK" not in verify.stdout:
+				ps = self._sandbox.commands.run(
 					"ps aux | grep 'rclone.*mount.*threads' | grep -v grep || echo 'NO_PROCESS'",
-					timeout=10
+					timeout=10,
 				)
 				raise RuntimeError(
-					f"Mount verification failed. Workspace mount may not be accessible.\n"
-					f"Rclone process status: {ps_result.stdout}\n"
-					f"Check log: /tmp/rclone-thread.log"
+					f"Mount verification failed.\nRclone: {ps.stdout}\nCheck: /tmp/rclone-thread.log"
 				)
-		except Exception as timeout_exc:
-			# Timeout or other exception occurred - try to get diagnostic info
-			is_timeout = isinstance(timeout_exc, TimeoutError) or "timeout" in str(timeout_exc).lower()
-			
-			try:
-				log_result = self._sandbox.commands.run(
-					"sudo tail -100 /tmp/rclone-thread.log 2>&1 || echo 'No log file'",
-					timeout=10
-				)
-				ps_result = self._sandbox.commands.run(
-					"ps aux | grep rclone | grep -v grep || echo 'No rclone processes'",
-					timeout=10
-				)
-				mount_result = self._sandbox.commands.run(
-					f"mountpoint {self._workspace} 2>&1 || mount | grep {self._workspace} || echo 'Not mounted'",
-					timeout=10
-				)
-				log_output = log_result.stdout if log_result else "No log available"
-				ps_output = ps_result.stdout if ps_result else "Could not check processes"
-				mount_output = mount_result.stdout if mount_result else "Could not check mount status"
-			except:
-				log_output = "Could not read diagnostics"
-				ps_output = "Could not check processes"
-				mount_output = "Could not check mount status"
-			
-			error_msg = (
-				f"Thread mount {'timed out after 600 seconds' if is_timeout else 'failed'}.\n"
-				f"Exception: {str(timeout_exc)}\n"
-				f"Rclone processes: {ps_output}\n"
-				f"Mount status: {mount_output}\n"
-				f"Log output:\n{log_output}\n"
-				f"Check rclone configuration and S3 connectivity."
-			)
-			raise RuntimeError(error_msg)
+			self._sync_workspace_from_s3()
 		except RuntimeError:
-			# Re-raise RuntimeErrors as-is
 			raise
 		except Exception as e:
-			# Catch any other exceptions and provide context
 			try:
-				log_result = self._sandbox.commands.run(
-					"sudo tail -100 /tmp/rclone-thread.log 2>&1 || echo 'No log file'",
-					timeout=10
+				log = self._sandbox.commands.run(
+					"tail -100 /tmp/rclone-thread.log 2>&1 || echo 'No log file'",
+					timeout=10,
+					user="root",
 				)
-				log_output = log_result.stdout if log_result else "No log available"
-			except:
+				log_output = log.stdout if log else "No log available"
+			except Exception:
 				log_output = "Could not read log file"
-			
+			is_timeout = isinstance(e, TimeoutError) or "timeout" in str(e).lower()
 			raise RuntimeError(
-				f"Thread mount failed with exception: {str(e)}\n"
-				f"Log output:\n{log_output}"
+				f"Thread mount {'timed out' if is_timeout else 'failed'}: {e}\nLog:\n{log_output}"
 			)
-		
-		# User skills mount is at /skills/escrituras (done in _mount_user_skills after _update_system_skills)
-		self._sandbox.commands.run(f"sudo mkdir -p {self._skills_base}", timeout=30)
-		
-		# Mount ticket if exists (optional, read-only) to /ticket
+
+		# Mount ticket (optional, read-only)
 		if self._ticket_id:
 			try:
-				self._sandbox.commands.run(f"sudo mkdir -p {self._ticket_mount}", timeout=30)
-				verify_ticket = self._sandbox.commands.run(
-					f"test -d {self._ticket_mount} && ls -la {self._ticket_mount} >/dev/null 2>&1 && echo 'TICKET_OK' || echo 'TICKET_FAILED'",
-					timeout=10
-				)
-				print(f"[Mount] {self._ticket_mount} directory check: {verify_ticket.stdout}", flush=True)
-				
+				self._sandbox.commands.run(f"mkdir -p {self._ticket_mount}", timeout=30, user="root")
 				result = self._sandbox.commands.run(
 					f'bash /tmp/mount_s3_path.sh "{bucket}" "threads/{self._ticket_id}" "{self._ticket_mount}" "/tmp/rclone-ticket.log" "read-only"',
-					timeout=500
+					timeout=500,
+					user="root",
 				)
 				if result.exit_code != 0:
-					raise RuntimeError(f"Failed to mount ticket workspace (exit {result.exit_code})")
-				
+					raise RuntimeError(f"Failed to mount ticket (exit {result.exit_code})")
 				import time
 				time.sleep(2)
-				verify_mount = self._sandbox.commands.run(
-					f"test -d {self._ticket_mount} && ls {self._ticket_mount} >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
-					timeout=10
+				verify = self._sandbox.commands.run(
+					f"ls {self._ticket_mount} >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
+					timeout=10,
 				)
-				print(f"[Mount] {self._ticket_mount} mount check: {verify_mount.stdout}", flush=True)
+				print(f"[Mount] {self._ticket_mount} mount check: {verify.stdout.strip()}", flush=True)
 			except Exception as e:
-				pass
-	
+				print(f"[Mount] ⚠️  Ticket mount failed (non-critical): {e}", flush=True)
+
 	def _mount_user_skills(self) -> None:
-		"""Mount S3 skills/{user_id} at /skills/escrituras. Call after _update_system_skills so /skills exists."""
-		bucket = os.getenv("R2_BUCKET_NAME") or os.getenv("S3_BUCKET_NAME", "solven-testing")
-		self._sandbox.commands.run(f"sudo mkdir -p {self._skills_mount}", timeout=30)
+		"""Mount S3 skills/{user_id} at /home/user/.solven/skills. Anthropic skills are then copied in by _build_workspace_skills."""
+		bucket = os.getenv("S3_BUCKET_NAME", "solven-testing")
+		# Create parent dir so we can mount at .solven/skills
+		self._sandbox.commands.run(f"mkdir -p {self._workspace_skills_dir}", timeout=30, user="root")
 		try:
 			result = self._sandbox.commands.run(
-				f'bash /tmp/mount_s3_path.sh "{bucket}" "skills/{self._user_id}" "{self._skills_mount}" "/tmp/rclone-skills-user.log"',
-				timeout=500
+				f'bash /tmp/mount_s3_path.sh "{bucket}" "skills/{self._user_id}" "{self._workspace_skills_dir}" "/tmp/rclone-skills-user.log"',
+				timeout=500,
+				user="root",
 			)
 			if result.exit_code != 0:
 				raise RuntimeError(f"Failed to mount user skills (exit {result.exit_code})")
 			import time
 			time.sleep(2)
-			verify_mount = self._sandbox.commands.run(
-				f"test -d {self._skills_mount} && ls {self._skills_mount} >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
-				timeout=10
+			verify = self._sandbox.commands.run(
+				f"ls {self._workspace_skills_dir} >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
+				timeout=10,
 			)
-			print(f"[Mount] {self._skills_mount} mount check: {verify_mount.stdout}", flush=True)
+			print(f"[Mount] {self._workspace_skills_dir} mount check: {verify.stdout.strip()}", flush=True)
 		except Exception as e:
 			raise
-	
+
+	def _sync_workspace_from_s3(self) -> None:
+		"""Sync S3 mount contents to local /home/user (supports symlinks for npm). Mirrors S3 state."""
+		try:
+			result = self._sandbox.commands.run(
+				f"rsync -a --delete {self._workspace_s3_mount}/ {self._workspace}/ 2>/dev/null || true",
+				timeout=120,
+				user="root",
+			)
+			self._sandbox.commands.run(f"chown -R user:user {self._workspace}", timeout=10, user="root")
+			print(f"[Sync] ✓ S3 -> {self._workspace}", flush=True)
+		except Exception as e:
+			print(f"[Sync] ⚠️  S3->workspace failed (non-critical): {e}", flush=True)
+
+	def _sync_workspace_to_s3(self) -> None:
+		"""Sync local /home/user to S3 mount. Excludes node_modules, .venv, .solven."""
+		try:
+			result = self._sandbox.commands.run(
+				f"rsync -a --delete --exclude='node_modules' --exclude='.venv' --exclude='__pycache__' --exclude='.solven' {self._workspace}/ {self._workspace_s3_mount}/",
+				timeout=180,
+				user="root",
+			)
+			if result.exit_code == 0:
+				print(f"[Sync] ✓ {self._workspace} -> S3", flush=True)
+			else:
+				print(f"[Sync] ⚠️  workspace->S3 exit {result.exit_code}", flush=True)
+		except Exception as e:
+			print(f"[Sync] ⚠️  workspace->S3 failed (non-critical): {e}", flush=True)
+
 	def _upload_mount_scripts(self) -> None:
-		"""Upload rclone mount scripts to sandbox from files."""
-		# Get script directory path
+		"""Upload rclone mount scripts to sandbox from local files."""
 		src_dir = os.path.dirname(os.path.abspath(__file__))
 		script_dir = os.path.join(src_dir, "e2b_sandbox", "scripts")
-		
-		# Read script files
-		config_script_path = os.path.join(script_dir, "create_rclone_config.sh")
-		mount_script_path = os.path.join(script_dir, "mount_s3_path.sh")
-		
-		with open(config_script_path, "r") as f:
+
+		with open(os.path.join(script_dir, "create_rclone_config.sh"), "r") as f:
 			config_script = f.read()
-		
-		with open(mount_script_path, "r") as f:
+		with open(os.path.join(script_dir, "mount_s3_path.sh"), "r") as f:
 			mount_script = f.read()
 
-		
-		# Upload scripts to sandbox
-		try:
-			self._sandbox.files.write("/tmp/create_rclone_config.sh", config_script)
-			
-			self._sandbox.files.write("/tmp/mount_s3_path.sh", mount_script)
-		except Exception as e:
-			raise
-		
-		# Verify files exist
-		verify_result = self._sandbox.commands.run("ls -la /tmp/*.sh", timeout=500)
-		
-		# Make scripts executable
-		chmod_result = self._sandbox.commands.run("chmod +x /tmp/create_rclone_config.sh /tmp/mount_s3_path.sh", timeout=500)
-		if chmod_result.exit_code != 0:
-			raise RuntimeError(f"Failed to make scripts executable: {chmod_result.stderr}")
-	
-	def _upload_srt_settings(self) -> None:
-		"""Upload SRT (Anthropic Sandbox Runtime) settings to sandbox. Restricts writes to /workspace and /skills."""
-		SRT_SETTINGS = {
-			"filesystem": {
-				"denyRead": [],
-				"allowWrite": [self._workspace, self._skills_base],
-				"denyWrite": [self._ticket_mount, "/root", "/etc", "/usr"],
-			},
-			"network": {
-				"allowedDomains": [
-					"pypi.org", "*.pypi.org", "files.pythonhosted.org",
-					"npmjs.org", "*.npmjs.org", "registry.npmjs.org",
-					"github.com", "*.github.com",
-				],
-				"deniedDomains": [],
-			},
-		}
-		self._sandbox.files.write("/root/.srt-settings.json", json.dumps(SRT_SETTINGS, indent=2))
-		print("[_upload_srt_settings] ✓ SRT settings written to /root/.srt-settings.json", flush=True)
-	
+		self._sandbox.files.write("/tmp/create_rclone_config.sh", config_script)
+		self._sandbox.files.write("/tmp/mount_s3_path.sh", mount_script)
+
+		chmod = self._sandbox.commands.run(
+			"chmod +x /tmp/create_rclone_config.sh /tmp/mount_s3_path.sh",
+			timeout=30,
+		)
+		if chmod.exit_code != 0:
+			raise RuntimeError(f"Failed to make scripts executable: {chmod.stderr}")
+
 	def _filter_unwanted_commands(self, command: str) -> Optional[str]:
-		"""Block dangerous commands."""
+		"""Block commands the agent must not run."""
 		unwanted = {
 			r"\bsudo\b": "Error: sudo is not allowed in sandbox environment",
 			r"\bapt-get\b": "Error: apt-get is not allowed (system packages pre-installed)",
 			r"\bapt\b": "Error: apt is not allowed (system packages pre-installed)",
 		}
-		
 		for pattern, message in unwanted.items():
 			if re.search(pattern, command, re.IGNORECASE):
 				return message
 		return None
-	
+
 	def execute(self, command: str) -> ExecuteResponse:
-		"""Execute command directly in sandbox.
-		
-		Commands run from /workspace directory (default cwd). SRT is not used so that
-		the FUSE-mounted /workspace remains writable (SRT allowWrite fails with this setup).
-		"""
+		"""Execute a shell command in the sandbox; workspace is /home/user."""
 		self._ensure_initialized()
-		
-		# Filter unwanted commands
+
 		if error_msg := self._filter_unwanted_commands(command):
-			return ExecuteResponse(
-				output=error_msg,
-				exit_code=1,
-				truncated=False
-			)
-		
-		# Default working directory is /workspace so agent-relative paths resolve correctly.
-		# We do not wrap with SRT here: SRT's allowWrite (allow-only pattern) does not work
-		# correctly with our FUSE-mounted /workspace under bubblewrap—writes are denied with
-		# "Read-only file system". Running without SRT keeps /workspace writable.
+			return ExecuteResponse(output=error_msg, exit_code=1, truncated=False)
+
 		run_command = f"cd {self._workspace} && {command}"
 		try:
 			result = self._sandbox.commands.run(run_command, timeout=1200)
@@ -599,21 +489,27 @@ class SandboxBackend(BaseSandbox):
 			return ExecuteResponse(
 				output=f"Error executing command: {str(e)}",
 				exit_code=1,
-				truncated=False
+				truncated=False,
 			)
-		
-		# Flush filesystem changes to ensure FUSE mounts see them
+
 		try:
 			self._sandbox.commands.run("sync", timeout=500)
 		except Exception:
-			pass  # Sync failures are not critical
-		
+			pass
+
+		# Persist workspace to S3 (local /home/user supports npm symlinks; rclone mount does not)
+		try:
+			self._sync_workspace_to_s3()
+		except Exception:
+			pass
+		# User skills are mounted at .solven/skills (S3) so edits persist automatically; no sync needed
+
 		return ExecuteResponse(
 			output=result.stdout + result.stderr,
 			exit_code=result.exit_code,
-			truncated=False
+			truncated=False,
 		)
-	
+
 	async def aexecute(self, command: str) -> ExecuteResponse:
 		"""Async version of execute."""
 		return await asyncio.to_thread(self.execute, command)
@@ -624,11 +520,9 @@ class SandboxBackend(BaseSandbox):
 		responses = []
 		for path, content in files:
 			try:
-				# Decode bytes to string if it's text content
 				if isinstance(content, bytes):
 					try:
-						content_str = content.decode('utf-8')
-						self._sandbox.files.write(path, content_str)
+						self._sandbox.files.write(path, content.decode("utf-8"))
 					except UnicodeDecodeError:
 						self._sandbox.files.write(path, content)
 				else:
@@ -636,11 +530,10 @@ class SandboxBackend(BaseSandbox):
 				responses.append(FileUploadResponse(path=path, error=None))
 			except Exception as e:
 				responses.append(FileUploadResponse(path=path, error="permission_denied"))
-		
 		return responses
-	
+
 	def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
-		"""Download multiple files from the sandbox using download_url for raw bytes."""
+		"""Download multiple files from the sandbox."""
 		self._ensure_initialized()
 		responses = []
 		for path in paths:
@@ -648,43 +541,35 @@ class SandboxBackend(BaseSandbox):
 				if not self._sandbox.files.exists(path):
 					responses.append(FileDownloadResponse(path=path, content=None, error="file_not_found"))
 					continue
-				
-				# Get download URL from E2B
+
 				download_url = self._sandbox.download_url(path)
-				
-				# Fetch file content directly via HTTP to get raw bytes
 				import requests
 				response = requests.get(download_url, timeout=30)
 				response.raise_for_status()
-				
-				content_bytes = response.content  # Raw bytes, no encoding
-				responses.append(FileDownloadResponse(path=path, content=content_bytes, error=None))
-				
+				responses.append(FileDownloadResponse(path=path, content=response.content, error=None))
 			except Exception as e:
 				responses.append(FileDownloadResponse(path=path, content=None, error=f"download_error: {str(e)}"))
-		
 		return responses
-	
+
 	async def aupload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
 		"""Async version of upload_files."""
 		return await asyncio.to_thread(self.upload_files, files)
-	
+
 	async def adownload_files(self, paths: list[str]) -> list[FileDownloadResponse]:
 		"""Async version of download_files."""
 		return await asyncio.to_thread(self.download_files, paths)
-	
-	async def als_info(self, path: str = "/workspace") -> list[FileInfo]:
+
+	async def als_info(self, path: str = "/home/user") -> list[FileInfo]:
 		return await asyncio.to_thread(self.ls_info, path)
-	
+
 	async def aread(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
 		return await asyncio.to_thread(self.read, file_path, offset, limit)
-	
+
 	async def awrite(self, file_path: str, content: str) -> WriteResult:
 		return await asyncio.to_thread(self.write, file_path, content)
 
-	async def agrep_raw(self, pattern: str, path: str | None = "/workspace", glob: str | None = None) -> list[GrepMatch] | str:
+	async def agrep_raw(self, pattern: str, path: str | None = "/home/user", glob: str | None = None) -> list[GrepMatch] | str:
 		return await asyncio.to_thread(self.grep_raw, pattern, path, glob)
-	
-	async def aglob_info(self, pattern: str, path: str = "/workspace") -> list[FileInfo]:
-		return await asyncio.to_thread(self.glob_info, pattern, path)
 
+	async def aglob_info(self, pattern: str, path: str = "/home/user") -> list[FileInfo]:
+		return await asyncio.to_thread(self.glob_info, pattern, path)

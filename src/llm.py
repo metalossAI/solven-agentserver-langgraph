@@ -6,6 +6,7 @@ from langchain_groq import ChatGroq
 from langchain_cloudflare.chat_models import ChatCloudflareWorkersAI
 from langchain_ibm.chat_models import ChatWatsonx
 from langchain_openai.chat_models import ChatOpenAI
+from langchain_openrouter.chat_models import ChatOpenRouter
 
 load_dotenv()
 
@@ -15,51 +16,38 @@ granite_llm = ChatWatsonx(
     project_id="1f803e27-a263-42e6-a21b-db988a4f9b40",
 )
 
-xai_grok_4_fast = ChatOpenAI(
-    model="x-ai/grok-4-fast",
-    base_url="https://openrouter.ai/api/v1",
-    api_key=os.getenv("OPENROUTER_API_KEY"),
-    streaming=True,
-    model_kwargs={
-        "parallel_tool_calls" : False
-    }
-)
-
-xai_grok_4_fast_SO =ChatOpenAI(
+xai_grok_4_fast = ChatOpenRouter(
     model="x-ai/grok-4.1-fast",
-    base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
-    streaming=False,
 )
 
-xai_grok_code_fast_1 = ChatOpenAI(
+xai_grok_4_fast_SO =ChatOpenRouter(
+    model="x-ai/grok-4.1-fast",
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+)
+
+xai_grok_code_fast_1 = ChatOpenRouter(
     model="x-ai/grok-code-fast-1",
-    base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
-    streaming=False,
 )
 
-minimax_m2_5 = ChatOpenAI(
+minimax_m2_5 = ChatOpenRouter(
     model="minimax/minimax-m2.5",
-    base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 
-mistralai_ministral_3b_2512 = ChatOpenAI(
+mistralai_ministral_3b_2512 = ChatOpenRouter(
     model="mistralai/ministral-3b-2512",
-    base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 
-mistralai_devs_mistral_2512 = ChatOpenAI(
+mistralai_devs_mistral_2512 = ChatOpenRouter(
     model="mistralai/codestral-2508",
-    base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 
-openai_oss_120b = ChatOpenAI(
+openai_oss_120b = ChatOpenRouter(
     model="openai/gpt-oss-120b",
-    base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 
@@ -69,15 +57,13 @@ groq_oss_120b = ChatGroq(
     reasoning_effort="low",
 )
 
-google_gemini = ChatOpenAI(
+google_gemini = ChatOpenRouter(
     model="google/gemini-3-flash-preview",
-    base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 
-claude_sonnet = ChatOpenAI(
+claude_sonnet = ChatOpenRouter(
     model="anthropic/claude-sonnet-4.5",
-    base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 

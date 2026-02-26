@@ -503,7 +503,7 @@ async def outlook_download_attachment(
             )
             
             if upload_result["success"]:
-                workspace_path = f"/workspace/{file_path}"
+                workspace_path = f"/home/user/{file_path}"
                 
                 return json.dumps({
                     "success": True,

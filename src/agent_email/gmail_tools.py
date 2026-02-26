@@ -95,7 +95,7 @@ async def gmail_send_email(
         bcc: List of BCC email addresses
         extra_recipients: Additional recipient email addresses
         is_html: Whether the body is HTML formatted
-        attachment_path: Single file path from workspace (e.g., "/workspace/adjuntos/file.pdf")
+        attachment_path: Single file path from workspace (e.g., "/home/user/adjuntos/file.pdf")
         user_id: Gmail user ID (default: "me")
         
     Returns:
@@ -660,7 +660,7 @@ async def gmail_get_attachment(
         user_id (str, optional): The ID of the user's Gmail account. Defaults to "me".
         
     Returns:
-        str: JSON string with success status and workspace path (e.g., /workspace/attachments/file.pdf)
+        str: JSON string with success status and workspace path (e.g., /home/user/attachments/file.pdf)
     """
     arguments = {
         "message_id": message_id,
@@ -724,7 +724,7 @@ async def gmail_get_attachment(
             )
             
             if upload_result["success"]:
-                workspace_path = f"/workspace/{file_path}"
+                workspace_path = f"/home/user/{file_path}"
                 
                 return json.dumps({
                     "success": True,

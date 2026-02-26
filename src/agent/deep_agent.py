@@ -5,6 +5,7 @@ import os
 from deepagents.graph import SkillsMiddleware, FilesystemMiddleware, SubAgentMiddleware, TodoListMiddleware
 from dotenv import load_dotenv
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_openrouter.chat_models import ChatOpenRouter
 from langgraph.types import Command
 load_dotenv()
 
@@ -74,72 +75,73 @@ class ToolEnforcementMiddleware(AgentMiddleware):
 		return await handler(request)
 
 
+# Max evaluation cycles to avoid infinite loops (e.g. model keeps replying without tool calls but we keep re-asking)
+MAX_EVALUATION_CYCLES = 20
+
+EVALUATION_PROMPT = (
+	"Revisa cuidadosamente los resultados de las herramientas y evalúa si el trabajo está completo "
+	"o si necesitas continuar con pasos adicionales. Responde con más llamadas a herramientas o con tu respuesta final."
+)
+
+# Metadata key used to mark our evaluation SystemMessages (avoids content-based detection)
+EVALUATION_MSG_TYPE = "evaluation"
+
+
 @after_agent
 @hook_config(can_jump_to=["model"])
 def continuation_evaluation_middleware(state: AgentState, runtime: Runtime[AppContext]) -> dict | None:
 	"""
-	Middleware to encourage agent to evaluate previous work and continue.
-	
-	Logic:
-	- After tools execute and return results, sends an evaluation message
-	- Agent can then decide to make more tool calls or finish
-	- If agent makes more tool calls, those results will also be evaluated
-	- Allows MULTIPLE evaluation cycles (after each set of tool results)
-	- Only ends when agent responds without making new tool calls
-	
-	This enables iterative work where the agent can:
-	1. Use tools → evaluate → continue with more tools → evaluate again → finish
+	Middleware so the model always evaluates tool results before ending.
+
+	- After tools run, we inject a single evaluation request and jump back to the model.
+	- The model then reads all tool results and either calls more tools or ends with a final reply.
+	- We only inject when there are tool results that have not yet been "answered" by a model turn
+	  (so we never re-send evaluation after the model has already replied).
+	- Capped by MAX_EVALUATION_CYCLES to avoid infinite loops.
 	"""
 	messages = state.get("messages", [])
-	
-	# Flag: Check if the last message has tool calls
-	has_new_tool_calls = False
+
+	# 1) If the last message is an AIMessage with tool_calls, tools have not run yet — do nothing.
 	if messages:
-		last_message = messages[-1]
-		if isinstance(last_message, AIMessage) and last_message.tool_calls:
-			has_new_tool_calls = True
-	
-	# If agent made new tool calls, let them execute (don't evaluate yet)
-	if has_new_tool_calls:
+		last = messages[-1]
+		if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
+			return None
+
+	def is_evaluation_msg(msg) -> bool:
+		if not isinstance(msg, SystemMessage):
+			return False
+		meta = getattr(msg, "additional_kwargs", None) or {}
+		return meta.get("type") == EVALUATION_MSG_TYPE
+
+	# 2) Count existing evaluation prompts so we can cap cycles.
+	evaluation_count = sum(1 for m in messages if is_evaluation_msg(m))
+	if evaluation_count >= MAX_EVALUATION_CYCLES:
 		return None
-	
-	# Find the last evaluation message index (if any)
-	evaluation_content = "Revisa cuidadosamente los resultados y evalúa si el trabajo está completo o si necesitas continuar con pasos adicionales."
-	last_evaluation_index = -1
+
+	# 3) Find the last evaluation message (if any).
+	last_eval_i = -1
 	for i in range(len(messages) - 1, -1, -1):
-		msg = messages[i]
-		if isinstance(msg, SystemMessage) and evaluation_content in msg.content:
-			last_evaluation_index = i
+		if is_evaluation_msg(messages[i]):
+			last_eval_i = i
 			break
-	
-	# Flag: Check if there are tool messages AFTER the last evaluation
-	has_new_tool_results = False
-	if last_evaluation_index >= 0:
-		# Check for ToolMessages after the evaluation
-		for msg in messages[last_evaluation_index + 1:]:
-			if isinstance(msg, ToolMessage):
-				has_new_tool_results = True
-				break
-	else:
-		# No evaluation sent yet, check if there are any tool messages at all
-		for msg in messages:
-			if isinstance(msg, ToolMessage):
-				has_new_tool_results = True
-				break
-	
-	# Decision logic:
-	# If there are new tool results AND no new tool calls → send evaluation
-	if has_new_tool_results and not has_new_tool_calls:
-		evaluation_message = SystemMessage(
-			content=evaluation_content
-		)
-		return {
-			"messages": [evaluation_message],
-			"jump_to": "model"
-		}
-	
-	# Otherwise, let it continue normally (will END if no more work)
-	return None
+
+	# 4) "Unanswered" tool results = ToolMessages after the last evaluation.
+	#    If the model already replied after that evaluation, the last message is AIMessage (no tool_calls),
+	#    and there are no ToolMessages after the evaluation — so we won't inject again.
+	after_last_eval = messages[last_eval_i + 1:] if last_eval_i >= 0 else messages
+	has_unanswered_tool_results = any(isinstance(m, ToolMessage) for m in after_last_eval)
+
+	if not has_unanswered_tool_results:
+		return None
+
+	evaluation_message = SystemMessage(
+		content=EVALUATION_PROMPT,
+		additional_kwargs={"type": EVALUATION_MSG_TYPE},
+	)
+	return {
+		"messages": [evaluation_message],
+		"jump_to": "model",
+	}
 
 
 @before_agent
@@ -225,14 +227,9 @@ async def dynamic_model_router(request: ModelRequest, handler):
                 pass
         
         if model_name:
-            dynamic_llm = ChatOpenAI(
+            dynamic_llm = ChatOpenRouter(
                 model=model_name,
-                base_url="https://openrouter.ai/api/v1",
                 api_key=os.getenv("OPENROUTER_API_KEY"),
-                streaming=True,
-                model_kwargs={
-                    "parallel_tool_calls": False
-                }
             )
             
             # Override the model in the request
@@ -260,13 +257,16 @@ outlook_subagent = SubAgent(
     tools=outlook_tools,
 )
 
+# Agent skills: merged at /home/user/.solven/skills/ (user + Anthropic docx/xlsx/pptx/pdf)
+WORKSPACE_SKILLS_PATH = "/home/user/.solven/skills/"
+
 oficial_subagent = SubAgent(
     name="oficial_notarial",
     description="asistente para trabajar en escrituras notariales",
-    system_prompt="",
+    system_prompt="Eres un asistente oficial notarial. Tu espacio de trabajo es /home/user/ aqui es donde trabajaras todo. Tu skill principal es el de escrituras",
     model=coding_llm,
     skills=[
-        "/skills/",
+        WORKSPACE_SKILLS_PATH,
     ],
 )
 
@@ -286,9 +286,6 @@ graph = create_deep_agent(
         dynamic_model_router,  # Dynamically route to selected model
         ToolEnforcementMiddleware(),  # Ensure agent makes tool calls first
         #continuation_evaluation_middleware,  # Evaluate results and decide to continue (LAST)
-    ],
-	skills=[
-        "/skills/",
     ],
     context_schema=AppContext,
 )

@@ -64,7 +64,8 @@ template = (
         ])
     # Workspace isolation and utilities
     .apt_install([
-        "bubblewrap",    # Filesystem isolation (mount workspace as /)
+        "proot",         # Userspace chroot via ptrace — isolates agent to /workspace as /
+        "bubblewrap",    # Filesystem isolation (kept for reference, not used in execute)
         "ripgrep",      # Fast file search (rg) - useful for grep operations
         "socat",        # SRT proxy bridging on Linux
     ])

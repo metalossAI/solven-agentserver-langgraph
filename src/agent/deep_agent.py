@@ -149,9 +149,9 @@ async def initialize_sandbox(state: AgentState, runtime: Runtime[AppContext]):
 	"""
 	Initialize the sandbox before the agent starts working.
 	This ensures the sandbox is fully set up with:
-	- R2 mounts (workspace, skills, ticket)
-	- System skills downloaded from Anthropic repo via SVN
-	- Local skills synced
+	- R2 mounts (workspace at /workspace, user skills at /workspace/.solven/skills)
+	- Anthropic skills repo cloned at /workspace/.anthropic
+	- Local escrituras skills synced into /.solven/skills/
 	
 	Uses asyncio.to_thread to avoid blocking the async event loop.
 	"""
@@ -257,16 +257,19 @@ outlook_subagent = SubAgent(
     tools=outlook_tools,
 )
 
-# Agent skills: merged at /home/user/.solven/skills/ (user + Anthropic docx/xlsx/pptx/pdf)
-WORKSPACE_SKILLS_PATH = "/home/user/.solven/skills/"
+# User skills (S3 FUSE mount): /.solven/skills/
+# Anthropic format skills (git clone): /.anthropic/
+USER_SKILLS_PATH = "/.solven/skills/"
+ANTHROPIC_SKILLS_PATH = "/.anthropic/"
 
 oficial_subagent = SubAgent(
     name="oficial_notarial",
     description="asistente para trabajar en escrituras notariales",
-    system_prompt="Eres un asistente oficial notarial. Tu espacio de trabajo es /home/user/ aqui es donde trabajaras todo. Tu skill principal es el de escrituras",
+    system_prompt="",
     model=coding_llm,
     skills=[
-        WORKSPACE_SKILLS_PATH,
+        ANTHROPIC_SKILLS_PATH,
+        USER_SKILLS_PATH,
     ],
 )
 

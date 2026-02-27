@@ -270,7 +270,7 @@ oficial_subagent = SubAgent(
     skills=[
         ANTHROPIC_SKILLS_PATH,
         USER_SKILLS_PATH,
-    ],
+    ]
 )
 
 graph = create_deep_agent(
@@ -278,7 +278,6 @@ graph = create_deep_agent(
     system_prompt="",
     backend=lambda rt: SandboxBackend(rt),
     subagents=[
-        oficial_subagent,
         gmail_subagent,
         outlook_subagent,
         catastro_subagent,
@@ -286,9 +285,12 @@ graph = create_deep_agent(
     middleware=[
         initialize_sandbox,  # Initialize sandbox before agent starts (non-blocking)
         build_prompt,
-        dynamic_model_router,  # Dynamically route to selected model
         ToolEnforcementMiddleware(),  # Ensure agent makes tool calls first
         #continuation_evaluation_middleware,  # Evaluate results and decide to continue (LAST)
+    ],
+    skills=[
+        ANTHROPIC_SKILLS_PATH,
+        USER_SKILLS_PATH,
     ],
     context_schema=AppContext,
 )

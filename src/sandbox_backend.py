@@ -69,6 +69,8 @@ _WORKSPACE_SEARCH_SKIP_DIRS = frozenset({
     "bin", "sbin", "lib", "lib64",
     # package caches (excluded from S3 sync too, agent recreates on demand)
     "node_modules", ".venv", "venv", "env", ".bun",
+    # .git dirs (avoid traversing repo metadata when searching .solven/.anthropic)
+    ".git",
 })
 
 
@@ -542,13 +544,10 @@ class SandboxBackend(BaseSandbox):
 		return await asyncio.to_thread(self.execute, command)
 
 	def glob_info(self, pattern: str, path: str = "/") -> list["FileInfo"]:
-		"""Glob via rg --files through execute() (proot), so / maps to /workspace automatically.
-		rg handles ** patterns natively, skips symlinks, and respects _WORKSPACE_SEARCH_SKIP_DIRS.
-		"""
-		skip_globs = " ".join(f"--glob '!{d}'" for d in _WORKSPACE_SEARCH_SKIP_DIRS)
+		skip_globs = " ".join(f"--glob '!{d}/**'" for d in _WORKSPACE_SEARCH_SKIP_DIRS)
 		search_path = shlex.quote(path.rstrip("/") or "/")
 		cmd = (
-			f"rg --files --hidden --no-follow {skip_globs} "
+			f"rg --files --hidden --no-follow --no-ignore {skip_globs} "
 			f"--glob {shlex.quote(pattern)} {search_path} 2>/dev/null || true"
 		)
 		result = self.execute(cmd)
@@ -558,38 +557,6 @@ class SandboxBackend(BaseSandbox):
 			if line:
 				file_infos.append({"path": line, "is_dir": False})
 		return file_infos
-
-	def grep_raw(
-		self,
-		pattern: str,
-		path: str | None = None,
-		glob: str | None = None,
-	) -> "list[GrepMatch] | str":
-		"""Grep via rg through execute() (proot), so / maps to /workspace automatically.
-		Skips symlinks and _WORKSPACE_SEARCH_SKIP_DIRS so system dirs are never searched.
-		"""
-		skip_globs = " ".join(f"--glob '!{d}'" for d in _WORKSPACE_SEARCH_SKIP_DIRS)
-		file_glob = f"--glob {shlex.quote(glob)}" if glob else ""
-		search_path = shlex.quote(path or ".")
-		cmd = (
-			f"rg --hidden --no-follow -n -F {skip_globs} {file_glob} "
-			f"-e {shlex.quote(pattern)} {search_path} 2>/dev/null || true"
-		)
-		result = self.execute(cmd)
-		output = (result.output or "").rstrip()
-		if not output:
-			return []
-		matches: list = []
-		for line in output.splitlines():
-			parts = line.split(":", 2)
-			if len(parts) < 3:
-				continue
-			file_path, lineno, text = parts
-			try:
-				matches.append({"path": file_path, "line": int(lineno), "text": text})
-			except ValueError:
-				continue
-		return matches
 
 	def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
 		"""Upload multiple files to the sandbox. Agent paths (e.g. / or /foo) are mapped to /workspace."""

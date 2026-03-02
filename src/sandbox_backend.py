@@ -230,11 +230,8 @@ class SandboxBackend(BaseSandbox):
 				f"git config --global --add safe.directory {clone_dir}",
 				timeout=10,
 			)
-			repo_check = self._sandbox.commands.run(
-				f"test -d {clone_dir}/.git && echo EXISTS || echo NOT_FOUND",
-				timeout=10,
-			)
-			if "EXISTS" in repo_check.stdout:
+			repo_check = self._sandbox.files.exists(path=clone_dir)
+			if repo_check:
 				self._sandbox.git.pull(
 					path=clone_dir,
 					branch="main",
@@ -243,7 +240,6 @@ class SandboxBackend(BaseSandbox):
 				self._sandbox.git.clone(
 					url=repo_url,
 					path=clone_dir,
-					depth=1,
 				)
 			print(f"[_build_workspace_skills] ✓ {clone_dir} ready", flush=True)
 		except Exception as e:

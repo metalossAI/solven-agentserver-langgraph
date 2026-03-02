@@ -29,7 +29,7 @@ from langgraph.config import get_config
 
 from deepagents import create_deep_agent, SubAgent
 
-from src.llm import LLM as llm
+from src.llm import LLM as llm, google_gemini
 from src.llm import CODING_LLM as coding_llm
 from src.models import AppContext, SolvenState
 
@@ -274,11 +274,10 @@ oficial_subagent = SubAgent(
 )
 
 graph = create_deep_agent(
-    model=llm,  # Default model - will be dynamically swapped by middleware
+    model=google_gemini,  # Default model - will be dynamically swapped by middleware
     system_prompt="",
     backend=lambda rt: SandboxBackend(rt),
     subagents=[
-        oficial_subagent,
         gmail_subagent,
         outlook_subagent,
         catastro_subagent,
@@ -290,6 +289,7 @@ graph = create_deep_agent(
         #continuation_evaluation_middleware,  # Evaluate results and decide to continue (LAST)
     ],
     skills=[
+        USER_SKILLS_PATH,
         ANTHROPIC_SKILLS_PATH,
     ],
     context_schema=AppContext,

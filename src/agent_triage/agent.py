@@ -67,13 +67,12 @@ class ForceToolCallMiddleware(AgentMiddleware):
 
 @dynamic_prompt
 async def build_prompt(request: ModelRequest):
-	from src.utils.config import get_company_id_from_config, get_event_message_from_config
-	
-	# Get event_message from config
+	from src.utils.config import get_user, get_event_message_from_config
+
 	event_message = get_event_message_from_config() or ""
-	
-	# Search for similar tickets using the utility function
-	company_id = get_company_id_from_config()
+
+	user = get_user()
+	company_id = user.company_id
 	
 	if company_id and event_message:
 		similar_tickets = await search(

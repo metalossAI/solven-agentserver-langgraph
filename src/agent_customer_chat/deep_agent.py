@@ -1,56 +1,48 @@
+import os
 from dotenv import load_dotenv
 from langchain_core.prompts import ChatPromptTemplate
 from langsmith import AsyncClient
 load_dotenv()
 
-from langchain.tools import ToolRuntime
-from langchain.agents.middleware import AgentMiddleware, ModelRequest, before_model, dynamic_prompt, ModelResponse, wrap_model_call
-
-from langgraph.runtime import Runtime
-from langgraph.store.base import BaseStore
-from langgraph.graph.state import RunnableConfig
-from langgraph.config import get_config
-
-from deepagents import create_deep_agent, SubAgent
+from langchain.agents.middleware import ModelRequest, dynamic_prompt, AgentState
+from deepagents import create_deep_agent
 
 from src.llm import LLM as llm
-from src.models import AppContext, SolvenState, Ticket
-
-from src.agent_customer_chat.prompt import main_prompt
-
-from src.agent_customer_chat.backend import S3Backend
-from src.agent_customer_chat.tools import listar_solicitudes_cliente, crear_solicitud, actualizar_solicitud
-from src.common_tools.files import solicitar_archivo
-
-from langchain.agents.middleware import before_agent, AgentState
-from langchain.messages import AIMessage
-from langgraph.runtime import Runtime
+from src.models import AppContext
+from src.agent_customer_chat.tools import (
+    listar_solicitudes_cliente,
+    crear_solicitud,
+    leer_solicitud,
+    actualizar_solicitud,
+    solicitar_archivo,
+)
 
 
 @dynamic_prompt
-async def build_prompt(state: AgentState, runtime: Runtime[AppContext]):
-
-    # Get user data from config
-    config: RunnableConfig = get_config()
-    user_config = config["configurable"].get("langgraph_auth_user", {})
-    user_data = user_config.get("user_data", {})
-    
+async def build_prompt(state: AgentState):
+    from src.utils.config import get_user, get_user_info_by_id
+    user = get_user()
+    user_info = await get_user_info_by_id(user.id, user.company_id) if user.id else {}
     client = AsyncClient()
-    main_prompt : ChatPromptTemplate = await client.pull_prompt("solven-customer-chat")
+    main_prompt: ChatPromptTemplate = await client.pull_prompt("solven-customer-chat")
     return main_prompt.format(
-        name=user_data.get("name", "Usuario"),
-        email=user_data.get("email", ""),
+        company_name=user_info.get("company_name") or user.name,
+        client_name=user_info.get("full_name") or user.name,
+        client_email=user_info.get("email") or user.email,
+        phone_number=user_info.get("phone", ""),
     )
+
 
 graph = create_deep_agent(
     model=llm,
-    backend=lambda rt: S3Backend(rt),
     tools=[
         listar_solicitudes_cliente,
-        solicitar_archivo,
-        actualizar_solicitud,
         crear_solicitud,
+        leer_solicitud,
+        actualizar_solicitud,
+        solicitar_archivo,
     ],
-    middleware=[],
+    middleware=[build_prompt],
+    system_prompt="",
     context_schema=AppContext,
 )

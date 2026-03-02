@@ -19,7 +19,7 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SECRET_KEY")
 
 from src.utils.tickets import get_ticket
-from src.utils.config import get_company_id_from_config, get_user_id_from_config
+from src.utils.config import get_user
 
 @tool
 async def buscar_tickets(query: str, runtime: ToolRuntime[AppContext]) -> ToolMessage:
@@ -31,16 +31,15 @@ async def buscar_tickets(query: str, runtime: ToolRuntime[AppContext]) -> ToolMe
     - query: texto de búsqueda para encontrar tickets relacionados
     """
     try:
-        # Get company_id from config
-        company_id = get_company_id_from_config()
+        user = get_user()
+        company_id = user.company_id
         if not company_id:
             return ToolMessage(
-                content="Error: No se encontró el ID de la compañía",
+                content="Error: Usuario sin compañía asignada",
                 status="error",
                 tool_call_id=runtime.tool_call_id
             )
-        
-        # Use the search function from utils/vector_store.py which uses PGVectorStore
+
         from src.utils.vector_store import search
         result = await search(query=query, company_id=company_id, k=5)
         
@@ -64,15 +63,15 @@ async def leer_ticket(ticket_id: str, runtime: ToolRuntime[AppContext]) -> ToolM
     Lee el ticket seleccionado y su contenido desde la tabla de documentos.
     """
     try:
-        # Get company_id from config
-        company_id = get_company_id_from_config()
+        user = get_user()
+        company_id = user.company_id
         if not company_id:
             return ToolMessage(
-                content="Error: No se encontró el ID de la compañía",
+                content="Error: Usuario sin compañía asignada",
                 status="error",
                 tool_call_id=runtime.tool_call_id
             )
-        
+
         supabase_async = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
         
         # Verify ticket belongs to user's company
@@ -204,48 +203,23 @@ async def crear_ticket(
     Opcionalmente puede incluir acciones sugeridas para completar el ticket.
     """
     try:
-        # Get company_id from config
-        company_id = get_company_id_from_config()
+        user = get_user()
+        company_id = user.company_id
+        user_id = user.id
         if not company_id:
             return ToolMessage(
-                content="Error: No se encontró el ID de la compañía",
+                content="Error: Usuario sin compañía asignada",
                 status="error",
                 tool_call_id=runtime.tool_call_id
             )
-        
-        # Get user_id from config
-        user_id = get_user_id_from_config()
-        if not user_id:
-            # Try to get from metadata as fallback
-            from langgraph.config import get_config
-            config = get_config()
-            metadata = config.get("metadata", {})
-            user_id = metadata.get("user_id")
-        
-        if not user_id:
-            return ToolMessage(
-                content="Error: No se encontró el ID del usuario en la configuración",
-                status="error",
-                tool_call_id=runtime.tool_call_id
-            )
-        
-        # Validate user_id is a valid UUID format
-        try:
-            uuid.UUID(user_id)
-        except (ValueError, TypeError):
-            return ToolMessage(
-                content=f"Error: ID de usuario inválido: {user_id}",
-                status="error",
-                tool_call_id=runtime.tool_call_id
-            )
-        
+
         # Validate priority
         valid_priorities = ['low', 'medium', 'high', 'urgent']
         if prioridad not in valid_priorities:
             prioridad = 'medium'
-        
+
         supabase_async = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-        
+
         # Check if client already exists for this email and company
         print(f"[DEBUG] Checking if client exists for email {correo_cliente} and company {company_id}...", flush=True)
         existing_client = await supabase_async.table("clients").select("id, user_id").eq("email", correo_cliente).eq("company_id", company_id).execute()
@@ -387,6 +361,10 @@ async def crear_ticket(
                 try:
                     actions_response = await supabase_async.table("actions").insert(actions_to_insert).execute()
                     print(f"[DEBUG] Created {len(actions_to_insert)} actions successfully", flush=True)
+                    # Set ticket updated_at when actions are added
+                    await supabase_async.table("tickets").update({
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }).eq("id", ticket_id).eq("company_id", company_id).execute()
                 except Exception as e:
                     print(f"[WARNING] Failed to create actions: {str(e)}", flush=True)
                     # Don't fail ticket creation if actions fail
@@ -436,15 +414,15 @@ async def patch_ticket(
                 tool_call_id=runtime.tool_call_id
             )
         
-        # Get company_id from config
-        company_id = get_company_id_from_config()
+        user = get_user()
+        company_id = user.company_id
         if not company_id:
             return ToolMessage(
                 content="Error: Usuario sin compañía asignada",
                 status="error",
                 tool_call_id=runtime.tool_call_id
             )
-        
+
         # Verify ticket belongs to user's company
         ticket_check = await supabase_async.table("tickets").select("id, document_id").eq("id", ticket_id).eq("company_id", company_id).execute()
         
@@ -594,62 +572,23 @@ async def descartar_evento(
     - prioridad: prioridad del ticket ('low', 'medium', 'high', 'urgent'). Por defecto 'low'
     """
     try:
-        # Get company_id from config
-        company_id = get_company_id_from_config()
+        user = get_user()
+        company_id = user.company_id
+        user_id = user.id
         if not company_id:
             return Command(
                 goto="__end__",
                 update={
                     "messages": [
                         ToolMessage(
-                            content="Error: No se encontró el ID de la compañía",
+                            content="Error: Usuario sin compañía asignada",
                             status="error",
                             tool_call_id=runtime.tool_call_id
                         )
                     ]
                 }
             )
-        
-        # Get user_id from config
-        user_id = get_user_id_from_config()
-        if not user_id:
-            # Try to get from metadata as fallback
-            from langgraph.config import get_config
-            config = get_config()
-            metadata = config.get("metadata", {})
-            user_id = metadata.get("user_id")
-        
-        if not user_id:
-            return Command(
-                goto="__end__",
-                update={
-                    "messages": [
-                        ToolMessage(
-                            content="Error: No se encontró el ID del usuario en la configuración",
-                            status="error",
-                            tool_call_id=runtime.tool_call_id
-                        )
-                    ]
-                }
-            )
-        
-        # Validate user_id is a valid UUID format
-        try:
-            uuid.UUID(user_id)
-        except (ValueError, TypeError):
-            return Command(
-                goto="__end__",
-                update={
-                    "messages": [
-                        ToolMessage(
-                            content=f"Error: ID de usuario inválido: {user_id}",
-                            status="error",
-                            tool_call_id=runtime.tool_call_id
-                        )
-                    ]
-                }
-            )
-        
+
         # Validate priority
         valid_priorities = ['low', 'medium', 'high', 'urgent']
         if prioridad not in valid_priorities:
@@ -822,40 +761,16 @@ async def merge_tickets(ticket_ids: list[str], runtime: ToolRuntime[AppContext] 
                 tool_call_id=runtime.tool_call_id
             )
         
-        # Get company_id from config
-        company_id = get_company_id_from_config()
+        user = get_user()
+        company_id = user.company_id
+        user_id = user.id
         if not company_id:
             return ToolMessage(
                 content="Error: Usuario sin compañía asignada",
                 status="error",
                 tool_call_id=runtime.tool_call_id
             )
-        
-        # Get user_id from config
-        user_id = get_user_id_from_config()
-        if not user_id:
-            # Try to get from metadata as fallback
-            from langgraph.config import get_config
-            config = get_config()
-            metadata = config.get("metadata", {})
-            user_id = metadata.get("user_id")
-        
-        if not user_id:
-            return ToolMessage(
-                content="Error: No se encontró el ID del usuario en la configuración",
-                status="error",
-                tool_call_id=runtime.tool_call_id
-            )
-        
-        # Validate user_id is a valid UUID format
-        try:
-            uuid.UUID(user_id)
-        except (ValueError, TypeError):
-            return ToolMessage(
-                content=f"Error: ID de usuario inválido: {user_id}",
-                status="error",
-                tool_call_id=runtime.tool_call_id
-            )
+
         
         supabase_async = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
         
@@ -1079,15 +994,15 @@ async def leer_acciones(ticket_id: str, runtime: ToolRuntime[AppContext]) -> Too
     - ticket_id: ID del ticket del cual se quieren leer las acciones
     """
     try:
-        # Get company_id from config
-        company_id = get_company_id_from_config()
+        user = get_user()
+        company_id = user.company_id
         if not company_id:
             return ToolMessage(
-                content="Error: No se encontró el ID de la compañía",
+                content="Error: Usuario sin compañía asignada",
                 status="error",
                 tool_call_id=runtime.tool_call_id
             )
-        
+
         supabase_async = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
         
         # Verify ticket exists and belongs to user's company
@@ -1154,26 +1069,16 @@ async def gestionar_acciones(
           En modo 'insert', se insertan las nuevas acciones (comportamiento similar a append).
     """
     try:
-        # Get company_id from config
-        company_id = get_company_id_from_config()
+        user = get_user()
+        company_id = user.company_id
         if not company_id:
             return ToolMessage(
-                content="Error: No se encontró el ID de la compañía",
+                content="Error: Usuario sin compañía asignada",
                 status="error",
                 tool_call_id=runtime.tool_call_id
             )
-        
-        # Get user_id from config (for created_by)
-        user_id = get_user_id_from_config()
-        if not user_id:
-            # Try to get from metadata as fallback
-            from langgraph.config import get_config
-            config = get_config()
-            metadata = config.get("metadata", {})
-            user_id = metadata.get("user_id")
-        
-        # Use 'AI' as created_by if user_id not available
-        created_by = user_id if user_id else "AI"
+
+        created_by = user.id
         
         supabase_async = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
         
@@ -1250,6 +1155,11 @@ async def gestionar_acciones(
         try:
             actions_response = await supabase_async.table("actions").insert(actions_to_insert).execute()
             print(f"[DEBUG] Created {len(actions_to_insert)} actions successfully in mode '{modo}'", flush=True)
+            
+            # Set ticket updated_at when actions are modified for this ticket
+            await supabase_async.table("tickets").update({
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", ticket_id).eq("company_id", company_id).execute()
             
             modo_msg = "agregadas" if modo == "append" else "insertadas"
             response_msg = f"Se {modo_msg} {len(actions_to_insert)} acción(es) al ticket {ticket_id}"

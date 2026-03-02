@@ -73,6 +73,9 @@ _WORKSPACE_SEARCH_SKIP_DIRS = frozenset({
     ".git",
 })
 
+# In .anthropic/skills we only keep these extensions; all other files are removed after clone/pull.
+_ANTHROPIC_SKILLS_KEEP_EXTENSIONS = (".docx", ".pdf", ".xlsx", ".pptx")
+
 
 class SandboxBackend(BaseSandbox):
 	"""
@@ -91,17 +94,15 @@ class SandboxBackend(BaseSandbox):
 		self._sandbox: Optional[Sandbox] = None
 		self._writer = get_stream_writer()
 
-		from src.utils.config import get_user_id_from_config, get_thread_id_from_config
+		from src.utils.config import get_user, get_thread_id
 
-		thread_id = get_thread_id_from_config()
+		thread_id = get_thread_id()
 		if not thread_id:
 			raise RuntimeError("Cannot initialize SandboxBackend: thread_id not found in config")
 		self._thread_id = thread_id
 
-		user_id = get_user_id_from_config()
-		if not user_id:
-			raise RuntimeError("Cannot initialize SandboxBackend: user_id not found in config")
-		self._user_id = user_id
+		user = get_user()  # raises RuntimeError if missing
+		self._user_id = user.id
 
 		# Mount paths
 		self._workspace = "/workspace"                       # Agent CWD and HOME; all work here
@@ -222,7 +223,7 @@ class SandboxBackend(BaseSandbox):
 
 	def _build_workspace_skills(self) -> None:
 		"""Clone (or pull) github.com/anthropics/skills into /workspace/.anthropic.
-		No file copying — the repo is referenced in-place by the agent as /.anthropic/.
+		After clone/pull, remove all files under .anthropic/skills/ except .docx, .pdf, .xlsx, .pptx.
 		Excluded from workspace rsync so it never pollutes the S3 thread bucket.
 		"""
 		try:
@@ -247,7 +248,24 @@ class SandboxBackend(BaseSandbox):
 					path=clone_dir,
 					depth=1,
 				)
-			print(f"[_build_workspace_skills] ✓ {clone_dir} ready", flush=True)
+			# Keep only docx, pdf, xlsx, pptx under .anthropic/skills/; remove everything else
+			skills_dir = f"{clone_dir}/skills"
+			# find: delete any file that does NOT match any of the kept extensions
+			name_predicates = " -o ".join(
+				f"-name '*{ext}'" for ext in _ANTHROPIC_SKILLS_KEEP_EXTENSIONS
+			)
+			self._sandbox.commands.run(
+				f"test -d {skills_dir} && find {skills_dir} -type f ! \\( {name_predicates} \\) -delete 2>/dev/null || true",
+				timeout=60,
+				user="root",
+			)
+			# Remove empty dirs under skills (optional cleanup)
+			self._sandbox.commands.run(
+				f"test -d {skills_dir} && find {skills_dir} -type d -empty -delete 2>/dev/null || true",
+				timeout=30,
+				user="root",
+			)
+			print(f"[_build_workspace_skills] ✓ {clone_dir} ready (skills: only docx/pdf/xlsx/pptx)", flush=True)
 		except Exception as e:
 			print(f"[_build_workspace_skills] ✗ Error: {e}", flush=True)
 			import traceback
@@ -557,6 +575,40 @@ class SandboxBackend(BaseSandbox):
 			if line:
 				file_infos.append({"path": line, "is_dir": False})
 		return file_infos
+
+	def grep_raw(
+		self,
+		pattern: str,
+		path: str | None = None,
+		glob: str | None = None,
+	) -> "list[GrepMatch] | str":
+		"""Same as base (grep -rHnF via execute) but with --exclude-dir so root search is fast.
+		When path is / we also exclude .anthropic to avoid traversing the full skills repo.
+		"""
+		search_path = shlex.quote((path or ".").rstrip("/") or "/")
+		skip_dirs = set(_WORKSPACE_SEARCH_SKIP_DIRS)
+		# Root search: also skip .anthropic (large git clone) so grep returns quickly
+		if (path or "/").strip().rstrip("/") in ("", "/", "."):
+			skip_dirs = skip_dirs | {".anthropic"}
+		exclude_dirs = " ".join(f"--exclude-dir={d}" for d in skip_dirs)
+		glob_pattern = f"--include={shlex.quote(glob)}" if glob else ""
+		cmd = (
+			f"grep -rHnF {exclude_dirs} {glob_pattern} "
+			f"-e {shlex.quote(pattern)} {search_path} 2>/dev/null || true"
+		)
+		result = self.execute(cmd)
+		output = (result.output or "").rstrip()
+		if not output:
+			return []
+		matches: list = []
+		for line in output.split("\n"):
+			parts = line.split(":", 2)
+			if len(parts) >= 3:
+				try:
+					matches.append({"path": parts[0], "line": int(parts[1]), "text": parts[2]})
+				except ValueError:
+					continue
+		return matches
 
 	def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
 		"""Upload multiple files to the sandbox. Agent paths (e.g. / or /foo) are mapped to /workspace."""

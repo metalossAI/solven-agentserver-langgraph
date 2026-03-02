@@ -175,15 +175,11 @@ async def build_prompt(request: ModelRequest):
     # Backend is already initialized in build_context
     system_prompt : SystemMessage = request.system_message
 
-    # Extract user data from config
-    config: RunnableConfig = get_config()
-    user_config = config["configurable"].get("langgraph_auth_user", {})
-    user_data = user_config.get("user_data", {})
-    user_name = user_data.get("name", "Usuario")
-    user_role = user_data.get("role", "usuario")
-    
-    # Load ticket using thread_id (which is the ticket ID)
-    thread_id = config.get("metadata", {}).get("thread_id")
+    from src.utils.config import get_user, get_thread_id
+    user = get_user()
+    user_name = user.name or "Usuario"
+    user_role = user.role or "usuario"
+    thread_id = get_thread_id() or get_config().get("metadata", {}).get("thread_id")
     ticket = await get_ticket(thread_id)
 
     client = AsyncClient()
@@ -260,7 +256,7 @@ outlook_subagent = SubAgent(
 # User skills (S3 FUSE mount): /.solven/skills/
 # Anthropic format skills (git clone): /.anthropic/
 USER_SKILLS_PATH = "/.solven/skills/"
-ANTHROPIC_SKILLS_PATH = "/.anthropic/"
+ANTHROPIC_SKILLS_PATH = "/.anthropic/skills/"
 
 oficial_subagent = SubAgent(
     name="oficial_notarial",
@@ -278,6 +274,7 @@ graph = create_deep_agent(
     system_prompt="",
     backend=lambda rt: SandboxBackend(rt),
     subagents=[
+        oficial_subagent,
         gmail_subagent,
         outlook_subagent,
         catastro_subagent,
@@ -290,7 +287,6 @@ graph = create_deep_agent(
     ],
     skills=[
         ANTHROPIC_SKILLS_PATH,
-        USER_SKILLS_PATH,
     ],
     context_schema=AppContext,
 )

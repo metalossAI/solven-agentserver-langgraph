@@ -6,4 +6,4 @@ from datetime import datetime
 load_dotenv()
 
 client = Client()
-main_prompt : ChatPromptTemplate = client.pull_prompt("solven-customer-chat")
+main_prompt : ChatPromptTemplate = client.pull_prompt("solven-triage-solicitudes")

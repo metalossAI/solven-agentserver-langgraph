@@ -225,6 +225,8 @@ class SandboxBackend(BaseSandbox):
 		"""Clone (or pull) github.com/anthropics/skills into /workspace/.anthropic.
 		Uses commands.run (not E2B git API) for reliability and explicit timeouts.
 		Excluded from workspace rsync so it never pollutes the S3 thread bucket.
+		In production the directory may exist (e.g. after mkdir -p) but be empty;
+		only pull when it is actually a git repo (.git exists), otherwise clone.
 		"""
 		clone_dir = self.ANTHROPIC_SKILLS_DIR
 		repo_url = "https://github.com/anthropics/skills.git"
@@ -238,14 +240,26 @@ class SandboxBackend(BaseSandbox):
 				f"git config --global --add safe.directory {clone_dir}",
 				timeout=10,
 			)
-			repo_check = self._sandbox.files.exists(path=clone_dir)
-			if repo_check:
+			# Only pull if this is already a git repo; otherwise clone (path may exist but be empty in production)
+			is_git_repo = self._sandbox.files.exists(path=f"{clone_dir}/.git")
+			if is_git_repo:
 				self._sandbox.git.pull(
 					path=clone_dir,
 					remote="origin",
 					branch="main",
 				)
 			else:
+				# Remove directory if it exists but is not a repo, so clone gets a clean target
+				self._sandbox.commands.run(
+					f"rm -rf {clone_dir}",
+					timeout=10,
+					user="root",
+				)
+				self._sandbox.commands.run(
+					f"mkdir -p {clone_dir}",
+					timeout=10,
+					user="root",
+				)
 				self._sandbox.git.clone(
 					url=repo_url,
 					path=clone_dir,

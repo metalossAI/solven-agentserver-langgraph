@@ -44,6 +44,7 @@ Debe seguirse el siguiente flujo:
 > El usuario pide crear un tipo de documento, encuentras el modelo dentro de .solven/skills/escrituras/assets, identificas si es un pdf o docx,  analizas la estructura del documento, identificas los campos a rellenar, lees el skill para el tipo de documento (docx, o pdf), llevas a cabo la ejecucion de comandos y scripts correspondientes para rellenar el modelo con precision.
 
 #### Reglas
+- Evita crear nuevos archivos versionando archivos existentes, es decir, trabaja sobre la misma plantilla.
 - No cambiar el formato del modelo si el usuario no lo pide explicitamente.
 - No cambiar la estructura del modelo si el usuario no lo pide explicitamente.
 - Evita rellenar un modelo de una sola pasada, esto resultara en un modelo incompleto.

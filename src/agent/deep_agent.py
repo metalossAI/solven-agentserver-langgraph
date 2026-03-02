@@ -179,8 +179,12 @@ async def build_prompt(request: ModelRequest):
     user = get_user()
     user_name = user.name or "Usuario"
     user_role = user.role or "usuario"
-    thread_id = get_thread_id() or get_config().get("metadata", {}).get("thread_id")
-    ticket = await get_ticket(thread_id)
+    metadata = get_config().get("metadata") or {}
+    # Workspace runs have metadata.ticket_id (thread_id is the workspace thread). Customer chat has thread_id == ticket_id.
+    ticket_id = metadata.get("ticket_id")
+    thread_id = get_thread_id() or metadata.get("thread_id")
+    id_for_ticket = ticket_id if ticket_id else thread_id
+    ticket = await get_ticket(id_for_ticket)
 
     client = AsyncClient()
     base_prompt: ChatPromptTemplate = await client.pull_prompt("solven-main")
@@ -282,7 +286,7 @@ graph = create_deep_agent(
     middleware=[
         initialize_sandbox,  # Initialize sandbox before agent starts (non-blocking)
         build_prompt,
-        ToolEnforcementMiddleware(),  # Ensure agent makes tool calls first
+        #ToolEnforcementMiddleware(),  # Ensure agent makes tool calls first
         #continuation_evaluation_middleware,  # Evaluate results and decide to continue (LAST)
     ],
     skills=[

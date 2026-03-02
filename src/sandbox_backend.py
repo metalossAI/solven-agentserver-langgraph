@@ -73,9 +73,6 @@ _WORKSPACE_SEARCH_SKIP_DIRS = frozenset({
     ".git",
 })
 
-# In .anthropic/skills we only keep these extensions; all other files are removed after clone/pull.
-_ANTHROPIC_SKILLS_KEEP_EXTENSIONS = (".docx", ".pdf", ".xlsx", ".pptx")
-
 
 class SandboxBackend(BaseSandbox):
 	"""
@@ -223,7 +220,7 @@ class SandboxBackend(BaseSandbox):
 
 	def _build_workspace_skills(self) -> None:
 		"""Clone (or pull) github.com/anthropics/skills into /workspace/.anthropic.
-		After clone/pull, remove all files under .anthropic/skills/ except .docx, .pdf, .xlsx, .pptx.
+		No file copying — the repo is referenced in-place by the agent as /.anthropic/.
 		Excluded from workspace rsync so it never pollutes the S3 thread bucket.
 		"""
 		try:
@@ -248,24 +245,7 @@ class SandboxBackend(BaseSandbox):
 					path=clone_dir,
 					depth=1,
 				)
-			# Keep only docx, pdf, xlsx, pptx under .anthropic/skills/; remove everything else
-			skills_dir = f"{clone_dir}/skills"
-			# find: delete any file that does NOT match any of the kept extensions
-			name_predicates = " -o ".join(
-				f"-name '*{ext}'" for ext in _ANTHROPIC_SKILLS_KEEP_EXTENSIONS
-			)
-			self._sandbox.commands.run(
-				f"test -d {skills_dir} && find {skills_dir} -type f ! \\( {name_predicates} \\) -delete 2>/dev/null || true",
-				timeout=60,
-				user="root",
-			)
-			# Remove empty dirs under skills (optional cleanup)
-			self._sandbox.commands.run(
-				f"test -d {skills_dir} && find {skills_dir} -type d -empty -delete 2>/dev/null || true",
-				timeout=30,
-				user="root",
-			)
-			print(f"[_build_workspace_skills] ✓ {clone_dir} ready (skills: only docx/pdf/xlsx/pptx)", flush=True)
+			print(f"[_build_workspace_skills] ✓ {clone_dir} ready", flush=True)
 		except Exception as e:
 			print(f"[_build_workspace_skills] ✗ Error: {e}", flush=True)
 			import traceback
@@ -407,6 +387,7 @@ class SandboxBackend(BaseSandbox):
 	def _mount_user_skills(self) -> None:
 		"""Mount S3 skills/{user_id} at /workspace/.solven/skills. Anthropic skills copied in by _build_workspace_skills."""
 		bucket = os.getenv("S3_BUCKET_NAME", "solven-testing")
+		solven_dir = "/workspace/.solven"
 		self._sandbox.commands.run(f"mkdir -p {self._workspace_skills_dir}", timeout=30, user="root")
 		try:
 			result = self._sandbox.commands.run(
@@ -423,6 +404,17 @@ class SandboxBackend(BaseSandbox):
 				timeout=10,
 			)
 			print(f"[Mount] {self._workspace_skills_dir} mount check: {verify.stdout.strip()}", flush=True)
+			# Ensure .solven is writable by the agent (runs as user in proot)
+			self._sandbox.commands.run(
+				f"chown -R user:user {solven_dir} 2>/dev/null || true",
+				timeout=15,
+				user="root",
+			)
+			self._sandbox.commands.run(
+				f"chmod -R u+rwX {solven_dir} 2>/dev/null || true",
+				timeout=15,
+				user="root",
+			)
 		except Exception as e:
 			raise
 

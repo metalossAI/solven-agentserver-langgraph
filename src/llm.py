@@ -83,7 +83,7 @@ LLM_SO = xai_grok_4_fast_SO
 
 CODING_LLM = minimax_m2_5 #ai_grok_code_fast_1
 
-LLM = nemotron #xai_grok_4_fast  # Default model for agent
+LLM = xai_grok_4_fast  # Default model for agent
 
 
 __all__ = ["LLM"]

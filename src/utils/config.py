@@ -71,7 +71,6 @@ def get_user() -> UserContext:
     try:
         config: RunnableConfig = get_config()
         configurable = config.get("configurable", {})
-        print(f"[CONFIGURABLE]: {configurable}")
 
         # ── Path 1: new full user object ─────────────────────────────────
         user_obj = configurable.get("user")

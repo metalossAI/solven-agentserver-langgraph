@@ -207,7 +207,10 @@ class SandboxBackend(BaseSandbox):
 		self._mount_s3_buckets()
 
 		# Step 4: Mount user skills at /workspace/.solven/skills; seed escrituras and Anthropic formats
-		self._mount_user_skills()
+		try:
+			self._mount_user_skills()
+		except Exception as e:
+			print(f"[_ensure_initialized] ⚠ Skills mount failed (non-blocking): {e}", flush=True)
 		self._sync_local_skills()
 		self._build_workspace_skills()
 
@@ -220,12 +223,17 @@ class SandboxBackend(BaseSandbox):
 
 	def _build_workspace_skills(self) -> None:
 		"""Clone (or pull) github.com/anthropics/skills into /workspace/.anthropic.
-		No file copying — the repo is referenced in-place by the agent as /.anthropic/.
+		Uses commands.run (not E2B git API) for reliability and explicit timeouts.
 		Excluded from workspace rsync so it never pollutes the S3 thread bucket.
 		"""
+		clone_dir = self.ANTHROPIC_SKILLS_DIR
+		repo_url = "https://github.com/anthropics/skills.git"
 		try:
-			clone_dir = self.ANTHROPIC_SKILLS_DIR
-			repo_url = "https://github.com/anthropics/skills.git"
+			self._sandbox.commands.run(
+				f"mkdir -p {clone_dir}",
+				timeout=10,
+				user="root",
+			)
 			self._sandbox.commands.run(
 				f"git config --global --add safe.directory {clone_dir}",
 				timeout=10,
@@ -234,6 +242,7 @@ class SandboxBackend(BaseSandbox):
 			if repo_check:
 				self._sandbox.git.pull(
 					path=clone_dir,
+					remote="origin",
 					branch="main",
 				)
 			else:
@@ -241,7 +250,25 @@ class SandboxBackend(BaseSandbox):
 					url=repo_url,
 					path=clone_dir,
 				)
-			print(f"[_build_workspace_skills] ✓ {clone_dir} ready", flush=True)
+			verify = self._sandbox.files.exists(path=f"{clone_dir}/skills")
+			if not verify:
+				raise RuntimeError(f"Anthropic skills verification failed: {clone_dir}")
+
+			# After a successful clone/pull, keep only office document skills under .anthropic/skills
+			skills_dir = f"{clone_dir}/skills"
+			cleanup_cmd = (
+				f"if [ -d {skills_dir} ]; then "
+				f"find {skills_dir} -type f ! \\( -name '*.docx' -o -name '*.pdf' -o -name '*.xlsx' -o -name '*.pptx' \\) -delete 2>/dev/null; "
+				f"find {skills_dir} -type d -empty -delete 2>/dev/null; "
+				"fi || true"
+			)
+			self._sandbox.commands.run(
+				cleanup_cmd,
+				timeout=120,
+				user="root",
+			)
+
+			print(f"[_build_workspace_skills] ✓ {clone_dir} ready (pruned to docx/pdf/xlsx/pptx)", flush=True)
 		except Exception as e:
 			print(f"[_build_workspace_skills] ✗ Error: {e}", flush=True)
 			import traceback
@@ -384,11 +411,11 @@ class SandboxBackend(BaseSandbox):
 		"""Mount S3 skills/{user_id} at /workspace/.solven/skills. Anthropic skills copied in by _build_workspace_skills."""
 		bucket = os.getenv("S3_BUCKET_NAME", "solven-testing")
 		solven_dir = "/workspace/.solven"
-		self._sandbox.commands.run(f"mkdir -p {self._workspace_skills_dir}", timeout=30, user="root")
+		self._sandbox.commands.run(f"mkdir -p {self._workspace_skills_dir}", timeout=60, user="root")
 		try:
 			result = self._sandbox.commands.run(
 				f'bash /tmp/mount_s3_path.sh "{bucket}" "skills/{self._user_id}" "{self._workspace_skills_dir}" "/tmp/rclone-skills-user.log"',
-				timeout=500,
+				timeout=0,  # Disable E2B timeout for long-running rclone mount
 				user="root",
 			)
 			if result.exit_code != 0:
@@ -550,11 +577,17 @@ class SandboxBackend(BaseSandbox):
 		return await asyncio.to_thread(self.execute, command)
 
 	def glob_info(self, pattern: str, path: str = "/") -> list["FileInfo"]:
-		skip_globs = " ".join(f"--glob '!{d}/**'" for d in _WORKSPACE_SEARCH_SKIP_DIRS)
-		search_path = shlex.quote(path.rstrip("/") or "/")
+		"""List files matching pattern via find -iname (case-insensitive) so e.g. **/acta* matches ACTA JUNTA UNIVERSAL."""
+		search_path = path.rstrip("/") or "/"
+		# Basename part for -iname: **/acta* -> acta*, **/*.pdf -> *.pdf
+		basename_pattern = pattern.split("/")[-1] if "/" in pattern else pattern
+		if not basename_pattern or basename_pattern == "**":
+			basename_pattern = "*"
+		# Prune skip dirs only ( -type d -name d1 -o -type d -name d2 ... ) -prune -o -type f -iname 'pattern' -print
+		prune_expr = " -o ".join(f"-type d -name {shlex.quote(d)}" for d in _WORKSPACE_SEARCH_SKIP_DIRS)
 		cmd = (
-			f"rg --files --hidden --no-follow --no-ignore {skip_globs} "
-			f"--glob {shlex.quote(pattern)} {search_path} 2>/dev/null || true"
+			f"find {shlex.quote(search_path)} "
+			f"\\( {prune_expr} \\) -prune -o -type f -iname {shlex.quote(basename_pattern)} -print 2>/dev/null"
 		)
 		result = self.execute(cmd)
 		file_infos: list = []
@@ -575,9 +608,6 @@ class SandboxBackend(BaseSandbox):
 		"""
 		search_path = shlex.quote((path or ".").rstrip("/") or "/")
 		skip_dirs = set(_WORKSPACE_SEARCH_SKIP_DIRS)
-		# Root search: also skip .anthropic (large git clone) so grep returns quickly
-		if (path or "/").strip().rstrip("/") in ("", "/", "."):
-			skip_dirs = skip_dirs | {".anthropic"}
 		exclude_dirs = " ".join(f"--exclude-dir={d}" for d in skip_dirs)
 		glob_pattern = f"--include={shlex.quote(glob)}" if glob else ""
 		cmd = (

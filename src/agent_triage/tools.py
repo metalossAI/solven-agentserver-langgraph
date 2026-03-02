@@ -556,6 +556,7 @@ async def descartar_evento(
     correo_cliente: str,
     razon_descarte: str,
     prioridad: str = "low",
+    descartar_completamente: bool = False,
     runtime: ToolRuntime[AppContext] = None
 ) -> Command:
     """
@@ -570,6 +571,7 @@ async def descartar_evento(
     - correo_cliente: email del cliente que envió el evento
     - razon_descarte: razón por la cual se descarta el evento
     - prioridad: prioridad del ticket ('low', 'medium', 'high', 'urgent'). Por defecto 'low'
+    - descartar_completamente: si es True, se descartará el evento completamente, eliminando el ticket y el documento asociado
     """
     try:
         user = get_user()
@@ -593,7 +595,21 @@ async def descartar_evento(
         valid_priorities = ['low', 'medium', 'high', 'urgent']
         if prioridad not in valid_priorities:
             prioridad = 'low'
-        
+
+        if descartar_completamente:
+            return Command(
+                goto="__end__",
+                update={
+                    "messages": [
+                        ToolMessage(
+                            content="Evento descartado completamente",
+                            status="success",
+                            tool_call_id=runtime.tool_call_id
+                        )
+                    ]
+                }
+            )
+
         supabase_async = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
         
         # Note: We don't create clients in descartar_evento - only crear_ticket creates new clients

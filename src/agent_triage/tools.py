@@ -562,6 +562,7 @@ async def descartar_evento(
     """
     Descarta un evento creando un ticket con estado 'discarded' para referencia futura.
     Los usuarios pueden recuperar eventos descartados desde el frontend si resultan relevantes.
+    Si se descarta completamente, se eliminará el ticket y el documento asociado.
     Este tool finaliza el proceso de triage.
 
     Args:

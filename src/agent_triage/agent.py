@@ -3,6 +3,7 @@ import json
 from datetime import datetime
 from dotenv import load_dotenv
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_openrouter.chat_models import ChatOpenRouter
 from langsmith import AsyncClient
 load_dotenv()
  
@@ -118,7 +119,10 @@ ticket_triage_subagent = SubAgent(
 )
 
 graph = create_deep_agent(
-	model=llm,
+	model=ChatOpenRouter(
+		model="x-ai/grok-4.1-fast",
+		api_key=os.getenv("OPENROUTER_API_KEY"),
+	),
 	tools=[
 		buscar_tickets,
 		leer_ticket,

@@ -3,7 +3,7 @@ from langchain_core.tools import tool, InjectedToolArg
 from langgraph.types import interrupt
 from src.sandbox_backend import SandboxBackend
 from src.models import AppContext
-from src.utils.config import get_user_id_from_config, get_thread_id_from_config
+from src.utils.config import get_user, get_thread_id
 from typing import Annotated
 
 @tool
@@ -24,21 +24,20 @@ async def solicitar_archivo(
     """
     print(f"[solicitar_archivo] TOOL CALLED - path: {path}", flush=True)
     
-    user_id = get_user_id_from_config()
-    thread_id = get_thread_id_from_config()
-    
-    if not user_id:
+    try:
+        user = get_user()
+    except RuntimeError:
         return "Error: No se encontró el ID del usuario"
-    
+    thread_id = get_thread_id()
+
     if not thread_id:
         return "Error: No se encontró el ID del hilo de conversación"
-    
-    # Create interrupt payload to request file upload
+
     interrupt_payload = {
         "action": "file_upload_request",
         "path": path,
         "thread_id": thread_id,
-        "user_id": user_id,
+        "user_id": user.id,
     }
     
     print(f"[solicitar_archivo] CALLING interrupt() - about to pause", flush=True)

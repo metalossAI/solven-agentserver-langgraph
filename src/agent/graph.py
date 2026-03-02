@@ -61,24 +61,23 @@ async def run_agent(
 	runtime :  Runtime[AppContext],
 	store : BaseStore
 ):
-	# Get user data and thread data from config
-	user_config = config["configurable"].get("langgraph_auth_user", {})
-	user_data = user_config.get("user_data", {})
+	from src.utils.config import get_user, get_thread_id
+	user = get_user()
 	metadata = config.get("metadata", {})
-	thread_id = config["configurable"].get("thread_id")
-	
+	thread_id = get_thread_id() or config["configurable"].get("thread_id")
+
 	# Ensure model_name is set in runtime context from metadata (in case it wasn't set in build_context)
 	model_name = metadata.get("model_name")
 	if model_name:
 		runtime.context.model_name = model_name
-	
+
 	# Load skills frontmatter directly from backend
 	backend: SandboxBackend = SandboxBackend(runtime)
 	skills_frontmatter = await backend.load_skills_frontmatter()
-	
+
 	main_prompt = await generate_prompt_template(
-		name=user_data.get("name", "Usuario"),
-		profile=f"email: {user_data.get('email', '')} | role: {user_data.get('role', 'usuario')}",
+		name=user.name or "Usuario",
+		profile=f"email: {user.email} | role: {user.role}",
 		language="español",
 		context_title=metadata.get("title") or "Conversación general",
 		context_description=metadata.get("description") or "Conversación general",

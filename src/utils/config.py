@@ -1,166 +1,236 @@
-"""Helper utilities for extracting data from LangGraph config."""
+"""Runtime config helpers for LangGraph agents.
 
-from typing import Dict, Optional
+The frontend passes the authenticated user as a single object under
+``configurable.user`` (camelCase fields from the Next.js session):
+
+    configurable = {
+        "model_name": "openai",
+        "user": {
+            "id": "<uuid>",
+            "email": "...",
+            "name": "...",
+            "role": "notario",
+            "companyId": "<uuid>",
+            "isActive": True,
+            "isCreator": True,
+        },
+    }
+
+Old fallback: individual header-derived keys (x-user-id, x-company-id, …)
+are still supported so legacy runs keep working.
+
+Public API
+----------
+get_user()          -> UserContext   (raises RuntimeError if user not found)
+get_thread_id()     -> str | None
+get_event_message() -> str | None
+get_user_info_by_id(user_id, company_id) -> dict  (Supabase enrichment)
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Optional
+
+from pydantic import BaseModel, Field, ConfigDict
 from langgraph.config import get_config
 from langgraph.graph.state import RunnableConfig
 
 
-def get_user_data_from_config() -> Dict:
-    """Extract user_data dict from config.
-    
-    Standardized approach: All clients now pass user data via headers (x-user-id, x-company-id, etc.)
-    and use system API key (x-api-token). The auth middleware extracts this and populates
-    langgraph_auth_user.user_data in the config.
-    
-    Returns:
-        Dict with user data (id, name, email, role, company_id, etc.)
-        Empty dict if not found.
+# ── User model ─────────────────────────────────────────────────────────────
+
+class UserContext(BaseModel):
+    """Authenticated user extracted from LangGraph runtime config.
+
+    Accepts both the new camelCase frontend format (``companyId``, ``isActive``,
+    ``isCreator``) and the snake_case equivalents (``company_id``, …).
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    email: str = ""
+    name: str = ""
+    role: str = "oficial"
+    company_id: Optional[str] = Field(None, alias="companyId")
+    is_active: bool = Field(True, alias="isActive")
+    is_creator: bool = Field(False, alias="isCreator")
+
+
+# ── Core helpers ────────────────────────────────────────────────────────────
+
+def get_user() -> UserContext:
+    """Return the authenticated user from the current LangGraph config.
+
+    Resolution order:
+    1. ``configurable.user``  – full object sent by the frontend (preferred)
+    2. Legacy header keys     – ``x-user-id``, ``x-user-name``, …
+
+    Raises:
+        RuntimeError: if no user identity can be found in the config.
     """
     try:
         config: RunnableConfig = get_config()
         configurable = config.get("configurable", {})
-        
-        # Primary source: langgraph_auth_user (populated by auth middleware from headers)
-        # LangGraph wraps this in a ProxyUser object, not a plain dict
-        user_config = configurable.get("langgraph_auth_user")
-        
-        if user_config:
-            # Try to access user_data from ProxyUser object (supports both dict and attribute access)
-            user_data = None
-            
-            # Method 1: Try attribute access (for ProxyUser/DotDict objects)
-            if hasattr(user_config, 'user_data'):
-                user_data = user_config.user_data
-            # Method 2: Try dict access
-            elif isinstance(user_config, dict):
-                user_data = user_config.get("user_data", {})
-            # Method 3: Try getitem access
-            else:
-                try:
-                    user_data = user_config["user_data"]
-                except (KeyError, TypeError):
-                    pass
-            
-            # Convert to dict if needed and validate
-            if user_data:
-                # If it's also a ProxyUser/DotDict, convert to dict
-                if hasattr(user_data, '__dict__') and not isinstance(user_data, dict):
-                    user_data = dict(user_data.__dict__)
-                
-                if isinstance(user_data, dict) and user_data.get("id"):
-                    return user_data
-        
-        # Fallback: try user_data directly in configurable (legacy support)
-        user_data = configurable.get("user_data", {})
-        if user_data and user_data.get("id"):
-            return user_data
-        
-        return {}
+        print(f"[CONFIGURABLE]: {configurable}")
+
+        # ── Path 1: new full user object ─────────────────────────────────
+        user_obj = configurable.get("user")
+        if isinstance(user_obj, dict) and user_obj.get("id"):
+            return UserContext.model_validate(user_obj)
+
+        # ── Path 2: legacy header-derived keys ───────────────────────────
+        user_id = configurable.get("x-user-id")
+        if user_id:
+            return UserContext(
+                id=str(user_id),
+                name=configurable.get("x-user-name") or "",
+                email=configurable.get("x-user-email") or "",
+                role=configurable.get("x-user-role") or "oficial",
+                company_id=configurable.get("x-company-id") or None,
+            )
+
     except Exception as e:
-        print(f"[get_user_data_from_config] Exception: {e}")
+        print(f"[get_user] Exception: {e}", flush=True)
         import traceback
         traceback.print_exc()
+
+    raise RuntimeError("User not found in LangGraph config (configurable.user or x-user-id missing)")
+
+
+def get_thread_id() -> Optional[str]:
+    """Return the current thread ID from LangGraph config."""
+    try:
+        config: RunnableConfig = get_config()
+        return config.get("configurable", {}).get("thread_id")
+    except Exception:
+        return None
+
+
+def get_event_message() -> Optional[str]:
+    """Return the event_message from config (used by the triage agent)."""
+    try:
+        config: RunnableConfig = get_config()
+        configurable = config.get("configurable", {})
+        metadata = config.get("metadata", {})
+        value = configurable.get("event_message") or metadata.get("event_message")
+        return value if value else None
+    except Exception:
+        return None
+
+
+# ── Backward-compatible shims (kept so existing callers don't break) ────────
+
+def get_user_data_from_config() -> dict:
+    """Deprecated – use ``get_user()`` instead."""
+    try:
+        u = get_user()
+        return {
+            "id": u.id,
+            "name": u.name,
+            "email": u.email,
+            "role": u.role,
+            "company_id": u.company_id,
+        }
+    except RuntimeError:
         return {}
 
 
 def get_user_id_from_config() -> Optional[str]:
-    """Extract user_id from config.
-    
-    Tries multiple sources:
-    1. user_data.id from langgraph_auth_user (populated by auth middleware from headers)
-    2. user_data.id from configurable.user_data (legacy fallback)
-    3. user_id from metadata (fallback)
-    4. user_id from configurable (fallback)
-    
-    Returns:
-        User ID string or None if not found.
-    """
+    """Deprecated – use ``get_user().id`` instead."""
     try:
-        config: RunnableConfig = get_config()
-        configurable = config.get("configurable", {})
-        metadata = config.get("metadata", {})
-        
-        # Try user_data first
-        user_data = get_user_data_from_config()
-        user_id = user_data.get("id")
-        if user_id:
-            return user_id
-        
-        # Fallback: try metadata.user_id
-        user_id = metadata.get("user_id")
-        if user_id:
-            return user_id
-        
-        # Fallback: try configurable.user_id
-        user_id = configurable.get("user_id")
-        if user_id:
-            return user_id
-        
-        return None
-    except Exception:
-        return None
+        return get_user().id
+    except RuntimeError:
+        # Final fallback: thread metadata
+        try:
+            config: RunnableConfig = get_config()
+            return config.get("metadata", {}).get("user_id") or None
+        except Exception:
+            return None
 
 
 def get_company_id_from_config() -> Optional[str]:
-    """Extract company_id from config.
-    
-    Tries user_data.company_id first, then configurable.company_id.
-    
-    Returns:
-        Company ID string or None if not found.
-    """
+    """Deprecated – use ``get_user().company_id`` instead."""
     try:
-        config: RunnableConfig = get_config()
-        configurable = config.get("configurable", {})
-        
-        # Try user_data.company_id first
-        user_data = get_user_data_from_config()
-        company_id = user_data.get("company_id")
-        
-        if company_id:
-            return company_id
-        
-        # Fallback: try configurable.company_id
-        company_id = configurable.get("company_id")
-        if company_id:
-            return company_id
-        
-        return None
-    except Exception as e:
-        print(f"[get_company_id_from_config] Exception: {e}")
-        import traceback
-        traceback.print_exc()
+        return get_user().company_id
+    except RuntimeError:
         return None
 
 
 def get_thread_id_from_config() -> Optional[str]:
-    """Extract thread_id from config.
-    
-    Returns:
-        Thread ID string or None if not found.
-    """
-    try:
-        config: RunnableConfig = get_config()
-        configurable = config.get("configurable", {})
-        return configurable.get("thread_id")
-    except Exception:
-        return None
+    """Deprecated – use ``get_thread_id()`` instead."""
+    return get_thread_id()
 
 
 def get_event_message_from_config() -> Optional[str]:
-    """Extract event_message from config (for triage agent).
-    
-    Returns:
-        Event message string or None if not found.
-    """
-    try:
-        config: RunnableConfig = get_config()
-        configurable = config.get("configurable", {})
-        metadata = config.get("metadata", {})
-        
-        # Try configurable first, then metadata
-        event_message = configurable.get("event_message") or metadata.get("event_message")
-        return event_message if event_message else None
-    except Exception:
-        return None
+    """Deprecated – use ``get_event_message()`` instead."""
+    return get_event_message()
 
+
+def get_user_from_config(config: RunnableConfig) -> dict:
+    """Deprecated – use ``get_user()`` instead."""
+    u = get_user()
+    thread_id = config.get("metadata", {}).get("thread_id")
+    return {
+        "id": u.id,
+        "name": u.name,
+        "email": u.email,
+        "company_id": u.company_id,
+        "conversation_id": thread_id,
+    }
+
+
+# ── Supabase enrichment (unchanged) ─────────────────────────────────────────
+
+async def get_user_info_by_id(user_id: str, company_id: Optional[str] = None) -> dict:
+    """Fetch enriched user info from Supabase by user_id.
+
+    Queries the ``clients`` table for contact details (full_name, phone, address)
+    and optionally the ``companies`` table for the company name.
+    """
+    from supabase import create_async_client
+
+    supabase_url = os.getenv("SUPABASE_URL", "")
+    supabase_key = os.getenv("SUPABASE_SECRET_KEY", "")
+
+    result: dict = {
+        "full_name": "",
+        "email": "",
+        "phone": "",
+        "address": "",
+        "company_name": "",
+    }
+
+    try:
+        supabase = await create_async_client(supabase_url, supabase_key)
+
+        client_resp = (
+            await supabase.table("clients")
+            .select("full_name, email, phone, address")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        if client_resp.data:
+            record = client_resp.data[0]
+            result["full_name"] = record.get("full_name") or ""
+            result["email"] = record.get("email") or ""
+            result["phone"] = record.get("phone") or ""
+            result["address"] = record.get("address") or ""
+
+        if company_id:
+            company_resp = (
+                await supabase.table("companies")
+                .select("name")
+                .eq("id", company_id)
+                .limit(1)
+                .execute()
+            )
+            if company_resp.data:
+                result["company_name"] = company_resp.data[0].get("name") or ""
+
+    except Exception as e:
+        print(f"[get_user_info_by_id] Exception: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+
+    return result

@@ -67,13 +67,23 @@ claude_sonnet = ChatOpenRouter(
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 
+nemotron = ChatOpenRouter(
+    model="nvidia/nemotron-3-nano-30b-a3b",
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+)
+
+deepseekN1 = ChatOpenRouter(
+    model="nex-agi/deepseek-v3.1-nex-n1",
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+)
+
 LLM_SKILL_MATCHING = xai_grok_4_fast
 
 LLM_SO = xai_grok_4_fast_SO
 
 CODING_LLM = minimax_m2_5 #ai_grok_code_fast_1
 
-LLM = xai_grok_4_fast  # Default model for agent
+LLM = nemotron #xai_grok_4_fast  # Default model for agent
 
 
 __all__ = ["LLM"]

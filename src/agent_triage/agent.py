@@ -30,12 +30,21 @@ from langchain.agents.middleware.tool_call_limit import ToolCallLimitMiddleware
 from src.llm import LLM as llm
 
 from src.agent_triage.models import InputTriageState, OutputTriageState, TriageState, TriageContext
-from src.agent_triage.tools import crear_ticket, patch_ticket, buscar_tickets, leer_ticket, leer_acciones, merge_tickets, descartar_evento, gestionar_acciones
+from src.agent_triage.tools import (
+    crear_ticket,
+    patch_ticket,
+    buscar_tickets,
+    leer_ticket,
+    leer_acciones,
+    merge_tickets,
+    descartar_evento,
+    gestionar_acciones,
+    gmail_tools_triage,
+    outlook_tools_triage,
+)
 from src.utils.vector_store import search
 from src.utils.tickets import get_ticket
 
-from src.agent_email.gmail_tools import gmail_tools
-from src.agent_email.outlook_tools import outlook_tools
 
 class ForceToolCallMiddleware(AgentMiddleware):
 	"""
@@ -96,18 +105,18 @@ async def build_prompt(request: ModelRequest):
 
 gmail_subagent = SubAgent(
 	name="asistente_gmail",
-	description="agente para gestionar correo de gmail - listar, leer y enviar correos electrónicos",
+	description="agente para gestionar correo de Gmail: listar y leer correos (no envía correos)",
 	system_prompt="",
 	model=llm,
-	tools=gmail_tools,
+	tools=gmail_tools_triage,
 )
 
 outlook_subagent = SubAgent(
 	name="asistente_outlook",
-	description="agente para gestionar correo de outlook - listar, leer y enviar correos electrónicos",
+	description="agente para gestionar correo de Outlook: listar y leer correos (no envía correos)",
 	system_prompt="",
 	model=llm,
-	tools=outlook_tools,
+	tools=outlook_tools_triage,
 )
 
 ticket_triage_subagent = SubAgent(

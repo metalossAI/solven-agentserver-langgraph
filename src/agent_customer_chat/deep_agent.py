@@ -40,7 +40,7 @@ graph = create_deep_agent(
         crear_solicitud,
         leer_solicitud,
         actualizar_solicitud,
-        solicitar_archivo,
+        #solicitar_archivo,
     ],
     middleware=[build_prompt],
     system_prompt="",

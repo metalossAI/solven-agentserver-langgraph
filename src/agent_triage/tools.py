@@ -1207,3 +1207,48 @@ async def gestionar_acciones(
             status="error",
             tool_call_id=runtime.tool_call_id
         )
+
+
+# ---------------------------------------------------------------------------
+# Email tools for triage subagents (Gmail / Outlook, excluding sending tools)
+# ---------------------------------------------------------------------------
+
+from src.agent_email.gmail_tools import (
+    gmail_list_labels,
+    gmail_list_threads,
+    gmail_get_attachment,
+    gmail_fetch_message_by_message_id,
+    gmail_fetch_message_by_thread_id,
+    gmail_list_history,
+    gmail_create_email_draft,
+    gmail_list_drafts,
+    gmail_delete_draft,
+)
+from src.agent_email.outlook_tools import (
+    outlook_list_messages,
+    outlook_get_message,
+    outlook_search_messages,
+    outlook_list_attachments,
+    outlook_download_attachment,
+    outlook_get_mail_delta,
+)
+
+gmail_tools_triage = [
+    gmail_list_threads,
+    gmail_get_attachment,
+    gmail_fetch_message_by_message_id,
+    gmail_fetch_message_by_thread_id,
+    gmail_list_history,
+    gmail_create_email_draft,
+    gmail_list_drafts,
+    gmail_list_labels,
+]
+
+outlook_tools_triage = [
+    outlook_list_messages,
+    outlook_get_message,
+    outlook_search_messages,
+    outlook_list_attachments,
+    outlook_download_attachment,
+    outlook_get_mail_delta,
+]

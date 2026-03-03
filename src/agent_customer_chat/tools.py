@@ -14,9 +14,11 @@ from typing import Optional, List
 from langchain.tools import tool, ToolRuntime
 from langchain_core.messages import ToolMessage
 from langchain_core.documents import Document
+from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
 from datetime import datetime, timezone
+import json
 import os
 
 from src.embeddings import embeddings
@@ -508,79 +510,77 @@ class SolicitarArchivoInput(BaseModel):
         description="Instrucciones adicionales sobre el documento (formato, condiciones, fecha límite, etc.)",
     )
 
-
-@tool(args_schema=SolicitarArchivoInput)
+@tool(description="Solicita al usuario uno o más archivos")
 async def solicitar_archivo(
-    nombre_documento: str,
-    instrucciones: Optional[str] = None,
     runtime: ToolRuntime[AppContext] = None,
 ) -> ToolMessage:
     """
-    Registra en la solicitud actual que el cliente debe aportar un documento
-    específico. Crea una acción de tipo 'documento_requerido' en el ticket
-    del hilo actual.
-    Úsalo cuando el trámite exija que el cliente suba o envíe un archivo.
-
-    Args:
-    - nombre_documento: nombre o tipo del documento (DNI, escritura, etc.)
-    - instrucciones: indicaciones extra sobre el documento (opcional)
+    Solicita al cliente que suba un archivo específico necesario para procesar su solicitud.
     """
-    try:
-        thread_id = get_thread_id()
-        company_id = get_user().company_id
+    interrupt_payload = {
+        "action": "file_upload_request",
+        "thread_id": get_thread_id(),
+        "user_id": get_user().id,
+    }
+    resume_value = interrupt(interrupt_payload)
 
-        if not thread_id or not company_id:
-            return ToolMessage(
-                content="Error: No se encontró thread_id o company_id en la configuración.",
-                status="error",
-                tool_call_id=runtime.tool_call_id,
-                name="solicitar_archivo",
-            )
-
-        supabase = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-
-        check = (
-            await supabase.table("tickets")
-            .select("id")
-            .eq("id", thread_id)
-            .eq("company_id", company_id)
-            .execute()
-        )
-        if not check.data:
-            return ToolMessage(
-                content=(
-                    "No existe una solicitud para este hilo. "
-                    "Usa crear_solicitud primero."
-                ),
-                status="error",
-                tool_call_id=runtime.tool_call_id,
-                name="solicitar_archivo",
-            )
-
-        action_data = {
-            "ticket_id": thread_id,
-            "title": f"Documento requerido: {nombre_documento}",
-            "description": instrucciones or f"El cliente debe aportar: {nombre_documento}",
-            "status": "pending",
-            "created_by": "customer_chat",
-            "metadata": {
-                "type": "documento_requerido",
-                "nombre_documento": nombre_documento,
-            },
-        }
-        await supabase.table("actions").insert(action_data).execute()
-
-        msg = f"Se ha registrado que necesitas aportar: **{nombre_documento}**."
-        if instrucciones:
-            msg += f" {instrucciones}"
-
-        return ToolMessage(content=msg, tool_call_id=runtime.tool_call_id, name="solicitar_archivo")
-
-    except Exception as e:
-        import traceback; traceback.print_exc()
+    # Rejection: user cancelled or declined (frontend may send "no" / "rejected" / "cancelled")
+    if resume_value is None or resume_value == "":
         return ToolMessage(
-            content=f"Error al registrar solicitud de archivo: {str(e)}",
-            status="error",
+            content="El usuario no subió ningún archivo (cancelado o sin respuesta).",
             tool_call_id=runtime.tool_call_id,
             name="solicitar_archivo",
         )
+    if isinstance(resume_value, str) and resume_value.strip().lower() in ("no", "rejected", "cancelled", "cancel"):
+        return ToolMessage(
+            content="El usuario canceló la subida del archivo.",
+            tool_call_id=runtime.tool_call_id,
+            name="solicitar_archivo",
+        )
+
+    # Success: resume is JSON string or dict (single file) or list of file infos (multiple files)
+    file_infos: List[dict] = []
+    if isinstance(resume_value, dict) and ("filename" in resume_value or "s3_key" in resume_value):
+        file_infos = [resume_value]
+    elif isinstance(resume_value, list) and all(
+        isinstance(x, dict) and ("filename" in x or "s3_key" in x) for x in resume_value
+    ):
+        file_infos = list(resume_value)
+    elif isinstance(resume_value, str):
+        try:
+            parsed = json.loads(resume_value)
+            if isinstance(parsed, dict) and ("filename" in parsed or "s3_key" in parsed):
+                file_infos = [parsed]
+            elif isinstance(parsed, list) and all(
+                isinstance(x, dict) and ("filename" in x or "s3_key" in x) for x in parsed
+            ):
+                file_infos = list(parsed)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    if file_infos:
+        if len(file_infos) == 1:
+            fi = file_infos[0]
+            filename = fi.get("filename", "archivo")
+            size = fi.get("size")
+            size_str = f" ({size} bytes)" if size is not None else ""
+            content = f"Archivo subido correctamente: {filename}{size_str}. Clave: {fi.get('s3_key', '')}"
+        else:
+            parts = [
+                f"- {f.get('filename', 'archivo')} ({f.get('s3_key', '')})"
+                for f in file_infos
+            ]
+            content = f"Archivos subidos correctamente ({len(file_infos)}):\n" + "\n".join(parts)
+        return ToolMessage(
+            content=content,
+            tool_call_id=runtime.tool_call_id,
+            name="solicitar_archivo",
+        )
+
+    # Fallback: unexpected resume shape
+    return ToolMessage(
+        content=f"Respuesta del usuario sobre el archivo: {resume_value}",
+        tool_call_id=runtime.tool_call_id,
+        name="solicitar_archivo",
+    )
+

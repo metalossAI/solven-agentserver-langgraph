@@ -62,6 +62,11 @@ google_gemini = ChatOpenRouter(
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 
+google_gemini_lite = ChatOpenRouter(
+    model="google/gemini-3.1-flash-lite-preview",
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+)
+
 claude_sonnet = ChatOpenRouter(
     model="anthropic/claude-sonnet-4.5",
     api_key=os.getenv("OPENROUTER_API_KEY"),
@@ -74,6 +79,11 @@ nemotron = ChatOpenRouter(
 
 deepseekN1 = ChatOpenRouter(
     model="nex-agi/deepseek-v3.1-nex-n1",
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+)
+
+kimi = ChatOpenRouter(
+    model="moonshotai/kimi-k2-thinking",
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 

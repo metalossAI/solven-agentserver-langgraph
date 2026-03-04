@@ -150,7 +150,7 @@ async def initialize_sandbox(state: AgentState, runtime: Runtime[AppContext]):
 	Initialize the sandbox before the agent starts working.
 	This ensures the sandbox is fully set up with:
 	- R2 mounts (workspace at /workspace, user skills at /workspace/.solven/skills)
-	- Anthropic skills repo cloned at /workspace/.anthropic
+	- Anthropic skills (docx/pdf/xlsx/pptx) installed via npx into /.solven/skills/
 	- Local escrituras skills synced into /.solven/skills/
 	
 	Uses asyncio.to_thread to avoid blocking the async event loop.
@@ -257,10 +257,8 @@ outlook_subagent = SubAgent(
     tools=outlook_tools,
 )
 
-# User skills (S3 FUSE mount): /.solven/skills/
-# Anthropic format skills (git clone): /.anthropic/
+# Unified skills directory: user skills + Anthropic skills installed via npx skills add
 USER_SKILLS_PATH = "/.solven/skills/"
-ANTHROPIC_SKILLS_PATH = "/.anthropic/skills/"
 
 oficial_subagent = SubAgent(
     name="oficial_notarial",
@@ -268,7 +266,6 @@ oficial_subagent = SubAgent(
     system_prompt="",
     model=coding_llm,
     skills=[
-        ANTHROPIC_SKILLS_PATH,
         USER_SKILLS_PATH,
     ]
 )
@@ -293,7 +290,6 @@ graph = create_deep_agent(
     ],
     skills=[
         USER_SKILLS_PATH,
-        ANTHROPIC_SKILLS_PATH,
     ],
     context_schema=AppContext,
 )

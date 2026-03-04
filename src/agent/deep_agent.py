@@ -274,7 +274,10 @@ oficial_subagent = SubAgent(
 )
 
 graph = create_deep_agent(
-    model=google_gemini,  # Default model - will be dynamically swapped by middleware
+    model=ChatOpenRouter(
+        model="moonshotai/kimi-k2-thinking",
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+    ),
     system_prompt="",
     backend=lambda rt: SandboxBackend(rt),
     subagents=[
@@ -285,7 +288,7 @@ graph = create_deep_agent(
     middleware=[
         initialize_sandbox,  # Initialize sandbox before agent starts (non-blocking)
         build_prompt,
-        #ToolEnforcementMiddleware(),  # Ensure agent makes tool calls first
+        ToolEnforcementMiddleware(),  # Ensure agent makes tool calls first
         #continuation_evaluation_middleware,  # Evaluate results and decide to continue (LAST)
     ],
     skills=[

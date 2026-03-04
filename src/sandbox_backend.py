@@ -8,14 +8,13 @@ ARCHITECTURE OVERVIEW (simple /workspace):
 - S3 thread state is at /mnt/workspace-s3 (rclone FUSE). Restore: rsync S3 -> /workspace (excludes below).
 - Persist: after each execute(), rsync /workspace -> S3 (excludes below).
 - Skills:
-    /.solven/skills  — S3 skills/{user_id} FUSE mount (user skills + escrituras).
-    /.anthropic      — git clone of github.com/anthropics/skills (Anthropic format skills).
-  Both are excluded from workspace rsync; agent accesses them as read-only references.
+    /.solven/skills  — unified skills directory (S3 FUSE mount).
+                       Contains user skills, local escrituras seed, and Anthropic
+                       docx/pdf/xlsx/pptx skills installed via `npx skills add`.
 
 Sandbox paths (agent sees /workspace as / via proot):
 - /workspace              - Agent root; all project work lives here; persisted to S3.
-- /workspace/.solven/skills - S3 skills/{user_id} FUSE mount; excluded from sync.
-- /workspace/.anthropic   - Anthropic skills repo clone; excluded from sync.
+- /workspace/.solven/skills - Unified skills FUSE mount; excluded from workspace rsync.
 - /mnt/workspace-s3       - S3 threads/{thread_id} (rsync target only).
 """
 import os
@@ -37,15 +36,15 @@ from src.models import AppContext
 SANDBOX_TEMPLATE = "solven-sandbox-v1"
 
 # Directories/symlinks excluded from all rsync workspace <-> S3 transfers.
-# - .solven/      : skills FUSE mount (never persisted to S3 workspace bucket)
-# - .anthropic/   : Anthropic skills repo clone (read-only reference, no need to persist)
+# - .solven/      : unified skills FUSE mount — S3 persistence is handled by the FUSE
+#                   mount itself (skills/{user_id} bucket), NOT by rsync. Excluding it
+#                   here avoids double-writing the same files into the workspace bucket.
 # - .venv/ venv/ env/ : Python virtualenvs (agent recreates on demand)
 # - node_modules/ : npm packages (agent recreates on demand)
 # - .bun/         : Bun cache (contains symlinks that break S3 FUSE writes)
 # - bin sbin lib lib64 : merged-usr symlinks created by _setup_proot() at runtime
 _RSYNC_EXCLUDES = (
     ".solven/",
-    ".anthropic/",
     ".venv/",
     "venv/",
     "env/",
@@ -69,7 +68,7 @@ _WORKSPACE_SEARCH_SKIP_DIRS = frozenset({
     "bin", "sbin", "lib", "lib64",
     # package caches (excluded from S3 sync too, agent recreates on demand)
     "node_modules", ".venv", "venv", "env", ".bun",
-    # .git dirs (avoid traversing repo metadata when searching .solven/.anthropic)
+    # .git dirs (avoid traversing repo metadata when searching .solven)
     ".git",
 })
 
@@ -80,12 +79,9 @@ class SandboxBackend(BaseSandbox):
 
 	Paths (agent sees /workspace as / via proot):
 	- /workspace              - Agent root; all project work lives here; persisted to S3.
-	- /workspace/.solven/skills - S3 skills/{user_id} FUSE mount; agent reads as /.solven/skills/.
-	- /workspace/.anthropic   - Anthropic skills repo clone; agent reads as /.anthropic/.
+	- /workspace/.solven/skills - Unified skills dir (S3 FUSE mount + npx-installed Anthropic skills); agent reads as /.solven/skills/.
 	- /mnt/workspace-s3       - S3 threads/{thread_id} (rsync target only).
 	"""
-
-	ANTHROPIC_SKILLS_DIR = "/workspace/.anthropic"
 
 	def __init__(self, runtime: ToolRuntime[AppContext]):
 		self._sandbox: Optional[Sandbox] = None
@@ -147,23 +143,24 @@ class SandboxBackend(BaseSandbox):
 				self._sandbox = Sandbox.connect(sandbox_id)
 				print(f"[_ensure_initialized] ✓ Connected to existing sandbox: {sandbox_id}", flush=True)
 
-				# Verify workspace S3 mount is accessible
+				# Check if the S3 workspace mount is still alive.
 				try:
 					check = self._sandbox.commands.run(
-						f"mountpoint -q {self._workspace_s3_mount} && echo 'MOUNT_OK' || echo 'MOUNT_MISSING'",
+						f"mountpoint -q {self._workspace_s3_mount} && echo OK || echo MISSING",
 						timeout=10,
 					)
-					mount_status = check.stdout.strip()
-				except Exception as check_err:
-					print(f"[_ensure_initialized] Mount check error: {check_err}", flush=True)
-					mount_status = "MOUNT_MISSING"
+					mount_ok = check.stdout.strip() == "OK"
+				except Exception:
+					mount_ok = False
 
-				if "MOUNT_MISSING" in mount_status:
-					print(f"[_ensure_initialized] Mounts missing, remounting...", flush=True)
+				if not mount_ok:
+					print(f"[_ensure_initialized] S3 mount missing, remounting...", flush=True)
 					self._mount_s3_buckets()
 					self._mount_user_skills()
 					self._sync_local_skills()
-					self._build_workspace_skills()
+
+				# Always install Anthropic skills into .solven/skills.
+				self._build_workspace_skills()
 				self._setup_proot()
 				self._initialized = True
 				self._writer("Espacio de trabajo listo")
@@ -173,48 +170,42 @@ class SandboxBackend(BaseSandbox):
 				print(f"[_ensure_initialized] ✗ Failed to use sandbox {sandbox_id}: {e}", flush=True)
 				self._sandbox = None
 
-		# Step 2: No usable existing sandbox — create a new one
+		# Step 2: No usable existing sandbox — create a new one.
 		print(f"[_ensure_initialized] Creating new sandbox...", flush=True)
-		env_vars = {
-			"THREAD_ID": self._thread_id,
-			"USER_ID": str(self._user_id),
-		}
-		if bucket := os.getenv("S3_BUCKET_NAME"):
-			env_vars["S3_BUCKET_NAME"] = bucket
-		if access_key := os.getenv("S3_ACCESS_KEY_ID"):
-			env_vars["S3_ACCESS_KEY_ID"] = access_key
-		if secret := os.getenv("S3_ACCESS_SECRET"):
-			env_vars["S3_ACCESS_SECRET"] = secret
-		if endpoint := os.getenv("S3_ENDPOINT_URL"):
-			env_vars["S3_ENDPOINT_URL"] = endpoint
-		if region := os.getenv("S3_REGION"):
-			env_vars["S3_REGION"] = region
+		env_vars = {"THREAD_ID": self._thread_id, "USER_ID": str(self._user_id)}
+		for key, env in [
+			("S3_BUCKET_NAME", "S3_BUCKET_NAME"),
+			("S3_ACCESS_KEY_ID", "S3_ACCESS_KEY_ID"),
+			("S3_ACCESS_SECRET", "S3_ACCESS_SECRET"),
+			("S3_ENDPOINT_URL", "S3_ENDPOINT_URL"),
+			("S3_REGION", "S3_REGION"),
+		]:
+			if val := os.getenv(env):
+				env_vars[key] = val
 
 		self._sandbox = Sandbox.create(
 			template=SANDBOX_TEMPLATE,
 			envs=env_vars,
 			timeout=300,
-			metadata={
-				"threadId": self._thread_id,
-				"userId": str(self._user_id),
-			},
+			metadata={"threadId": self._thread_id, "userId": str(self._user_id)},
 		)
 		print(f"[_ensure_initialized] ✓ Created new sandbox: {self._sandbox.sandbox_id}", flush=True)
-
 		self._writer("Preparando espacio de trabajo...")
 
-		# Step 3: Mount workspace-s3 (restores prior session files)
+		# Step 3: S3 workspace mount (restores prior session files).
 		self._mount_s3_buckets()
 
-		# Step 4: Mount user skills at /workspace/.solven/skills; seed escrituras and Anthropic formats
+		# Step 4: User skills FUSE mount + local escrituras seed (non-blocking failures).
 		try:
 			self._mount_user_skills()
 		except Exception as e:
-			print(f"[_ensure_initialized] ⚠ Skills mount failed (non-blocking): {e}", flush=True)
+			print(f"[_ensure_initialized] ⚠ User skills mount failed (non-blocking): {e}", flush=True)
 		self._sync_local_skills()
+
+		# Step 5: Install Anthropic skills into .solven/skills via npx.
 		self._build_workspace_skills()
 
-		# Step 5: Configure proot isolation (creates merged-usr symlinks in /workspace)
+		# Step 6: proot isolation (merged-usr symlinks in /workspace).
 		self._setup_proot()
 
 		self._initialized = True
@@ -222,71 +213,56 @@ class SandboxBackend(BaseSandbox):
 		print(f"[_ensure_initialized] ✓ Initialization complete", flush=True)
 
 	def _build_workspace_skills(self) -> None:
-		"""Clone (or pull) github.com/anthropics/skills into /workspace/.anthropic.
-		Uses commands.run (not E2B git API) for reliability and explicit timeouts.
-		Excluded from workspace rsync so it never pollutes the S3 thread bucket.
-		In production the directory may exist (e.g. after mkdir -p) but be empty;
-		only pull when it is actually a git repo (.git exists), otherwise clone.
+		"""Install Anthropic skills into /workspace/.solven/skills via 'npx skills add'.
+
+		Runs from /workspace/.solven with --agent openclaw because OpenClaw's project
+		path is 'skills/' (no dot prefix), so skills land directly in .solven/skills/.
+		--copy is required because FUSE mounts don't support symlinks.
+		-y skips all interactive prompts.
+
+		Skills are only installed when their directory does NOT already exist so that
+		user modifications persisted via the S3 FUSE mount are never overwritten.
+		The 'system' directory is removed if present (stale from a previous run).
 		"""
-		clone_dir = self.ANTHROPIC_SKILLS_DIR
-		repo_url = "https://github.com/anthropics/skills.git"
+		parent_dir = "/workspace/.solven"
+		skills_dir = self._workspace_skills_dir  # /workspace/.solven/skills
+		skills_to_install = ["docx", "pdf", "xlsx", "pptx"]
+
+		# Remove stale 'system' directory and check which skills are missing — use
+		# shell commands (not files.exists) to avoid REST API timeouts on FUSE paths.
 		try:
-			self._sandbox.commands.run(
-				f"mkdir -p {clone_dir}",
-				timeout=10,
+			check = self._sandbox.commands.run(
+				f"test -d {skills_dir}/system && rm -rf {skills_dir}/system && echo REMOVED_SYSTEM || true ; "
+				+ " ; ".join(f"test -d {skills_dir}/{s} && echo '{s}:ok' || echo '{s}:missing'" for s in skills_to_install),
+				timeout=20,
 				user="root",
 			)
-			self._sandbox.commands.run(
-				f"git config --global --add safe.directory {clone_dir}",
-				timeout=10,
-			)
-			# Only pull if this is already a git repo; otherwise clone (path may exist but be empty in production)
-			is_git_repo = self._sandbox.files.exists(path=f"{clone_dir}/.git")
-			if is_git_repo:
-				self._sandbox.git.pull(
-					path=clone_dir,
-					remote="origin",
-					branch="main",
-				)
-			else:
-				# Remove directory if it exists but is not a repo, so clone gets a clean target
-				self._sandbox.commands.run(
-					f"rm -rf {clone_dir}",
-					timeout=10,
-					user="root",
-				)
-				self._sandbox.commands.run(
-					f"mkdir -p {clone_dir}",
-					timeout=10,
-					user="root",
-				)
-				self._sandbox.git.clone(
-					url=repo_url,
-					path=clone_dir,
-				)
-			verify = self._sandbox.files.exists(path=f"{clone_dir}/skills")
-			if not verify:
-				raise RuntimeError(f"Anthropic skills verification failed: {clone_dir}")
-
-			# After a successful clone/pull, keep only office document skills under .anthropic/skills
-			skills_dir = f"{clone_dir}/skills"
-			cleanup_cmd = (
-				f"if [ -d {skills_dir} ]; then "
-				f"find {skills_dir} -type f ! \\( -name '*.docx' -o -name '*.pdf' -o -name '*.xlsx' -o -name '*.pptx' \\) -delete 2>/dev/null; "
-				f"find {skills_dir} -type d -empty -delete 2>/dev/null; "
-				"fi || true"
-			)
-			self._sandbox.commands.run(
-				cleanup_cmd,
-				timeout=120,
-				user="root",
-			)
-
-			print(f"[_build_workspace_skills] ✓ {clone_dir} ready (pruned to docx/pdf/xlsx/pptx)", flush=True)
+			output = check.stdout
+			if "REMOVED_SYSTEM" in output:
+				print(f"[_build_workspace_skills] 🗑 Removed stale system dir", flush=True)
+			missing = [s for s in skills_to_install if f"{s}:missing" in output]
 		except Exception as e:
-			print(f"[_build_workspace_skills] ✗ Error: {e}", flush=True)
+			print(f"[_build_workspace_skills] ⚠ Could not check skill dirs: {e} — assuming all missing", flush=True)
+			missing = list(skills_to_install)
+
+		if not missing:
+			print(f"[_build_workspace_skills] ↩ All skills already present, skipping", flush=True)
+			return
+
+		skill_flags = " ".join(f"--skill {s}" for s in missing)
+		try:
+			result = self._sandbox.commands.run(
+				f"cd {parent_dir} && npx --yes skills add anthropics/skills {skill_flags} --agent openclaw --copy -y",
+				timeout=120,
+			)
+			print(f"[_build_workspace_skills] ✓ Installed: {', '.join(missing)}", flush=True)
+			if result.stderr:
+				print(f"[_build_workspace_skills] stderr: {result.stderr[:400]}", flush=True)
+		except Exception as e:
+			print(f"[_build_workspace_skills] ✗ Failed: {e}", flush=True)
 			import traceback
 			print(traceback.format_exc(), flush=True)
+		print(f"[_build_workspace_skills] ✓ Done — {skills_dir}", flush=True)
 
 	def _sync_local_skills(self) -> None:
 		"""Copy local escrituras/SKILL.md into /.solven/skills/escrituras/ (user S3 mount)."""
@@ -422,7 +398,7 @@ class SandboxBackend(BaseSandbox):
 			)
 
 	def _mount_user_skills(self) -> None:
-		"""Mount S3 skills/{user_id} at /workspace/.solven/skills. Anthropic skills copied in by _build_workspace_skills."""
+		"""Mount S3 skills/{user_id} at /workspace/.solven/skills (unified skills dir)."""
 		bucket = os.getenv("S3_BUCKET_NAME", "solven-testing")
 		solven_dir = "/workspace/.solven"
 		self._sandbox.commands.run(f"mkdir -p {self._workspace_skills_dir}", timeout=60, user="root")
@@ -617,9 +593,7 @@ class SandboxBackend(BaseSandbox):
 		path: str | None = None,
 		glob: str | None = None,
 	) -> "list[GrepMatch] | str":
-		"""Same as base (grep -rHnF via execute) but with --exclude-dir so root search is fast.
-		When path is / we also exclude .anthropic to avoid traversing the full skills repo.
-		"""
+		"""Same as base (grep -rHnF via execute) but with --exclude-dir so root search is fast."""
 		search_path = shlex.quote((path or ".").rstrip("/") or "/")
 		skip_dirs = set(_WORKSPACE_SEARCH_SKIP_DIRS)
 		exclude_dirs = " ".join(f"--exclude-dir={d}" for d in skip_dirs)

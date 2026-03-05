@@ -23,8 +23,7 @@ from src.sandbox_backend import SandboxBackend
 
  
 from langgraph.runtime import Runtime
-from langgraph.store.base import BaseStore
-from langgraph.graph.state import RunnableConfig
+
 from langgraph.config import get_config
 
 from deepagents import create_deep_agent, SubAgent
@@ -150,7 +149,7 @@ async def initialize_sandbox(state: AgentState, runtime: Runtime[AppContext]):
 	"""
 	Initialize the sandbox before the agent starts working.
 	This ensures the sandbox is fully set up with:
-	- R2 mounts (workspace at /workspace, user skills at /workspace/.solven/skills)
+	- OverlayFS workspace at /workspace; user skills bind-mounted at /workspace/.solven/skills
 	- Anthropic skills (docx/pdf/xlsx/pptx) installed via npx into /.solven/skills/
 	- Local escrituras skills synced into /.solven/skills/
 	
@@ -258,7 +257,7 @@ outlook_subagent = SubAgent(
     tools=outlook_tools,
 )
 
-# Unified skills directory: user skills + Anthropic skills installed via npx skills add
+# Unified skills directory: user skills + Anthropic skills installed via npx (bind mount at /workspace/.solven/skills)
 USER_SKILLS_PATH = "/.solven/skills/"
 
 oficial_subagent = SubAgent(
@@ -266,12 +265,15 @@ oficial_subagent = SubAgent(
     description="asistente para trabajar en escrituras notariales y documentos de todo tipo",
     system_prompt="",
     model=ChatOpenRouter(
-        model="moonshotai/kimi-k2-thinking",
+        model="minimax/minimax-m2.5",
         api_key=os.getenv("OPENROUTER_API_KEY"),
     ),
-    skills=[
-        USER_SKILLS_PATH,
-    ]
+    middleware=[
+        SkillsMiddleware(
+            backend=SandboxBackend,
+            sources=[USER_SKILLS_PATH],
+        ),
+    ],
 )
 
 graph = create_deep_agent(
@@ -282,15 +284,20 @@ graph = create_deep_agent(
     system_prompt="",
     backend=lambda rt: SandboxBackend(rt),
     subagents=[
+        oficial_subagent,
         gmail_subagent,
         outlook_subagent,
         catastro_subagent,
     ],
     middleware=[
         initialize_sandbox,  # Initialize sandbox before agent starts (non-blocking)
+        SkillsMiddleware(
+            backend=SandboxBackend,
+            sources=[USER_SKILLS_PATH],
+        ),
         build_prompt,
-        ToolEnforcementMiddleware(),  # Ensure agent makes tool calls first
-        UniqueToolCallIdsMiddleware(),  # Globally unique tool call IDs (avoids assistant-ui duplicate-key crash)
+        #ToolEnforcementMiddleware(),  # Ensure agent makes tool calls first
+        #UniqueToolCallIdsMiddleware(),  # Globally unique tool call IDs (avoids assistant-ui duplicate-key crash)
         #continuation_evaluation_middleware,  # Evaluate results and decide to continue (LAST)
     ],
     context_schema=AppContext,

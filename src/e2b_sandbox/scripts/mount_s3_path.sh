@@ -5,12 +5,12 @@
 #   $2: S3 path (e.g., "threads/thread-123")
 #   $3: Local mount point (e.g., "/mnt/r2/threads/thread-123")
 #   $4: Log file path (e.g., "/tmp/rclone-thread.log")
-#   $5: Optional. If "read-only", mount is read-only.
+#   $5: Optional. "read-only" = read-only mount; "immediate" = --vfs-write-back 0 (for skills, avoids buffered writes).
 
 set -e
 
 if [ $# -lt 4 ]; then
-    echo "ERROR: Usage: $0 <bucket> <s3_path> <mount_point> <log_file> [read-only]" >&2
+    echo "ERROR: Usage: $0 <bucket> <s3_path> <mount_point> <log_file> [read-only|immediate]" >&2
     exit 1
 fi
 
@@ -19,8 +19,12 @@ S3_PATH="$2"
 MOUNT_POINT="$3"
 LOG_FILE="$4"
 READONLY_ARG=""
-if [ $# -ge 5 ] && [ "$5" = "read-only" ]; then
-    READONLY_ARG="--read-only"
+WRITEBACK_ARG="--vfs-write-back 1s"
+if [ $# -ge 5 ]; then
+    case "$5" in
+        read-only) READONLY_ARG="--read-only" ;;
+        immediate) WRITEBACK_ARG="--vfs-write-back 0" ;;  # Skills: write-through, no buffering (avoids stale reads)
+    esac
 fi
 
 echo "[mount] Creating mount point: ${MOUNT_POINT}"
@@ -38,7 +42,7 @@ nohup sudo rclone --config /root/.config/rclone/rclone.conf mount \
   --allow-other \
   ${READONLY_ARG} \
   --vfs-cache-mode full \
-  --vfs-write-back 1s \
+  ${WRITEBACK_ARG} \
   --poll-interval 2s \
   --dir-cache-time 2s \
   --log-file "${LOG_FILE}" \

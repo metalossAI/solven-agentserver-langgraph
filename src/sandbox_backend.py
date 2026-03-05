@@ -2,26 +2,35 @@
 E2B Sandbox backend for DeepAgents using S3.
 Implements the BackendProtocol for filesystem operations in an isolated sandbox environment.
 
-ARCHITECTURE OVERVIEW (simple /workspace):
-=========================================
-- Agent CWD and HOME are /workspace. All tools and commands run there; uv/bun manage packages there.
-- S3 thread state is at /mnt/workspace-s3 (rclone FUSE). Restore: rsync S3 -> /workspace (excludes below).
-- Persist: after each execute(), rsync /workspace -> S3 (excludes below).
-- Skills:
-    /.solven/skills  — unified skills directory (S3 FUSE mount).
-                       Contains user skills, local escrituras seed, and Anthropic
-                       docx/pdf/xlsx/pptx skills installed via `npx skills add`.
+ARCHITECTURE OVERVIEW (OverlayFS + S3):
+======================================
+- OverlayFS: lower=/sandbox/lower (read-only merged-usr), upper=/sandbox/upper/<tid>, work=/sandbox/work/<tid>.
+  Merge mounted at /workspace. Agent sees /workspace as / via proot -0 -r /workspace.
+- S3 thread workspace at /mnt/workspace-s3 (rclone FUSE). Optional one-time preload: S3 -> upper (non-blocking).
+  Persist: rsync upper -> S3 in background only (no sync in critical path).
+- Skills: S3 skills/{user_id} mounted at /mnt/user-skills, bind-mounted to /workspace/.solven/skills. Excluded from sync.
 
 Sandbox paths (agent sees /workspace as / via proot):
-- /workspace              - Agent root; all project work lives here; persisted to S3.
-- /workspace/.solven/skills - Unified skills FUSE mount; excluded from workspace rsync.
-- /mnt/workspace-s3       - S3 threads/{thread_id} (rsync target only).
+- /workspace           - Overlay merge (lower + upper); agent root.
+- /workspace/.solven/skills - Bind mount of /mnt/user-skills (S3 skills); excluded from workspace sync.
+- /mnt/workspace-s3     - S3 threads/{thread_id} (persist target only).
 """
 import os
 import re
 import shlex
 import asyncio
+import time as _time
 from typing import Optional
+
+# #region agent log
+_DEBUG_LOG_PATH = "/home/ramon/Github/metaloss/solven-app-vercel/.cursor/debug-b65ae0.log"
+def _debug_log(message: str, hypothesis_id: str, data: dict | None = None) -> None:
+	try:
+		with open(_DEBUG_LOG_PATH, "a") as f:
+			f.write(__import__("json").dumps({"sessionId": "b65ae0", "hypothesisId": hypothesis_id, "location": "sandbox_backend", "message": message, "data": data or {}, "timestamp": int(_time.time() * 1000)}) + "\n")
+	except Exception:
+		pass
+# #endregion
 
 from e2b import Sandbox, SandboxQuery, SandboxState
 
@@ -32,17 +41,11 @@ from langchain.tools import ToolRuntime
 from langgraph.config import get_stream_writer, get_config
 from langgraph.graph.state import RunnableConfig
 from src.models import AppContext
+from src.backend import _parse_skillmd_frontmatter
 
 SANDBOX_TEMPLATE = "solven-sandbox-v1"
 
-# Directories/symlinks excluded from all rsync workspace <-> S3 transfers.
-# - .solven/      : unified skills FUSE mount — S3 persistence is handled by the FUSE
-#                   mount itself (skills/{user_id} bucket), NOT by rsync. Excluding it
-#                   here avoids double-writing the same files into the workspace bucket.
-# - .venv/ venv/ env/ : Python virtualenvs (agent recreates on demand)
-# - node_modules/ : npm packages (agent recreates on demand)
-# - .bun/         : Bun cache (contains symlinks that break S3 FUSE writes)
-# - bin sbin lib lib64 : merged-usr symlinks created by _setup_proot() at runtime
+# Directories excluded from workspace (upper) -> S3 sync. .solven/ (includes skills) is bind-mounted from S3; never synced.
 _RSYNC_EXCLUDES = (
     ".solven/",
     ".venv/",
@@ -51,36 +54,28 @@ _RSYNC_EXCLUDES = (
     "npm/",
     "node_modules/",
     ".bun/",
-    "bin",
-    "sbin",
-    "lib",
-    "lib64",
 )
 _RSYNC_EXCLUDE_FLAGS = " ".join(f"--exclude='{p}'" for p in _RSYNC_EXCLUDES)
+_RSYNC_ONE_FS = "--one-file-system"
 
 # Dirs skipped during in-workspace glob / grep searches.
-# Merged-usr symlinks (bin/sbin/lib/lib64) would traverse the entire OS if followed;
-# the rest are heavy package caches or FUSE/git mounts with no user-authored content.
+# bin/sbin/lib/lib64 come from overlay lower (merged-usr); rest are caches or mounts.
 _WORKSPACE_SEARCH_SKIP_DIRS = frozenset({
-    # proot bind-mounted system dirs (visible inside proot but not agent workspace content)
     "usr", "etc", "proc", "dev", "sys", "run", "tmp",
-    # merged-usr symlinks at /workspace root pointing into /usr
     "bin", "sbin", "lib", "lib64",
-    # package caches (excluded from S3 sync too, agent recreates on demand)
     "node_modules", ".venv", "venv", "env", ".bun",
-    # .git dirs (avoid traversing repo metadata when searching .solven)
-    ".git",
+    ".git", ".solven",
 })
 
 
 class SandboxBackend(BaseSandbox):
 	"""
-	E2B Sandbox backend with S3 mounts and simple /workspace sync.
+	E2B Sandbox backend with OverlayFS and S3. Per-thread upper/work; skills bind-mounted at /workspace/.solven/skills.
 
-	Paths (agent sees /workspace as / via proot):
-	- /workspace              - Agent root; all project work lives here; persisted to S3.
-	- /workspace/.solven/skills - Unified skills dir (S3 FUSE mount + npx-installed Anthropic skills); agent reads as /.solven/skills/.
-	- /mnt/workspace-s3       - S3 threads/{thread_id} (rsync target only).
+	Paths (agent sees /workspace as / via proot -0 -r /workspace):
+	- /workspace              - Overlay merge (lower + upper/<tid>); agent root; persisted via upper -> S3.
+	- /workspace/.solven/skills - Bind mount of /mnt/user-skills (S3 skills/{user_id}); excluded from sync.
+	- /mnt/workspace-s3     - S3 threads/{thread_id} (persist target only).
 	"""
 
 	def __init__(self, runtime: ToolRuntime[AppContext]):
@@ -97,13 +92,36 @@ class SandboxBackend(BaseSandbox):
 		user = get_user()  # raises RuntimeError if missing
 		self._user_id = user.id
 
-		# Mount paths
-		self._workspace = "/workspace"                       # Agent CWD and HOME; all work here
-		self._workspace_s3_mount = "/mnt/workspace-s3"       # S3 mount: threads/{thread_id} (sync only)
-		self._workspace_skills_dir = "/workspace/.solven/skills"  # S3 skills/{user_id}; excluded from sync
+		# Paths
+		self._workspace = "/workspace"
+		self._workspace_s3_mount = "/mnt/workspace-s3"
+		self._user_skills_mount = "/mnt/user-skills"   # S3 skills FUSE mount
+		self._workspace_skills_dir = "/workspace/.solven/skills"  # Bind of _user_skills_mount; excluded from sync
 
 		self._proot_available = False
 		self._initialized = False
+
+	def _upper_dir(self) -> str:
+		return f"/sandbox/upper/{self._thread_id}"
+
+	def _work_dir(self) -> str:
+		return f"/sandbox/work/{self._thread_id}"
+
+	def _normalize_path(self, path: str) -> str:
+		"""Normalize to a path under /workspace (backend root). / and agent paths become /workspace/..."""
+		if not path or path.strip() == "" or path.strip() == "/":
+			return self._workspace
+		p = path.strip().rstrip("/") or path.strip()
+		if p.startswith(self._workspace + "/") or p == self._workspace:
+			return p
+		return f"{self._workspace}/{p.lstrip('/')}"
+
+	def _to_agent_path(self, real_path: str) -> str:
+		"""Convert real path under /workspace to path as seen inside proot (where / = /workspace)."""
+		if not real_path.startswith(self._workspace):
+			return real_path
+		suffix = real_path[len(self._workspace):].lstrip("/")
+		return f"/{suffix}" if suffix else "/"
 
 	@property
 	def id(self) -> str:
@@ -156,15 +174,32 @@ class SandboxBackend(BaseSandbox):
 				if not mount_ok:
 					print(f"[_ensure_initialized] S3 mount missing, remounting...", flush=True)
 					self._mount_s3_buckets()
+					self._setup_overlay()
 					self._mount_user_skills()
 					self._sync_local_skills()
+				else:
+					# Ensure overlay and skills bind are still present
+					overlay_ok = False
+					skills_ok = False
+					try:
+						co = self._sandbox.commands.run("mountpoint -q /workspace && echo OK || true", timeout=5)
+						overlay_ok = "OK" in (co.stdout or "")
+						cs = self._sandbox.commands.run("mountpoint -q /workspace/.solven/skills && echo OK || true", timeout=5)
+						skills_ok = "OK" in (cs.stdout or "")
+					except Exception:
+						pass
+					if not overlay_ok:
+						print(f"[_ensure_initialized] Overlay missing, re-running _setup_overlay", flush=True)
+						self._setup_overlay()
+					if not skills_ok:
+						print(f"[_ensure_initialized] Skills bind missing, re-running _mount_user_skills", flush=True)
+						self._mount_user_skills()
 
-				# Always install Anthropic skills into .solven/skills.
 				self._build_workspace_skills()
 				self._setup_proot()
 				self._initialized = True
-				self._writer("Espacio de trabajo listo")
 				print(f"[_ensure_initialized] ✓ Reused existing sandbox", flush=True)
+				self._start_background_syncs()
 				return
 			except Exception as e:
 				print(f"[_ensure_initialized] ✗ Failed to use sandbox {sandbox_id}: {e}", flush=True)
@@ -192,39 +227,52 @@ class SandboxBackend(BaseSandbox):
 		print(f"[_ensure_initialized] ✓ Created new sandbox: {self._sandbox.sandbox_id}", flush=True)
 		self._writer("Preparando espacio de trabajo...")
 
-		# Step 3: S3 workspace mount (restores prior session files).
+		# Step 3: S3 workspace mount
 		self._mount_s3_buckets()
 
-		# Step 4: User skills FUSE mount + local escrituras seed (non-blocking failures).
+		# Step 4: OverlayFS at /workspace (lower + upper/<tid>)
+		self._setup_overlay()
+
+		# Step 5: Optional preload S3 -> upper (background, non-blocking)
+		try:
+			self._sandbox.commands.run(
+				f"rsync -av {_RSYNC_ONE_FS} {_RSYNC_EXCLUDE_FLAGS} "
+				f"{self._workspace_s3_mount}/ {self._workspace}/ && chown -R user:user {self._workspace} 2>/dev/null || true",
+				timeout=180, user="root", background=True,
+			)
+		except Exception as e:
+			print(f"[_ensure_initialized] ⚠ Preload start failed (non-critical): {e}", flush=True)
+
+		# Step 6: User skills at /mnt/user-skills, bind to /workspace/.solven/skills
 		try:
 			self._mount_user_skills()
 		except Exception as e:
 			print(f"[_ensure_initialized] ⚠ User skills mount failed (non-blocking): {e}", flush=True)
 		self._sync_local_skills()
 
-		# Step 5: Install Anthropic skills into .solven/skills via npx.
+		# Step 7: Install Anthropic skills into .solven/skills via npx
 		self._build_workspace_skills()
 
-		# Step 6: proot isolation (merged-usr symlinks in /workspace).
+		# Step 8: chown only upper layer (not full /workspace merge) to avoid traversing read-only lower layer (huge /usr tree) and timeout
+		upper = self._upper_dir()
+		_debug_log("chown_upper_start", "H1", {"upper_dir": upper, "timeout_sec": 60})
+		self._sandbox.commands.run(f"chown -R user:user {upper}", timeout=60, user="root")
+		_debug_log("chown_upper_done", "H1", {"upper_dir": upper})
 		self._setup_proot()
 
+		# Step 9: Mark ready, start background sync (upper -> S3 only)
 		self._initialized = True
 		self._writer("Espacio de trabajo listo")
 		print(f"[_ensure_initialized] ✓ Initialization complete", flush=True)
+		self._start_background_syncs()
 
 	def _build_workspace_skills(self) -> None:
 		"""Install Anthropic skills into /workspace/.solven/skills via 'npx skills add'.
 
-		Runs from /workspace/.solven with --agent openclaw because OpenClaw's project
-		path is 'skills/' (no dot prefix), so skills land directly in .solven/skills/.
-		--copy is required because FUSE mounts don't support symlinks.
-		-y skips all interactive prompts.
-
-		Skills are only installed when their directory does NOT already exist so that
-		user modifications persisted via the S3 FUSE mount are never overwritten.
-		The 'system' directory is removed if present (stale from a previous run).
+		Runs from /workspace with --path .solven/skills. --copy for FUSE; -y skips prompts.
+		Skills only installed when directory does NOT exist. 'system' dir removed if stale.
 		"""
-		parent_dir = "/workspace/.solven"
+		parent_dir = "/workspace"
 		skills_dir = self._workspace_skills_dir  # /workspace/.solven/skills
 		skills_to_install = ["docx", "pdf", "xlsx", "pptx"]
 
@@ -252,7 +300,7 @@ class SandboxBackend(BaseSandbox):
 		skill_flags = " ".join(f"--skill {s}" for s in missing)
 		try:
 			result = self._sandbox.commands.run(
-				f"cd {parent_dir} && npx --yes skills add anthropics/skills {skill_flags} --agent openclaw --copy -y",
+				f"cd {parent_dir} && npx --yes skills add anthropics/skills {skill_flags} --agent openclaw --copy -y --path .solven/skills",
 				timeout=120,
 			)
 			print(f"[_build_workspace_skills] ✓ Installed: {', '.join(missing)}", flush=True)
@@ -265,29 +313,41 @@ class SandboxBackend(BaseSandbox):
 		print(f"[_build_workspace_skills] ✓ Done — {skills_dir}", flush=True)
 
 	def _sync_local_skills(self) -> None:
-		"""Copy local escrituras/SKILL.md into /.solven/skills/escrituras/ (user S3 mount)."""
+		"""Copy local escrituras (SKILL.md + required scripts) into /workspace/.solven/skills/escrituras/ (user S3 bind)."""
 		local_skills_dir = os.path.join(os.path.dirname(__file__), "skills")
+		escrituras_src = os.path.join(local_skills_dir, "escrituras")
 
 		if not os.path.exists(local_skills_dir):
 			print(f"[_sync_local_skills] Local skills directory not found: {local_skills_dir}", flush=True)
 			return
 
+		# Paths to sync: SKILL.md and base analysis scripts for escrituras (fill scripts go in scripts/fill, not synced)
+		escrituras_sync_paths = [
+			"SKILL.md",
+			"scripts/analyze_template.py",
+			"scripts/analyze_docx_placeholders.py",
+		]
+		escrituras_dir = f"{self._workspace_skills_dir}/escrituras"
+
 		try:
-			escrituras_skill_path = os.path.join(local_skills_dir, "escrituras", "SKILL.md")
-			if os.path.exists(escrituras_skill_path):
-				with open(escrituras_skill_path, "r", encoding="utf-8") as f:
-					skill_content = f.read()
-				escrituras_dir = f"{self._workspace_skills_dir}/escrituras"
-				# Write to /tmp first (not FUSE), then cp as root into the skills FUSE mount
-				tmp_skill = "/tmp/skill_escrituras.md"
-				self._sandbox.files.write(tmp_skill, skill_content)
+			synced = []
+			for rel_path in escrituras_sync_paths:
+				src_path = os.path.join(escrituras_src, rel_path)
+				if not os.path.exists(src_path):
+					continue
+				with open(src_path, "r", encoding="utf-8") as f:
+					content = f.read()
+				tmp_name = f"/tmp/escrituras_{rel_path.replace('/', '_')}"
+				self._sandbox.files.write(tmp_name, content)
 				self._sandbox.commands.run(
-					f"mkdir -p {escrituras_dir} && cp {tmp_skill} {escrituras_dir}/SKILL.md",
+					f"mkdir -p {escrituras_dir}/scripts && cp {tmp_name} {escrituras_dir}/{rel_path}",
 					timeout=10, user="root",
 				)
-				print(f"[_sync_local_skills] ✓ Synced escrituras/SKILL.md to {escrituras_dir}/", flush=True)
+				synced.append(rel_path)
+			if synced:
+				print(f"[_sync_local_skills] ✓ Synced escrituras: {', '.join(synced)}", flush=True)
 			else:
-				print(f"[_sync_local_skills] escrituras/SKILL.md not found at {escrituras_skill_path}", flush=True)
+				print(f"[_sync_local_skills] No escrituras files found under {escrituras_src}", flush=True)
 		except Exception as e:
 			print(f"[_sync_local_skills] ✗ Error syncing skills: {e}", flush=True)
 
@@ -318,12 +378,11 @@ class SandboxBackend(BaseSandbox):
 		except Exception as e:
 			raise
 
-		# Prepare mount dir and workspace
+		# Prepare mount dir and /sandbox for overlay (no /workspace yet; overlay creates it)
 		self._sandbox.commands.run(
-			f"mkdir -p {self._workspace_s3_mount} {self._workspace}",
+			f"mkdir -p {self._workspace_s3_mount} /sandbox",
 			timeout=30, user="root",
 		)
-		self._sandbox.commands.run(f"chown -R user:user {self._workspace}", timeout=10, user="root")
 
 		try:
 			check_mount = self._sandbox.commands.run(
@@ -337,7 +396,6 @@ class SandboxBackend(BaseSandbox):
 					timeout=10,
 				)
 				if "MOUNT_OK" in verify.stdout:
-					self._restore_files_from_s3()
 					return
 				print(f"[Mount] Existing mount not accessible, remounting", flush=True)
 				self._sandbox.commands.run(
@@ -380,7 +438,6 @@ class SandboxBackend(BaseSandbox):
 				raise RuntimeError(
 					f"Mount verification failed.\nRclone: {ps.stdout}\nCheck: /tmp/rclone-thread.log"
 				)
-			self._restore_files_from_s3()
 		except RuntimeError:
 			raise
 		except Exception as e:
@@ -398,14 +455,21 @@ class SandboxBackend(BaseSandbox):
 			)
 
 	def _mount_user_skills(self) -> None:
-		"""Mount S3 skills/{user_id} at /workspace/.solven/skills (unified skills dir)."""
+		"""Mount S3 skills/{user_id} at /mnt/user-skills, then bind to /workspace/.solven/skills.
+		Uses --vfs-write-back 0 (immediate). .solven/ is excluded from workspace sync.
+		"""
 		bucket = os.getenv("S3_BUCKET_NAME", "solven-testing")
-		solven_dir = "/workspace/.solven"
-		self._sandbox.commands.run(f"mkdir -p {self._workspace_skills_dir}", timeout=60, user="root")
+		# Unmount stale mounts
+		self._sandbox.commands.run(
+			f"mountpoint -q {self._workspace_skills_dir} 2>/dev/null && umount {self._workspace_skills_dir} 2>/dev/null || true; "
+			f"mountpoint -q {self._user_skills_mount} 2>/dev/null && umount {self._user_skills_mount} 2>/dev/null || true",
+			timeout=15, user="root",
+		)
+		self._sandbox.commands.run(f"mkdir -p {self._user_skills_mount} {self._workspace_skills_dir}", timeout=60, user="root")
 		try:
 			result = self._sandbox.commands.run(
-				f'bash /tmp/mount_s3_path.sh "{bucket}" "skills/{self._user_id}" "{self._workspace_skills_dir}" "/tmp/rclone-skills-user.log"',
-				timeout=0,  # Disable E2B timeout for long-running rclone mount
+				f'bash /tmp/mount_s3_path.sh "{bucket}" "skills/{self._user_id}" "{self._user_skills_mount}" "/tmp/rclone-skills-user.log" immediate',
+				timeout=0,
 				user="root",
 			)
 			if result.exit_code != 0:
@@ -413,30 +477,60 @@ class SandboxBackend(BaseSandbox):
 			import time
 			time.sleep(2)
 			verify = self._sandbox.commands.run(
-				f"ls {self._workspace_skills_dir} >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
+				f"ls {self._user_skills_mount} >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
 				timeout=10,
 			)
-			print(f"[Mount] {self._workspace_skills_dir} mount check: {verify.stdout.strip()}", flush=True)
-			# Ensure .solven is writable by the agent (runs as user in proot)
+			print(f"[Mount] {self._user_skills_mount} check: {verify.stdout.strip()}", flush=True)
+			if "MOUNT_OK" not in verify.stdout:
+				raise RuntimeError("User skills S3 mount not accessible")
+			# Bind into workspace so agent sees /.solven/skills
 			self._sandbox.commands.run(
-				f"chown -R user:user {solven_dir} 2>/dev/null || true",
-				timeout=15,
-				user="root",
+				f"mount --bind {self._user_skills_mount} {self._workspace_skills_dir}",
+				timeout=10, user="root",
 			)
 			self._sandbox.commands.run(
-				f"chmod -R u+rwX {solven_dir} 2>/dev/null || true",
-				timeout=15,
-				user="root",
+				f"chown -R user:user {self._workspace_skills_dir} 2>/dev/null || true",
+				timeout=15, user="root",
+			)
+			self._sandbox.commands.run(
+				f"chmod -R u+rwX {self._workspace_skills_dir} 2>/dev/null || true",
+				timeout=15, user="root",
 			)
 		except Exception as e:
 			raise
 
-	def _restore_files_from_s3(self) -> None:
-		"""Restore /workspace from S3 mount. Excludes .solven/, .venv/, venv/, env/, node_modules/, .bun/, and merged-usr symlinks."""
+	def _setup_overlay(self) -> None:
+		"""Create OverlayFS: lower (merged-usr), upper/<tid>, work/<tid>; mount merge at /workspace."""
+		upper = self._upper_dir()
+		work = self._work_dir()
+		self._sandbox.commands.run(
+			f"mkdir -p /sandbox/lower {upper} {work}",
+			timeout=10, user="root",
+		)
+		self._sandbox.commands.run(
+			"ln -sf /usr/bin /sandbox/lower/bin 2>/dev/null || true && "
+			"ln -sf /usr/sbin /sandbox/lower/sbin 2>/dev/null || true && "
+			"ln -sf /usr/lib /sandbox/lower/lib 2>/dev/null || true && "
+			"ln -sf /usr/lib64 /sandbox/lower/lib64 2>/dev/null || true",
+			timeout=10, user="root",
+		)
+		self._sandbox.commands.run(
+			"mountpoint -q /workspace && umount /workspace 2>/dev/null || true; mkdir -p /workspace",
+			timeout=15, user="root",
+		)
+		self._sandbox.commands.run(
+			f"mount -t overlay overlay "
+			f"-o lowerdir=/sandbox/lower,upperdir={upper},workdir={work} /workspace",
+			timeout=15, user="root",
+		)
+		print("[Overlay] ✓ /workspace = lower + upper", flush=True)
+
+	def _preload_upper_from_s3(self) -> None:
+		"""Optionally preload upper from S3 (one-time). Non-blocking; run in background to avoid blocking agent startup."""
 		try:
-			mount = self._workspace_s3_mount
 			self._sandbox.commands.run(
-				f"mkdir -p {self._workspace} && rsync -av {_RSYNC_EXCLUDE_FLAGS} {mount}/ {self._workspace}/",
+				f"rsync -av {_RSYNC_ONE_FS} {_RSYNC_EXCLUDE_FLAGS} "
+				f"{self._workspace_s3_mount}/ {self._workspace}/",
 				timeout=180,
 				user="root",
 			)
@@ -444,24 +538,92 @@ class SandboxBackend(BaseSandbox):
 				f"chown -R user:user {self._workspace} 2>/dev/null || true",
 				timeout=30, user="root",
 			)
-			print(f"[Sync] ✓ S3 -> /workspace (restore)", flush=True)
+			print(f"[Sync] ✓ S3 -> upper (preload)", flush=True)
 		except Exception as e:
-			print(f"[Sync] ⚠️  S3->workspace restore failed (non-critical): {e}", flush=True)
+			print(f"[Sync] ⚠️  S3->upper preload failed (non-critical): {e}", flush=True)
 
 	def _sync_workspace_to_s3(self) -> None:
-		"""Persist /workspace to S3. Excludes .solven/ (FUSE), virtualenvs, node_modules/, .bun/ (cache symlinks), and merged-usr symlinks."""
+		"""Persist upper layer to S3 (excludes .solven/, virtualenvs, node_modules/, etc.). Blocking; prefer _start_background_syncs()."""
 		try:
+			upper = self._upper_dir()
 			result = self._sandbox.commands.run(
-				f"rsync -av {_RSYNC_EXCLUDE_FLAGS} {self._workspace}/ {self._workspace_s3_mount}/",
+				f"rsync -av {_RSYNC_ONE_FS} {_RSYNC_EXCLUDE_FLAGS} {upper}/ {self._workspace_s3_mount}/",
 				timeout=300,
 				user="root",
 			)
 			if result.exit_code == 0:
-				print(f"[Sync] ✓ /workspace -> S3", flush=True)
+				print(f"[Sync] ✓ upper -> S3", flush=True)
 			else:
 				print(f"[Sync] ⚠️  persist exit {result.exit_code}", flush=True)
 		except Exception as e:
 			print(f"[Sync] ⚠️  persist failed (non-critical): {e}", flush=True)
+
+	def _start_background_syncs(self) -> None:
+		"""Start upper -> S3 sync in background. No sync in critical path. .solven/ excluded (bind mount)."""
+		upper = self._upper_dir()
+		workspace_cmd = (
+			f"rsync -av {_RSYNC_ONE_FS} {_RSYNC_EXCLUDE_FLAGS} "
+			f"{upper}/ {self._workspace_s3_mount}/"
+		)
+		try:
+			self._sandbox.commands.run(workspace_cmd, background=True, user="root")
+			print(f"[Sync] started background: upper -> /mnt/workspace-s3", flush=True)
+		except Exception as e:
+			print(f"[Sync] ⚠️  background sync start failed (non-critical): {e}", flush=True)
+
+	async def load_skills_frontmatter(self, category: Optional[str] = None) -> str:
+		"""Load SKILL.md frontmatter for prompt injection. Tries sandbox first, falls back to local src/skills/."""
+		# Try sandbox (requires init)
+		try:
+			self._ensure_initialized()
+			skills_dir = self._workspace_skills_dir
+			result = self._sandbox.commands.run(
+				f"ls -1 {skills_dir} 2>/dev/null || true",
+				timeout=15,
+				user="root",
+			)
+			dirs = [d.strip() for d in (result.stdout or "").splitlines() if d.strip() and not d.startswith(".")]
+			frontmatter_blocks: list[str] = []
+			for skill_name in dirs:
+				skill_md = f"{skills_dir}/{skill_name}/SKILL.md"
+				try:
+					read_result = self._sandbox.commands.run(
+						f"cat {shlex.quote(skill_md)} 2>/dev/null || true",
+						timeout=10,
+						user="root",
+					)
+					content = (read_result.stdout or "").strip()
+					if content:
+						fm = _parse_skillmd_frontmatter(content)
+						if fm:
+							frontmatter_blocks.append(f"---\n{fm}\n---")
+				except Exception:
+					continue
+			if frontmatter_blocks:
+				return "\n".join(frontmatter_blocks)
+		except Exception as e:
+			print(f"[load_skills_frontmatter] sandbox: {e}", flush=True)
+		# Fallback: read from local src/skills/ (docx, escrituras, etc.)
+		local_skills = os.path.join(os.path.dirname(__file__), "skills")
+		if os.path.isdir(local_skills):
+			blocks: list[str] = []
+			for name in sorted(os.listdir(local_skills)):
+				if name.startswith("."):
+					continue
+				skill_md = os.path.join(local_skills, name, "SKILL.md")
+				if os.path.isfile(skill_md):
+					try:
+						with open(skill_md, "r", encoding="utf-8") as f:
+							content = f.read()
+						fm = _parse_skillmd_frontmatter(content)
+						if fm:
+							blocks.append(f"---\n{fm}\n---")
+					except Exception:
+						pass
+			if blocks:
+				print(f"[load_skills_frontmatter] using local fallback ({len(blocks)} skills)", flush=True)
+				return "\n".join(blocks)
+		return ""
 
 	def _upload_mount_scripts(self) -> None:
 		"""Upload rclone mount scripts to sandbox from local files."""
@@ -484,18 +646,20 @@ class SandboxBackend(BaseSandbox):
 			raise RuntimeError(f"Failed to make scripts executable: {chmod.stderr}")
 
 	def _setup_proot(self) -> None:
-		"""Create merged-usr symlinks in /workspace (Ubuntu 22+ merged-usr layout) so proot guest /bin etc. resolve via /usr.
-		proot is pre-installed in the sandbox template — no availability check needed.
-		"""
-		self._sandbox.commands.run(
-			"ln -sf usr/bin /workspace/bin 2>/dev/null || true && "
-			"ln -sf usr/sbin /workspace/sbin 2>/dev/null || true && "
-			"ln -sf usr/lib /workspace/lib 2>/dev/null || true && "
-			"ln -sf usr/lib64 /workspace/lib64 2>/dev/null || true",
-			timeout=10, user="root",
-		)
+		"""Verify proot works with -r /workspace (agent sees /workspace as /), then mark ready."""
+		check = self._build_proot_command("pwd && ls / 2>/dev/null | head -8")
+		try:
+			result = self._sandbox.commands.run(check, timeout=30)
+			out = (result.stdout or "").strip()
+			first_line = out.split("\n")[0].strip() if out else ""
+			if result.exit_code != 0 or first_line != "/":
+				print(f"[proot] verification output: {out!r}", flush=True)
+				raise RuntimeError("proot verification failed: pwd should be / inside proot")
+		except Exception as e:
+			print(f"[proot] ✗ {e}", flush=True)
+			raise
 		self._proot_available = True
-		print("[proot] ready", flush=True)
+		print("[proot] ready (agent sees /workspace as /)", flush=True)
 
 	def _build_proot_command(self, bash_command: str) -> str:
 		"""Wrap command in proot with /workspace as root; bind system dirs and set workspace env."""
@@ -511,14 +675,18 @@ class SandboxBackend(BaseSandbox):
 			"-b /usr:/usr "
 			"-b /etc:/etc "
 		)
-		return f"proot -r {ws} {binds} -w / /bin/bash -c {shlex.quote(inner)}"
+		return f"proot -0 -r {ws} {binds} -w / /bin/bash -c {shlex.quote(inner)}"
 
 	def _filter_unwanted_commands(self, command: str) -> Optional[str]:
-		"""Block commands the agent must not run."""
+		"""Block install commands so deps use uv (Python) and bun (Node). Allow pip/npm/npx for non-install (e.g. pip list, npm run)."""
 		unwanted = {
-			r"\bsudo\b": "Error: sudo is not allowed in sandbox environment",
-			r"\bapt-get\b": "Error: apt-get is not allowed (system packages pre-installed)",
-			r"\bapt\b": "Error: apt is not allowed (system packages pre-installed)",
+			r"\bnpm\s+(install|i)\b": "Not allowed: Use bun for Node (e.g. bun install, bun add <pkg>).",
+			r"\bnpx\s+(install|add)\b": "Not allowed: Use bun for Node (e.g. bun add <pkg>, bun x <pkg>).",
+			r"\bnode\b": "Not allowed: Use bun for Node (e.g. bun <script.js> or bun run <script>).",
+			r"\bpip\s+install\b": "Not allowed: Use uv for Python (e.g. uv pip install ..., uv add ..., uv run ...).",
+			r"\bsudo\b": "Not allowed: sudo is not allowed in sandbox environment.",
+			r"\bapt-get\s+(install|update)\b": "Not allowed: apt-get is not allowed (system packages pre-installed).",
+			r"\bapt\s+(install|update)\b": "Not allowed: apt is not allowed (system packages pre-installed).",
 		}
 		for pattern, message in unwanted.items():
 			if re.search(pattern, command, re.IGNORECASE):
@@ -526,22 +694,19 @@ class SandboxBackend(BaseSandbox):
 		return None
 
 	def execute(self, command: str) -> ExecuteResponse:
-		"""Execute a shell command in the sandbox. When proot is available, runs inside proot with /workspace as /; otherwise cd into /workspace."""
+		"""Execute a shell command in the sandbox. Always runs inside proot so the agent sees /workspace as /."""
 		self._ensure_initialized()
+		if not self._proot_available:
+			return ExecuteResponse(
+				output="Error: proot not ready (sandbox init did not complete).",
+				exit_code=1,
+				truncated=False,
+			)
 
 		if error_msg := self._filter_unwanted_commands(command):
 			return ExecuteResponse(output=error_msg, exit_code=1, truncated=False)
 
-		if self._proot_available:
-			run_command = self._build_proot_command(command)
-		else:
-			ws = self._workspace
-			run_command = (
-				f"cd {ws} && HOME={ws} UV_PROJECT_ENVIRONMENT={ws}/.venv "
-				f"VIRTUAL_ENV={ws}/.venv BUN_INSTALL={ws}/.bun "
-				f"PATH={ws}/.venv/bin:{ws}/.local/bin:{ws}/.bun/bin:/usr/local/bin:/usr/bin:/bin "
-				f"{command}"
-			)
+		run_command = self._build_proot_command(command)
 		try:
 			result = self._sandbox.commands.run(run_command, timeout=1200)
 		except Exception as e:
@@ -552,7 +717,7 @@ class SandboxBackend(BaseSandbox):
 			)
 
 		try:
-			self._sync_workspace_to_s3()
+			self._start_background_syncs()
 		except Exception:
 			pass
 
@@ -617,11 +782,11 @@ class SandboxBackend(BaseSandbox):
 		return matches
 
 	def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
-		"""Upload multiple files to the sandbox. Agent paths (e.g. / or /foo) are mapped to /workspace."""
+		"""Upload files to the sandbox. All paths are normalized to /workspace as root. Uses E2B files API."""
 		self._ensure_initialized()
 		responses = []
 		for path, content in files:
-			real_path = path if path.startswith("/workspace") else f"/workspace/{path.lstrip('/')}"
+			real_path = self._normalize_path(path)
 			try:
 				if isinstance(content, bytes):
 					try:
@@ -634,17 +799,17 @@ class SandboxBackend(BaseSandbox):
 			except Exception:
 				responses.append(FileUploadResponse(path=path, error="permission_denied"))
 		try:
-			self._sync_workspace_to_s3()
+			self._start_background_syncs()
 		except Exception:
 			pass
 		return responses
 
 	def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
-		"""Download multiple files from the sandbox. Agent paths (e.g. / or /foo) are mapped to /workspace."""
+		"""Download files from the sandbox. All paths are normalized to /workspace as root. Uses E2B files API."""
 		self._ensure_initialized()
 		responses = []
 		for path in paths:
-			real_path = path if path.startswith("/workspace") else f"/workspace/{path.lstrip('/')}"
+			real_path = self._normalize_path(path)
 			try:
 				if not self._sandbox.files.exists(real_path):
 					responses.append(FileDownloadResponse(path=path, content=None, error="file_not_found"))
@@ -666,7 +831,7 @@ class SandboxBackend(BaseSandbox):
 		"""Async version of download_files."""
 		return await asyncio.to_thread(self.download_files, paths)
 
-	async def als_info(self, path: str = "/workspace") -> list[FileInfo]:
+	async def als_info(self, path: str) -> list[FileInfo]:
 		return await asyncio.to_thread(self.ls_info, path)
 
 	async def aread(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
@@ -675,8 +840,8 @@ class SandboxBackend(BaseSandbox):
 	async def awrite(self, file_path: str, content: str) -> WriteResult:
 		return await asyncio.to_thread(self.write, file_path, content)
 
-	async def agrep_raw(self, pattern: str, path: str | None = "/workspace", glob: str | None = None) -> list[GrepMatch] | str:
+	async def agrep_raw(self, pattern: str, path: str | None, glob: str | None = None) -> list[GrepMatch] | str:
 		return await asyncio.to_thread(self.grep_raw, pattern, path, glob)
 
-	async def aglob_info(self, pattern: str, path: str = "/workspace") -> list[FileInfo]:
+	async def aglob_info(self, pattern: str, path: str) -> list[FileInfo]:
 		return await asyncio.to_thread(self.glob_info, pattern, path)

@@ -30,6 +30,7 @@ from langchain.agents.middleware.tool_call_limit import ToolCallLimitMiddleware
 from src.llm import LLM as llm
 
 from src.agent_triage.models import InputTriageState, OutputTriageState, TriageState, TriageContext
+from src.middleware.tool_call_ids import UniqueToolCallIdsMiddleware
 from src.agent_triage.tools import (
     crear_ticket,
     patch_ticket,
@@ -149,7 +150,8 @@ graph = create_deep_agent(
 	middleware=[
 		ToolCallLimitMiddleware(run_limit=15, exit_behavior="end"),
 		ForceToolCallMiddleware(),  # Forces tool calls but respects Command returns
-		build_prompt
+		build_prompt,
+		UniqueToolCallIdsMiddleware(),
 	],
 	system_prompt="",  # Prompt is built dynamically via @dynamic_prompt middleware
 	context_schema=TriageContext,

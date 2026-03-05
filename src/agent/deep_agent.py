@@ -35,6 +35,7 @@ from src.models import AppContext, SolvenState
 
 from src.agent_catastro.agent import subagent as catastro_subagent
 from src.agent.tools import cargar_habilidad
+from src.middleware.tool_call_ids import UniqueToolCallIdsMiddleware
 from src.utils.tickets import get_ticket
 from src.common_tools.files import solicitar_archivo
 
@@ -262,9 +263,12 @@ USER_SKILLS_PATH = "/.solven/skills/"
 
 oficial_subagent = SubAgent(
     name="oficial_notarial",
-    description="asistente para trabajar en escrituras notariales",
+    description="asistente para trabajar en escrituras notariales y documentos de todo tipo",
     system_prompt="",
-    model=coding_llm,
+    model=ChatOpenRouter(
+        model="moonshotai/kimi-k2-thinking",
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+    ),
     skills=[
         USER_SKILLS_PATH,
     ]
@@ -272,7 +276,7 @@ oficial_subagent = SubAgent(
 
 graph = create_deep_agent(
     model=ChatOpenRouter(
-        model="moonshotai/kimi-k2-thinking",
+        model="x-ai/grok-4.1-fast",
         api_key=os.getenv("OPENROUTER_API_KEY"),
     ),
     system_prompt="",
@@ -286,10 +290,8 @@ graph = create_deep_agent(
         initialize_sandbox,  # Initialize sandbox before agent starts (non-blocking)
         build_prompt,
         ToolEnforcementMiddleware(),  # Ensure agent makes tool calls first
+        UniqueToolCallIdsMiddleware(),  # Globally unique tool call IDs (avoids assistant-ui duplicate-key crash)
         #continuation_evaluation_middleware,  # Evaluate results and decide to continue (LAST)
-    ],
-    skills=[
-        USER_SKILLS_PATH,
     ],
     context_schema=AppContext,
 )

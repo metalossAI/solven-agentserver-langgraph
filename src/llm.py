@@ -91,7 +91,7 @@ LLM_SKILL_MATCHING = xai_grok_4_fast
 
 LLM_SO = xai_grok_4_fast_SO
 
-CODING_LLM = minimax_m2_5 #ai_grok_code_fast_1
+CODING_LLM = kimi #minimax_m2_5 #ai_grok_code_fast_1
 
 LLM = xai_grok_4_fast  # Default model for agent
 

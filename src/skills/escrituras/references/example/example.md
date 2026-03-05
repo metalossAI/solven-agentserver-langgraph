@@ -1,1 +1,0 @@
-# Referencia tecnica de cómo hacer una escritura concreta

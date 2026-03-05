@@ -21,7 +21,9 @@ from src.agent.prompt import generate_prompt_template
 from src.agent_email.agent import create_gmail_subagent, create_outlook_subagent
 from src.agent_catastro.agent import subagent as catastro_subagent
 from src.agent.tools import cargar_habilidad
+from src.middleware.tool_call_ids import UniqueToolCallIdsMiddleware
 from src.utils.tickets import get_ticket
+from src.common_tools.files import solicitar_archivo
 from src.common_tools.files import solicitar_archivo
 
 async def build_context(
@@ -99,6 +101,7 @@ async def run_agent(
 			outlook_agent,
 			catastro_subagent,
 		],
+		middleware=[UniqueToolCallIdsMiddleware()],
 		store=store,
 		backend=backend,
 		context_schema=AppContext,

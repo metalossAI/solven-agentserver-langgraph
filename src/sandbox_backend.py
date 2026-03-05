@@ -6,7 +6,8 @@ ARCHITECTURE OVERVIEW (simple /workspace):
 =========================================
 - Agent CWD and HOME are /workspace. All tools and commands run there; uv/bun manage packages there.
 - S3 thread state is at /mnt/workspace-s3 (rclone FUSE). Restore: rsync S3 -> /workspace (excludes below).
-- Persist: after each execute(), rsync /workspace -> S3 (excludes below).
+- Persist: after each execute() and after init, rsync /workspace -> S3 (excludes below).
+  .solven/skills is included so skills are persisted to the thread bucket and visible on first run.
 - Skills:
     /.solven/skills  — unified skills directory (S3 FUSE mount).
                        Contains user skills, local escrituras seed, and Anthropic
@@ -36,15 +37,14 @@ from src.models import AppContext
 SANDBOX_TEMPLATE = "solven-sandbox-v1"
 
 # Directories/symlinks excluded from all rsync workspace <-> S3 transfers.
-# - .solven/      : unified skills FUSE mount — S3 persistence is handled by the FUSE
-#                   mount itself (skills/{user_id} bucket), NOT by rsync. Excluding it
-#                   here avoids double-writing the same files into the workspace bucket.
+# .solven/ is included so skills (npx add + local escrituras) are persisted to the
+# thread bucket immediately after setup; avoids first-run sync issue where skills
+# were not visible in the system prompt until sandbox was restarted.
 # - .venv/ venv/ env/ : Python virtualenvs (agent recreates on demand)
 # - node_modules/ : npm packages (agent recreates on demand)
 # - .bun/         : Bun cache (contains symlinks that break S3 FUSE writes)
 # - bin sbin lib lib64 : merged-usr symlinks created by _setup_proot() at runtime
 _RSYNC_EXCLUDES = (
-    ".solven/",
     ".venv/",
     "venv/",
     "env/",
@@ -162,6 +162,7 @@ class SandboxBackend(BaseSandbox):
 				# Always install Anthropic skills into .solven/skills.
 				self._build_workspace_skills()
 				self._setup_proot()
+				self._sync_workspace_to_s3()
 				self._initialized = True
 				self._writer("Espacio de trabajo listo")
 				print(f"[_ensure_initialized] ✓ Reused existing sandbox", flush=True)
@@ -207,6 +208,10 @@ class SandboxBackend(BaseSandbox):
 
 		# Step 6: proot isolation (merged-usr symlinks in /workspace).
 		self._setup_proot()
+
+		# Step 7: Persist workspace to S3 (including .solven/skills) so skills are
+		# visible on first run and to any consumer reading from the thread bucket.
+		self._sync_workspace_to_s3()
 
 		self._initialized = True
 		self._writer("Espacio de trabajo listo")
@@ -265,29 +270,41 @@ class SandboxBackend(BaseSandbox):
 		print(f"[_build_workspace_skills] ✓ Done — {skills_dir}", flush=True)
 
 	def _sync_local_skills(self) -> None:
-		"""Copy local escrituras/SKILL.md into /.solven/skills/escrituras/ (user S3 mount)."""
+		"""Copy local escrituras (SKILL.md + required scripts) into /.solven/skills/escrituras/ (user S3 mount)."""
 		local_skills_dir = os.path.join(os.path.dirname(__file__), "skills")
+		escrituras_src = os.path.join(local_skills_dir, "escrituras")
 
 		if not os.path.exists(local_skills_dir):
 			print(f"[_sync_local_skills] Local skills directory not found: {local_skills_dir}", flush=True)
 			return
 
+		# Paths to sync: SKILL.md and base analysis scripts for escrituras (fill scripts go in scripts/fill, not synced)
+		escrituras_sync_paths = [
+			"SKILL.md",
+			"scripts/analyze_template.py",
+			"scripts/analyze_docx_placeholders.py",
+		]
+		escrituras_dir = f"{self._workspace_skills_dir}/escrituras"
+
 		try:
-			escrituras_skill_path = os.path.join(local_skills_dir, "escrituras", "SKILL.md")
-			if os.path.exists(escrituras_skill_path):
-				with open(escrituras_skill_path, "r", encoding="utf-8") as f:
-					skill_content = f.read()
-				escrituras_dir = f"{self._workspace_skills_dir}/escrituras"
-				# Write to /tmp first (not FUSE), then cp as root into the skills FUSE mount
-				tmp_skill = "/tmp/skill_escrituras.md"
-				self._sandbox.files.write(tmp_skill, skill_content)
+			synced = []
+			for rel_path in escrituras_sync_paths:
+				src_path = os.path.join(escrituras_src, rel_path)
+				if not os.path.exists(src_path):
+					continue
+				with open(src_path, "r", encoding="utf-8") as f:
+					content = f.read()
+				tmp_name = f"/tmp/escrituras_{rel_path.replace('/', '_')}"
+				self._sandbox.files.write(tmp_name, content)
 				self._sandbox.commands.run(
-					f"mkdir -p {escrituras_dir} && cp {tmp_skill} {escrituras_dir}/SKILL.md",
+					f"mkdir -p {escrituras_dir}/scripts && cp {tmp_name} {escrituras_dir}/{rel_path}",
 					timeout=10, user="root",
 				)
-				print(f"[_sync_local_skills] ✓ Synced escrituras/SKILL.md to {escrituras_dir}/", flush=True)
+				synced.append(rel_path)
+			if synced:
+				print(f"[_sync_local_skills] ✓ Synced escrituras: {', '.join(synced)}", flush=True)
 			else:
-				print(f"[_sync_local_skills] escrituras/SKILL.md not found at {escrituras_skill_path}", flush=True)
+				print(f"[_sync_local_skills] No escrituras files found under {escrituras_src}", flush=True)
 		except Exception as e:
 			print(f"[_sync_local_skills] ✗ Error syncing skills: {e}", flush=True)
 
@@ -514,11 +531,20 @@ class SandboxBackend(BaseSandbox):
 		return f"proot -r {ws} {binds} -w / /bin/bash -c {shlex.quote(inner)}"
 
 	def _filter_unwanted_commands(self, command: str) -> Optional[str]:
-		"""Block commands the agent must not run."""
+		"""Block commands the agent must not run. Return errors that direct the agent to use bun (Node) and uv (Python)."""
 		unwanted = {
-			r"\bsudo\b": "Error: sudo is not allowed in sandbox environment",
-			r"\bapt-get\b": "Error: apt-get is not allowed (system packages pre-installed)",
-			r"\bapt\b": "Error: apt is not allowed (system packages pre-installed)",
+			r"\bnpm\b": "Not allowed: Use bun for Node (e.g. bun install, bun run <script>, bun x <pkg>).",
+			r"\bnpx\b": "Not allowed: Use bun for Node (e.g. bun x <pkg> instead of npx).",
+			r"\bnode\b": "Not allowed: Use bun for Node (e.g. bun <script.js> or bun run <script>).",
+			r"\bpython\b": "Not allowed: Use uv for Python (e.g. uv run script.py, uv run python -c '...').",
+			r"\bpython3\b": "Not allowed: Use uv for Python (e.g. uv run script.py).",
+			r"\bpython2\b": "Not allowed: Use uv for Python (e.g. uv run script.py). Python 2 is not supported.",
+			r"\bpython2\.7\b": "Not allowed: Use uv for Python (e.g. uv run script.py). Python 2 is not supported.",
+			r"\bpython2\.6\b": "Not allowed: Use uv for Python (e.g. uv run script.py). Python 2 is not supported.",
+			r"\bpython2\.5\b": "Not allowed: Use uv for Python (e.g. uv run script.py). Python 2 is not supported.",
+			r"\bsudo\b": "Not allowed: sudo is not allowed in sandbox environment.",
+			r"\bapt-get\b": "Not allowed: apt-get is not allowed (system packages pre-installed).",
+			r"\bapt\b": "Not allowed: apt is not allowed (system packages pre-installed).",
 		}
 		for pattern, message in unwanted.items():
 			if re.search(pattern, command, re.IGNORECASE):

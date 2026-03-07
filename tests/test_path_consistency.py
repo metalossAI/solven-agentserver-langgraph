@@ -6,6 +6,8 @@ This test validates that:
 2. execute("cat /file") reads the same content as read("/file")
 3. write("/file", data) creates a file that execute("cat /file") can read
 4. All operations treat base_path as "/"
+
+Note: S3 paths use tenant-first layout: {tenant_id}/threads/{thread_id}, {tenant_id}/users/{user_id}/models.
 """
 
 import pytest
@@ -30,7 +32,8 @@ class TestPathConsistency:
         """Test that '/' maps to base_path."""
         key = backend._key("/")
         assert key == backend._base_path
-        assert key.endswith("/threads/test-thread")
+        # Tenant-first: key is {tenant_id}/threads/test-thread when company_id is set
+        assert "threads/test-thread" in key
     
     def test_key_mapping_file(self, backend):
         """Test that '/file.txt' maps to base_path/file.txt."""
@@ -93,18 +96,17 @@ class TestPathConsistency:
         Test that proot command uses correct root path.
         
         When proot is available:
-        - Command should be: proot -r <base_path> -w / ...
-        - This makes base_path appear as "/" inside proot
+        - Command should be: proot -r <workspace_path> -w / ...
+        - This makes workspace_path appear as "/" inside proot
         """
-        # Check that base_path is the thread workspace
-        assert "threads/test-thread" in backend._base_path
+        # Check that workspace is /workspace
+        assert backend._workspace == "/workspace"
         
         # If we were to build a proot command:
-        expected_root = backend._base_path
-        proot_cmd = f"proot -r {expected_root} -w / ls /"
+        expected_root = backend._workspace
+        proot_cmd = backend._build_proot_command("ls /")
         
-        # Inside proot, "ls /" would list files in base_path
-        # This is consistent with ls_info("/") which also lists base_path
+        # Inside proot, "ls /" would list files in workspace
         assert expected_root in proot_cmd
 
 

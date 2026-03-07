@@ -1,0 +1,3 @@
+[submodule "solven-skills"]
+	path = solven-skills
+	url = git@github.com:metalossAI/solven-skills.git

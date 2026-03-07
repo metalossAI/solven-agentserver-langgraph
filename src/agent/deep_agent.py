@@ -291,11 +291,11 @@ graph = create_deep_agent(
     ],
     middleware=[
         initialize_sandbox,  # Initialize sandbox before agent starts (non-blocking)
+        build_prompt,
         SkillsMiddleware(
             backend=SandboxBackend,
             sources=[USER_SKILLS_PATH],
         ),
-        build_prompt,
         #ToolEnforcementMiddleware(),  # Ensure agent makes tool calls first
         #UniqueToolCallIdsMiddleware(),  # Globally unique tool call IDs (avoids assistant-ui duplicate-key crash)
         #continuation_evaluation_middleware,  # Evaluate results and decide to continue (LAST)

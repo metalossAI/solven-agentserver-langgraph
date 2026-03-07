@@ -700,10 +700,11 @@ async def gmail_get_attachment(
         if attachment_bytes:
             from datetime import datetime
             
-            from src.utils.config import get_thread_id_from_config
+            from src.utils.config import get_user, get_thread_id_from_config
+            user = get_user()
             thread_id = get_thread_id_from_config()
-            
-            s3_client = S3Client(prefix=f"threads/{thread_id}")
+            s3_prefix = f"{user.company_id}/threads/{thread_id}" if user.company_id else f"threads/{thread_id}"
+            s3_client = S3Client(prefix=s3_prefix)
             
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             safe_filename = file_name.replace(" ", "_").replace("/", "_")

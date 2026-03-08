@@ -284,10 +284,12 @@ graph = create_deep_agent(
     system_prompt="",
     backend=lambda rt: SandboxBackend(rt),
     subagents=[
-        oficial_subagent,
         gmail_subagent,
         outlook_subagent,
         catastro_subagent,
+    ],
+    memory=[
+        "/.solven/AGENTS.md"
     ],
     middleware=[
         initialize_sandbox,  # Initialize sandbox before agent starts (non-blocking)

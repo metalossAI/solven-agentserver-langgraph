@@ -10,11 +10,11 @@ from langchain_openrouter.chat_models import ChatOpenRouter
 
 load_dotenv()
 
-granite_llm = ChatWatsonx(
-    model_id="ibm/granite-4-h-small",
-    url="https://eu-de.ml.cloud.ibm.com",
-    project_id="1f803e27-a263-42e6-a21b-db988a4f9b40",
-)
+#granite_llm = ChatWatsonx(
+#    model_id="ibm/granite-4-h-small",
+#    url="https://eu-de.ml.cloud.ibm.com",
+#    project_id="1f803e27-a263-42e6-a21b-db988a4f9b40",
+#)
 
 xai_grok_4_fast = ChatOpenRouter(
     model="x-ai/grok-4.1-fast",

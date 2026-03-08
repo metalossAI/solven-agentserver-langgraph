@@ -2,25 +2,26 @@
 E2B Sandbox backend for DeepAgents using S3.
 Implements the BackendProtocol for filesystem operations in an isolated sandbox environment.
 
-ARCHITECTURE OVERVIEW (plain /workspace + S3):
-==============================================
-- /workspace is a plain directory; commands run with cwd=/workspace and path token rewriting so all paths stay under /workspace.
-- S3 thread workspace at /mnt/workspace-s3 (rclone FUSE). Optional one-time preload: S3 -> /workspace (non-blocking).
-  Persist: rsync /workspace -> S3 in background.
-- Skills: .solven/skills = copy of the solven-skills submodule. User models from S3 bind into escrituras/assets/templates, .../references, .../scripts/fill. Excluded from sync.
+ARCHITECTURE OVERVIEW (bwrap isolation, /workspace as /):
+==========================================================
+- All agent commands run inside bwrap: /workspace is bound to / so the agent uses paths like /, /foo.
+- Paths are never rewritten: we pass them through to the base and run commands as-is in bwrap; only
+  result filtering applies (ls_info, glob_info, grep_raw exclude system dirs like /usr, /etc).
+- S3 thread workspace at /mnt/workspace-s3 (rclone FUSE). Optional preload: S3 -> /workspace. Persist: rsync /workspace -> S3.
+- Skills: .solven/skills = copy of solven-skills submodule. User models from S3 bind into escrituras/assets/templates, references, scripts/fill.
 
-Sandbox paths:
-- /workspace           - Agent root; persisted via rsync /workspace -> S3.
-- /workspace/.solven/skills - Copy of project solven-skills; escrituras/assets/templates, references, scripts/fill are bind mounts from S3 user models.
-- /mnt/workspace-s3     - S3 {tenant_id}/threads/{thread_id} (persist target only).
-- /mnt/user-models      - S3 {tenant_id}/users/{user_id}/models (bind into escrituras/assets/templates, references, scripts/fill).
+Sandbox paths (host): /workspace (agent root in bwrap), /workspace/.solven/skills, /mnt/workspace-s3, /mnt/user-models.
 """
+import json
 import os
 import re
 import shlex
 import asyncio
 import time as _time
 from typing import Optional
+
+# Debug log (NDJSON) for bwrap/shell instrumentation; path may be on host when server runs locally.
+_DEBUG_LOG_PATH = "/home/ramon/Github/metaloss/solven-app-vercel/.cursor/debug-ee3eb2.log"
 
 from e2b import Sandbox, SandboxQuery, SandboxState
 
@@ -53,19 +54,20 @@ _WORKSPACE_SEARCH_SKIP_DIRS = frozenset({
     "usr", "etc", "proc", "dev", "sys", "run", "tmp",
     "bin", "sbin", "lib", "lib64",
     "node_modules", ".venv", "venv", "env", ".bun",
-    ".git", ".solven",
+    ".git",
+})
+
+# Top-level names to hide from agent in ls_info/glob_info/grep_raw (bwrap exposes /usr, /etc, etc.).
+_AGENT_HIDDEN_TOPLEVEL = frozenset({
+    "usr", "etc", "proc", "dev", "sys", "run", "lib", "lib64", "bin", "sbin",
 })
 
 
 class SandboxBackend(BaseSandbox):
 	"""
-	E2B Sandbox backend with plain /workspace and S3. No overlay or chroot; cwd=/workspace and path resolution keep all operations under /workspace.
-
-	Paths:
-	- /workspace              - Agent root; persisted via rsync /workspace -> S3.
-	- /workspace/.solven/skills - Copy of project solven-skills; escrituras/assets/templates, references, scripts/fill are bind mounts from S3 user models.
-	- /mnt/workspace-s3     - S3 thread workspace (persist target only).
-	- /mnt/user-models      - S3 user models; bound into .solven/skills/escrituras/assets/templates, .../references, .../scripts/fill.
+	E2B Sandbox backend with bwrap isolation: /workspace is bound to / inside the container.
+	Paths are never rewritten; only result filtering (ls_info, glob_info, grep_raw) hides system dirs.
+	Init and sync run outside bwrap; execute (and thus read/write/edit/ls_info/glob_info/grep_raw) run inside bwrap.
 	"""
 
 	def __init__(self, runtime: ToolRuntime[AppContext]):
@@ -93,6 +95,7 @@ class SandboxBackend(BaseSandbox):
 
 		self._workspace_ready = False
 		self._initialized = False
+		self._bwrap_available: Optional[bool] = None
 
 	def _resolve_workspace_path(self, path: str) -> str:
 		"""
@@ -116,6 +119,16 @@ class SandboxBackend(BaseSandbox):
 			return real_path
 		suffix = real_path[len(self._workspace):].lstrip("/")
 		return f"/{suffix}" if suffix else "/"
+
+	def _is_workspace_path(self, agent_path: str) -> bool:
+		"""True if path is workspace-only (not under system toplevel like /usr, /etc). Used to filter results."""
+		if not agent_path or not agent_path.strip():
+			return True
+		p = agent_path.strip().rstrip("/")
+		if p == "/" or not p.startswith("/"):
+			return True
+		first = p.lstrip("/").split("/")[0]
+		return first not in _AGENT_HIDDEN_TOPLEVEL
 
 	@property
 	def id(self) -> str:
@@ -175,6 +188,7 @@ class SandboxBackend(BaseSandbox):
 					continue
 
 				self._workspace_ready = True
+				self._ensure_bwrap()
 				self._initialized = True
 				print(f"[_ensure_initialized] ✓ Reused existing sandbox (config skipped)", flush=True)
 				self._start_background_syncs()
@@ -243,8 +257,9 @@ class SandboxBackend(BaseSandbox):
 		# Step 7: chown /workspace
 		self._sandbox.commands.run(f"chown -R user:user {self._workspace}", timeout=60, user="root")
 
-		# Step 8: Mark ready, start background sync (/workspace -> S3)
+		# Step 8: Mark ready, verify bwrap, start background sync (/workspace -> S3)
 		self._workspace_ready = True
+		self._ensure_bwrap()
 		self._initialized = True
 		self._writer("Espacio de trabajo listo")
 		print(f"[_ensure_initialized] ✓ Initialization complete", flush=True)
@@ -349,6 +364,9 @@ class SandboxBackend(BaseSandbox):
 		- templates -> escrituras/assets/templates (all user models templates inside assets/)
 		- references -> escrituras/references
 		- fill_scripts -> escrituras/scripts/fill
+
+		Runs the rclone FUSE mount in background to avoid client 'context deadline exceeded'
+		when the mount takes longer than the E2B/gRPC timeout; then polls for readiness.
 		"""
 		bucket = os.getenv("S3_BUCKET_NAME", "solven-testing")
 		escrituras_assets_templates = f"{self._workspace_skills_dir}/escrituras/assets/templates"
@@ -368,20 +386,30 @@ class SandboxBackend(BaseSandbox):
 			timeout=30, user="root",
 		)
 		try:
-			result = self._sandbox.commands.run(
-				f'bash /tmp/mount_s3_path.sh "{bucket}" "{s3_models_prefix}" "{self._user_models_mount}" "/tmp/rclone-models-user.log" immediate',
-				timeout=600, user="root",
-			)
-			if result.exit_code != 0:
-				raise RuntimeError(f"Failed to mount user models (exit {result.exit_code})")
-			import time
-			time.sleep(2)
-			verify = self._sandbox.commands.run(
-				f"ls {self._user_models_mount} >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
-				timeout=10,
-			)
-			if "MOUNT_OK" not in verify.stdout:
-				raise RuntimeError("User models S3 mount not accessible")
+			# Start rclone FUSE mount in background so we don't hit client "context deadline exceeded"
+			try:
+				self._sandbox.commands.run(
+					f'bash /tmp/mount_s3_path.sh "{bucket}" "{s3_models_prefix}" "{self._user_models_mount}" "/tmp/rclone-models-user.log" immediate',
+					timeout=30, user="root", background=True,
+				)
+			except Exception:
+				pass  # background launch may raise even on success; ignore and proceed to poll
+			# Poll for mount readiness with short timeouts (avoid long-running request)
+			mounted = False
+			for _ in range(30):
+				_time.sleep(3)
+				try:
+					verify = self._sandbox.commands.run(
+						f"mountpoint -q {self._user_models_mount} && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
+						timeout=8,
+					)
+					if "MOUNT_OK" in (verify.stdout or ""):
+						mounted = True
+						break
+				except Exception:
+					continue
+			if not mounted:
+				raise RuntimeError("User models S3 mount not accessible within 90s")
 			# Ensure S3 subdirs exist for new users
 			self._sandbox.commands.run(
 				f"mkdir -p {self._user_models_mount}/templates {self._user_models_mount}/references {self._user_models_mount}/fill_scripts && "
@@ -592,6 +620,40 @@ class SandboxBackend(BaseSandbox):
 			"BUN_INSTALL": f"{self._workspace}/.bun",
 		}
 
+	def _ensure_bwrap(self) -> None:
+		"""Verify bwrap is available; cache result."""
+		if self._bwrap_available is not None:
+			return
+		try:
+			result = self._sandbox.commands.run("which bwrap", timeout=10, user="root")
+			self._bwrap_available = result.exit_code == 0 and bool((result.stdout or "").strip())
+		except Exception:
+			self._bwrap_available = False
+		if not self._bwrap_available:
+			print("[_ensure_bwrap] ✗ bwrap not found; ensure bubblewrap is installed in the E2B template", flush=True)
+			return
+		# #region agent log
+		try:
+			probe = self._sandbox.commands.run(
+				"ls -la /bin/bash 2>&1; which bash 2>&1; readlink -f /bin/bash 2>&1",
+				timeout=10,
+				user="root",
+			)
+			out = (probe.stdout or "") + (probe.stderr or "")
+			entry = {
+				"sessionId": "ee3eb2",
+				"hypothesisId": "H1",
+				"location": "sandbox_backend._ensure_bwrap",
+				"message": "E2B bash probe",
+				"data": {"probe_output": out},
+				"timestamp": int(_time.time() * 1000),
+			}
+			with open(_DEBUG_LOG_PATH, "a") as f:
+				f.write(json.dumps(entry) + "\n")
+		except Exception:
+			pass
+		# #endregion
+
 	def _filter_unwanted_commands(self, command: str) -> Optional[str]:
 		"""Block install commands so deps use uv (Python) and bun (Node). Allow pip/npm/npx for non-install (e.g. pip list, npm run)."""
 		unwanted = {
@@ -604,8 +666,41 @@ class SandboxBackend(BaseSandbox):
 				return message
 		return None
 
+	def _build_bwrap_command(self, command: str) -> str:
+		"""Wrap command in bwrap; same bind layout as old working backend (sandbox_backend.old _run_bwrap_direct).
+
+		Workspace bound as /; system /usr, /lib, /lib64, /bin, /sbin, /etc ro-bound; command passed as
+		single list element so shlex.quote(command) is applied and outer shell passes it intact to bash -c.
+		"""
+		ws = self._workspace
+		path_env = "/.venv/bin:/.local/bin:/.bun/bin:/usr/local/bin:/usr/bin:/bin"
+		args = [
+			"bwrap",
+			"--bind", ws, "/",
+			"--ro-bind", "/usr", "/usr",
+			"--ro-bind", "/lib", "/lib",
+			"--ro-bind", "/lib64", "/lib64",
+			"--ro-bind", "/bin", "/bin",
+			"--ro-bind", "/sbin", "/sbin",
+			"--ro-bind", "/etc", "/etc",
+			"--proc", "/proc",
+			"--dev", "/dev",
+			"--bind", f"{ws}/tmp", "/tmp",
+			"--chdir", "/",
+			"--setenv", "HOME", "/",
+			"--setenv", "PWD", "/",
+			"--setenv", "TMPDIR", "/tmp",
+			"--setenv", "PATH", path_env,
+			"--setenv", "UV_PROJECT_ENVIRONMENT", "/.venv",
+			"--setenv", "VIRTUAL_ENV", "/.venv",
+			"--setenv", "BUN_INSTALL", "/.bun",
+			"--",
+			"/bin/bash", "-c", command,
+		]
+		return " ".join(shlex.quote(str(a)) for a in args)
+
 	def execute(self, command: str) -> ExecuteResponse:
-		"""Execute a shell command in the sandbox with all paths prefixed to /workspace. Uses shlex tokenization and cwd=/workspace."""
+		"""Execute a shell command inside bwrap (workspace bound as /). No path rewriting; run command as-is."""
 		self._ensure_initialized()
 		if not self._workspace_ready:
 			return ExecuteResponse(
@@ -613,30 +708,34 @@ class SandboxBackend(BaseSandbox):
 				exit_code=1,
 				truncated=False,
 			)
+		if self._bwrap_available is False:
+			return ExecuteResponse(
+				output="Error: bwrap not available (required for command execution). Ensure bubblewrap is installed in the E2B template.",
+				exit_code=1,
+				truncated=False,
+			)
 
 		if error_msg := self._filter_unwanted_commands(command):
 			return ExecuteResponse(output=error_msg, exit_code=1, truncated=False)
 
+		full_cmd = self._build_bwrap_command(command)
+		# #region agent log
 		try:
-			tokens = shlex.split(command, posix=True)
-		except ValueError:
-			return ExecuteResponse(
-				output=f"Error parsing command: invalid quoting or shell syntax.",
-				exit_code=1,
-				truncated=False,
-			)
-		prefixed_tokens = []
-		for tok in tokens:
-			if tok.startswith("/") or tok.startswith("."):
-				tok = self._resolve_workspace_path(tok)
-			prefixed_tokens.append(tok)
-		run_command = " ".join(shlex.quote(t) for t in prefixed_tokens)
-
+			entry = {
+				"sessionId": "ee3eb2", "hypothesisId": "H2",
+				"location": "sandbox_backend.execute",
+				"message": "bwrap full_cmd",
+				"data": {"full_cmd_preview": full_cmd[:300]},
+				"timestamp": int(_time.time() * 1000),
+			}
+			with open(_DEBUG_LOG_PATH, "a") as f:
+				f.write(json.dumps(entry) + "\n")
+		except Exception:
+			pass
+		# #endregion
 		try:
 			result = self._sandbox.commands.run(
-				run_command,
-				cwd=self._workspace,
-				envs=self._execute_env(),
+				full_cmd,
 				timeout=1200,
 				user="root",
 			)
@@ -646,6 +745,20 @@ class SandboxBackend(BaseSandbox):
 				exit_code=1,
 				truncated=False,
 			)
+		# #region agent log
+		try:
+			entry2 = {
+				"sessionId": "ee3eb2", "hypothesisId": "H2",
+				"location": "sandbox_backend.execute",
+				"message": "bwrap result",
+				"data": {"exit_code": result.exit_code, "stdout": (result.stdout or "")[:200], "stderr": (result.stderr or "")[:200]},
+				"timestamp": int(_time.time() * 1000),
+			}
+			with open(_DEBUG_LOG_PATH, "a") as f:
+				f.write(json.dumps(entry2) + "\n")
+		except Exception:
+			pass
+		# #endregion
 
 		try:
 			self._start_background_syncs()
@@ -658,58 +771,67 @@ class SandboxBackend(BaseSandbox):
 			truncated=False,
 		)
 
+	
+	
+	
 	async def aexecute(self, command: str) -> ExecuteResponse:
 		"""Async version of execute."""
 		return await asyncio.to_thread(self.execute, command)
 
-	def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
-		"""Read file; path is resolved to /workspace before calling base."""
-		real = self._resolve_workspace_path(file_path)
-		return super().read(real, offset, limit)
-
-	def write(self, file_path: str, content: str) -> WriteResult:
-		"""Write file; path is resolved to /workspace before calling base."""
-		real = self._resolve_workspace_path(file_path)
-		return super().write(real, content)
-
-	def edit(
-		self,
-		file_path: str,
-		old_string: str,
-		new_string: str,
-		replace_all: bool = False,
-	) -> EditResult:
-		"""Edit file; path is resolved to /workspace before calling base."""
-		real = self._resolve_workspace_path(file_path)
-		return super().edit(real, old_string, new_string, replace_all)
-
 	def ls_info(self, path: str) -> list[FileInfo]:
-		"""List files; path is resolved to /workspace. Returned paths are converted to agent-visible."""
-		real = self._resolve_workspace_path(path)
-		result = super().ls_info(real)
-		return [FileInfo(path=self._to_agent_path(p["path"]), is_dir=p["is_dir"]) for p in result]
+		"""List files; path passed through. Return only workspace paths (filter out system dirs)."""
+		result = super().ls_info(path)
+		return [p for p in result if self._is_workspace_path(p["path"])]
 
-	def glob_info(self, pattern: str, path: str = "/") -> list[FileInfo]:
-		"""List files matching pattern; path is resolved to /workspace. Returned paths are agent-visible."""
-		real = self._resolve_workspace_path(path.rstrip("/") or "/")
-		result = super().glob_info(pattern, real)
-		return [FileInfo(path=self._to_agent_path(p["path"]), is_dir=p["is_dir"]) for p in result]
+	def glob_info(self, pattern: str, path: str = "/") -> list["FileInfo"]:
+		"""List files matching pattern via find -iname (case-insensitive) so e.g. **/acta* matches ACTA JUNTA UNIVERSAL."""
+		search_path = path.rstrip("/") or "/"
+		# Basename part for -iname: **/acta* -> acta*, **/*.pdf -> *.pdf
+		basename_pattern = pattern.split("/")[-1] if "/" in pattern else pattern
+		if not basename_pattern or basename_pattern == "**":
+			basename_pattern = "*"
+		# Prune skip dirs only ( -type d -name d1 -o -type d -name d2 ... ) -prune -o -type f -iname 'pattern' -print
+		prune_expr = " -o ".join(f"-type d -name {shlex.quote(d)}" for d in _WORKSPACE_SEARCH_SKIP_DIRS)
+		cmd = (
+			f"find {shlex.quote(search_path)} "
+			f"\\( {prune_expr} \\) -prune -o -type f -iname {shlex.quote(basename_pattern)} -print 2>/dev/null"
+		)
+		result = self.execute(cmd)
+		file_infos: list = []
+		for line in (result.output or "").splitlines():
+			line = line.strip()
+			if line:
+				file_infos.append({"path": line, "is_dir": False})
+		return file_infos
 
 	def grep_raw(
 		self,
 		pattern: str,
 		path: str | None = None,
-		glob: str | None = None,
-	) -> list[GrepMatch] | str:
-		"""Search in path; path is resolved to /workspace. Returned paths are agent-visible."""
-		real_path = self._resolve_workspace_path((path or ".").rstrip("/") or "/")
-		result = super().grep_raw(pattern, real_path, glob)
-		if isinstance(result, str):
-			return result
-		return [
-			{"path": self._to_agent_path(m["path"]), "line": m["line"], "text": m["text"]}
-			for m in result
-		]
+		glob: str | None = None,	
+	) -> "list[GrepMatch] | str":
+		"""Same as base (grep -rHnF via execute) but with --exclude-dir so root search is fast."""
+		search_path = shlex.quote((path or ".").rstrip("/") or "/")
+		skip_dirs = set(_WORKSPACE_SEARCH_SKIP_DIRS)
+		exclude_dirs = " ".join(f"--exclude-dir={d}" for d in skip_dirs)
+		glob_pattern = f"--include={shlex.quote(glob)}" if glob else ""
+		cmd = (
+			f"grep -rHnF {exclude_dirs} {glob_pattern} "
+			f"-e {shlex.quote(pattern)} {search_path} 2>/dev/null || true"
+		)
+		result = self.execute(cmd)
+		output = (result.output or "").rstrip()
+		if not output:
+			return []
+		matches: list = []
+		for line in output.split("\n"):
+			parts = line.split(":", 2)
+			if len(parts) >= 3:
+				try:
+					matches.append({"path": parts[0], "line": int(parts[1]), "text": parts[2]})
+				except ValueError:
+					continue
+		return matches
 
 	def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
 		self._ensure_initialized()

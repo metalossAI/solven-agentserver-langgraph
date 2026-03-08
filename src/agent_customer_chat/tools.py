@@ -27,6 +27,7 @@ from langchain_postgres import PGVectorStore
 from src.utils.vector_store import get_pg_engine
 from src.models import AppContext
 from src.utils.config import get_user, get_thread_id
+from src.agent_customer_chat.models import Accion
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SECRET_KEY")
@@ -384,10 +385,23 @@ async def leer_solicitud(runtime: ToolRuntime[AppContext]) -> ToolMessage:
 # ---------------------------------------------------------------------------
 
 class ActualizarSolicitudInput(BaseModel):
-    titulo: Optional[str] = Field(None, description="Nuevo título (opcional)")
+    """Campos actualizables de la solicitud (todos opcionales; al menos uno requerido)."""
+    titulo: Optional[str] = Field(None, description="Nuevo título de la solicitud (opcional)")
     descripcion: Optional[str] = Field(
         None,
         description="Nueva descripción que reemplaza la anterior (opcional)",
+    )
+    prioridad: Optional[str] = Field(
+        None,
+        description="Nueva prioridad: 'low', 'medium', 'high', 'urgent' (opcional)",
+    )
+    status: Optional[str] = Field(
+        None,
+        description="Nuevo estado del ticket: 'open', 'ongoing', 'closed' (opcional)",
+    )
+    acciones: Optional[List[Accion]] = Field(
+        None,
+        description="Lista de documentos/acciones requeridas; reemplaza las actuales (opcional)",
     )
 
 
@@ -395,20 +409,26 @@ class ActualizarSolicitudInput(BaseModel):
 async def actualizar_solicitud(
     titulo: Optional[str] = None,
     descripcion: Optional[str] = None,
+    prioridad: Optional[str] = None,
+    status: Optional[str] = None,
+    acciones: Optional[List[Accion]] = None,
     runtime: ToolRuntime[AppContext] = None,
 ) -> ToolMessage:
     """
-    Actualiza el título o la descripción de la solicitud del hilo actual.
-    No acepta ticket_id: siempre opera sobre el ticket del thread actual.
+    Actualiza la solicitud del hilo actual. Permite modificar título, descripción,
+    prioridad, estado y lista de acciones. Siempre opera sobre el ticket del thread actual.
 
     Args:
     - titulo: nuevo título (opcional)
-    - descripcion: nueva descripción que reemplaza la anterior (opcional)
+    - descripcion: nueva descripción (opcional)
+    - prioridad: 'low' | 'medium' | 'high' | 'urgent' (opcional)
+    - status: 'open' | 'ongoing' | 'closed' (opcional)
+    - acciones: lista de acciones/documentos requeridos; reemplaza la lista actual (opcional)
     """
     try:
-        if not titulo and not descripcion:
+        if not any([titulo, descripcion, prioridad, status, acciones]):
             return ToolMessage(
-                content="Debes proporcionar al menos título o descripción para actualizar.",
+                content="Debes proporcionar al menos un campo para actualizar: título, descripción, prioridad, status o acciones.",
                 status="error",
                 tool_call_id=runtime.tool_call_id,
                 name="actualizar_solicitud",
@@ -446,37 +466,68 @@ async def actualizar_solicitud(
         now = datetime.now(timezone.utc).isoformat()
 
         ticket_update: dict = {"updated_at": now}
-        if titulo:
+        if titulo is not None:
             ticket_update["title"] = titulo
+        if prioridad is not None:
+            ticket_update["priority"] = prioridad
+        if status is not None:
+            ticket_update["status"] = status
 
-        await supabase.table("tickets").update(ticket_update).eq("id", thread_id).execute()
+        await supabase.table("tickets").update(ticket_update).eq("id", thread_id).eq("company_id", company_id).execute()
 
-        # Update document / embeddings when description changes
-        if descripcion and document_id:
+        # Update document / embeddings when description or title/priority change
+        if (descripcion or titulo or prioridad) and document_id:
             doc_resp = (
                 await supabase.table("documents")
-                .select("metadata")
+                .select("metadata, content")
                 .eq("id", document_id)
                 .execute()
             )
             existing_meta = (
                 doc_resp.data[0].get("metadata", {}) if doc_resp.data else {}
             )
+            existing_content = doc_resp.data[0].get("content", "") if doc_resp.data else ""
             updated_meta = {**existing_meta, "updated_at": now, "modified": True}
-            if titulo:
+            if titulo is not None:
                 updated_meta["title"] = titulo
+            if prioridad is not None:
+                updated_meta["priority"] = prioridad
+            new_content = descripcion if descripcion is not None else existing_content
 
             vector_store = await _get_pg_vector_store()
             updated_doc = Document(
-                id=document_id, page_content=descripcion, metadata=updated_meta
+                id=document_id, page_content=new_content, metadata=updated_meta
             )
             await vector_store.aadd_documents([updated_doc])
 
+        # Replace actions if provided
+        if acciones is not None:
+            await supabase.table("actions").delete().eq("ticket_id", thread_id).execute()
+            if acciones:
+                actions_to_insert = [
+                    {
+                        "ticket_id": thread_id,
+                        "title": a.title,
+                        "description": a.description,
+                        "status": a.status,
+                        "created_by": "customer_chat",
+                        "metadata": a.metadata,
+                    }
+                    for a in acciones
+                ]
+                await supabase.table("actions").insert(actions_to_insert).execute()
+
         parts = []
-        if titulo:
+        if titulo is not None:
             parts.append(f"título → '{titulo}'")
-        if descripcion:
+        if descripcion is not None:
             parts.append("descripción actualizada")
+        if prioridad is not None:
+            parts.append(f"prioridad → '{prioridad}'")
+        if status is not None:
+            parts.append(f"estado → '{status}'")
+        if acciones is not None:
+            parts.append(f"acciones → {len(acciones)} documento(s)/acción(es)")
 
         return ToolMessage(
             content=f"Solicitud actualizada: {', '.join(parts)}.",

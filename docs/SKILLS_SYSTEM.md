@@ -34,9 +34,9 @@ The S3Backend provides three virtual mount points for agents:
 
 | Mount Point | S3 Location | Purpose |
 |-------------|-------------|---------|
-| `/workspace` | `threads/{thread_id}/` | Thread-specific workspace (read/write) |
+| `/workspace` | `{tenant_id}/threads/{thread_id}/` | Thread-specific workspace (read/write) |
 | `/ticket` | `tickets/{ticket_id}/` | Ticket context files (if ticket exists) |
-| `/skills` | `{user_id}/skills/` | User's skills library (read-only) |
+| `/skills` (escrituras assets) | `{tenant_id}/users/{user_id}/models/` | User's models/templates (read/write) |
 
 ## How Skills Work
 

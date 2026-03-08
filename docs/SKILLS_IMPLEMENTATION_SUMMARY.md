@@ -12,9 +12,9 @@ Added three virtual mount points to the S3Backend:
 
 | Mount | S3 Location | Purpose | Access |
 |-------|-------------|---------|--------|
-| `/workspace` | `threads/{thread_id}/` | Thread workspace | Read/Write |
+| `/workspace` | `{tenant_id}/threads/{thread_id}/` | Thread workspace | Read/Write |
 | `/ticket` | `tickets/{ticket_id}/` | Ticket context files | Read |
-| `/skills` | `{user_id}/skills/` | User's skills library | Read |
+| `/skills` | `{tenant_id}/users/{user_id}/models/` (escrituras assets) | User's models/templates | Read |
 
 ### 2. Skills Directory Structure
 

@@ -268,6 +268,9 @@ oficial_notarial = SubAgent(
     model=ChatOpenRouter(
         model="minimax/minimax-m2.5",
         api_key=os.getenv("OPENROUTER_API_KEY"),
+        model_kwargs={
+            "parallel_tool_calls": False,
+        }
     ),
     skills=[
         USER_SKILLS_PATH,
@@ -278,9 +281,6 @@ graph = create_deep_agent(
     model=ChatOpenRouter(
         model="x-ai/grok-4.1-fast",
         api_key=os.getenv("OPENROUTER_API_KEY"),
-        model_kwargs={
-            "parallel_tool_calls": False,
-        }
     ),
     system_prompt="",
     backend=lambda rt: SandboxBackend(rt),

@@ -8,7 +8,7 @@ ARCHITECTURE OVERVIEW (bwrap isolation, /workspace as /):
 - Paths are never rewritten: we pass them through to the base and run commands as-is in bwrap; only
   result filtering applies (ls_info, glob_info, grep_raw exclude system dirs like /usr, /etc).
 - S3 thread workspace at /mnt/workspace-s3 (rclone FUSE). Optional preload: S3 -> /workspace. Persist: rsync /workspace -> S3.
-- Skills: .solven/skills = clean clone of solven-skills. User models from S3 bind into escrituras/assets/templates, references, scripts/fill.
+- Skills: .solven/skills = clean clone of solven-skills. User models from S3 bind into escrituras/assets/templates and references.
 
 Sandbox paths (host): /workspace (agent root in bwrap), /workspace/.solven/skills, /mnt/workspace-s3, /mnt/user-models.
 """
@@ -319,7 +319,7 @@ class SandboxBackend(BaseSandbox):
 		tmp_clone_dir = f"{skills_dir}.tmp"
 		repo_url = SKILLS_REPO_URL
 		git_username = (os.getenv("GIT_USERNAME") or "").strip() or None
-		git_token = (os.getenv("GIT_TOKEN") or os.getenv("GIT_TOKEn") or "").strip() or None
+		git_token = os.getenv("GIT_TOKEN") or None
 		self._sandbox.commands.run(f"mkdir -p {parent_dir}", timeout=10, user="root")
 		self._sandbox.commands.run(
 			f"rm -rf {tmp_clone_dir} {skills_dir}",
@@ -351,7 +351,6 @@ class SandboxBackend(BaseSandbox):
 		"""Mount S3 {tenant_id}/users/{user_id}/models at /mnt/user-models, then bind:
 		- templates -> escrituras/assets/templates (all user models templates inside assets/)
 		- references -> escrituras/references
-		- fill_scripts -> escrituras/scripts/fill
 
 		Runs the rclone FUSE mount in background to avoid client 'context deadline exceeded'
 		when the mount takes longer than the E2B/gRPC timeout; then polls for readiness.
@@ -359,18 +358,16 @@ class SandboxBackend(BaseSandbox):
 		bucket = os.getenv("S3_BUCKET_NAME", "solven-testing")
 		escrituras_assets_templates = f"{self._workspace_skills_dir}/escrituras/assets/templates"
 		escrituras_references = f"{self._workspace_skills_dir}/escrituras/references"
-		escrituras_scripts_fill = f"{self._workspace_skills_dir}/escrituras/scripts/fill"
 		s3_models_prefix = f"{self._tenant_id}/users/{self._user_id}/models"
 		# Unmount stale binds and FUSE
 		self._sandbox.commands.run(
-			f"mountpoint -q {escrituras_scripts_fill} 2>/dev/null && umount {escrituras_scripts_fill} 2>/dev/null || true; "
 			f"mountpoint -q {escrituras_references} 2>/dev/null && umount {escrituras_references} 2>/dev/null || true; "
 			f"mountpoint -q {escrituras_assets_templates} 2>/dev/null && umount {escrituras_assets_templates} 2>/dev/null || true; "
 			f"mountpoint -q {self._user_models_mount} 2>/dev/null && umount {self._user_models_mount} 2>/dev/null || true",
 			timeout=15, user="root",
 		)
 		self._sandbox.commands.run(
-			f"mkdir -p {self._user_models_mount} {escrituras_assets_templates} {escrituras_references} {escrituras_scripts_fill}",
+			f"mkdir -p {self._user_models_mount} {escrituras_assets_templates} {escrituras_references}",
 			timeout=30, user="root",
 		)
 		try:
@@ -400,11 +397,11 @@ class SandboxBackend(BaseSandbox):
 				raise RuntimeError("User models S3 mount not accessible within 90s")
 			# Ensure S3 subdirs exist for new users
 			self._sandbox.commands.run(
-				f"mkdir -p {self._user_models_mount}/templates {self._user_models_mount}/references {self._user_models_mount}/fill_scripts && "
-				f"touch {self._user_models_mount}/templates/.keep {self._user_models_mount}/references/.keep {self._user_models_mount}/fill_scripts/.keep",
+				f"mkdir -p {self._user_models_mount}/templates {self._user_models_mount}/references && "
+				f"touch {self._user_models_mount}/templates/.keep {self._user_models_mount}/references/.keep",
 				timeout=10, user="root",
 			)
-			# Bind user models templates into assets/templates; references and fill_scripts into their paths
+			# Bind user models templates into assets/templates and references into their path
 			self._sandbox.commands.run(
 				f"mount --bind {self._user_models_mount}/templates {escrituras_assets_templates}",
 				timeout=10, user="root",
@@ -414,18 +411,14 @@ class SandboxBackend(BaseSandbox):
 				timeout=10, user="root",
 			)
 			self._sandbox.commands.run(
-				f"mount --bind {self._user_models_mount}/fill_scripts {escrituras_scripts_fill}",
-				timeout=10, user="root",
-			)
-			self._sandbox.commands.run(
-				f"chown -R user:user {escrituras_assets_templates} {escrituras_references} {escrituras_scripts_fill} 2>/dev/null || true",
+				f"chown -R user:user {escrituras_assets_templates} {escrituras_references} 2>/dev/null || true",
 				timeout=15, user="root",
 			)
 			self._sandbox.commands.run(
-				f"chmod -R u+rwX {escrituras_assets_templates} {escrituras_references} {escrituras_scripts_fill} 2>/dev/null || true",
+				f"chmod -R u+rwX {escrituras_assets_templates} {escrituras_references} 2>/dev/null || true",
 				timeout=15, user="root",
 			)
-			print(f"[_mount_user_models] ✓ templates->escrituras/assets/templates, references, fill_scripts->scripts/fill", flush=True)
+			print(f"[_mount_user_models] ✓ templates->escrituras/assets/templates, references->escrituras/references", flush=True)
 		except Exception as e:
 			raise
 

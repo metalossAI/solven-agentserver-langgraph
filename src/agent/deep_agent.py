@@ -266,7 +266,7 @@ oficial_notarial = SubAgent(
     description="asistente para trabajar en escrituras, documentos legales de todo tipo y formato.",
     system_prompt="",
     model=ChatOpenRouter(
-        model="minimax/minimax-m2.5",
+        model="z-ai/glm-5",
         api_key=os.getenv("OPENROUTER_API_KEY"),
         model_kwargs={
             "parallel_tool_calls": False,

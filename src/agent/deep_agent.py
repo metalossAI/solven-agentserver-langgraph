@@ -266,8 +266,11 @@ oficial_notarial = SubAgent(
     description="asistente para trabajar en escrituras, documentos legales de todo tipo y formato.",
     system_prompt="",
     model=ChatOpenRouter(
-        model="minimax/minimax-m2.5",
+        model="z-ai/glm-5",
         api_key=os.getenv("OPENROUTER_API_KEY"),
+        model_kwargs={
+            "parallel_tool_calls": False,
+        }
     ),
     skills=[
         USER_SKILLS_PATH,
@@ -278,9 +281,6 @@ graph = create_deep_agent(
     model=ChatOpenRouter(
         model="x-ai/grok-4.1-fast",
         api_key=os.getenv("OPENROUTER_API_KEY"),
-        model_kwargs={
-            "parallel_tool_calls": False,
-        }
     ),
     system_prompt="",
     backend=lambda rt: SandboxBackend(rt),

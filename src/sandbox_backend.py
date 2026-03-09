@@ -317,7 +317,11 @@ class SandboxBackend(BaseSandbox):
 		skills_dir = self._workspace_skills_dir
 		parent_dir = os.path.dirname(skills_dir)
 		tmp_clone_dir = f"{skills_dir}.tmp"
-		repo_url = SKILLS_REPO_URL
+		repo_url = (
+			(os.getenv("SKILL_REPO_URL") or "").strip()
+			or (os.getenv("SKILLS_REPO_URL") or "").strip()
+			or SKILLS_REPO_URL
+		)
 		git_username = (os.getenv("GIT_USERNAME") or "").strip() or None
 		git_token = os.getenv("GIT_TOKEN") or None
 		self._sandbox.commands.run(f"mkdir -p {parent_dir}", timeout=10, user="root")
@@ -326,6 +330,13 @@ class SandboxBackend(BaseSandbox):
 			timeout=30,
 			user="root",
 		)
+		self._sandbox.commands.run(f"chown user:user {parent_dir}", timeout=10, user="root")
+		# Git 2.35.2+ refuses to run in dirs owned by another user (e.g. root). Mark this path safe.
+		self._sandbox.commands.run(
+			f"git config --global --add safe.directory {shlex.quote(tmp_clone_dir)}",
+			timeout=10,
+			user="user",
+		)
 		try:
 			self._sandbox.git.clone(
 				url=repo_url,
@@ -333,7 +344,7 @@ class SandboxBackend(BaseSandbox):
 				depth=1,
 				username=git_username,
 				password=git_token,
-				user="root",
+				user="user",
 				timeout=180,
 			)
 		except Exception:
@@ -342,7 +353,7 @@ class SandboxBackend(BaseSandbox):
 		self._sandbox.commands.run(
 			f"rm -rf {tmp_clone_dir}/.git && mv {shlex.quote(tmp_clone_dir)} {shlex.quote(skills_dir)}",
 			timeout=30,
-			user="root",
+			user="user",
 		)
 		self._sandbox.commands.run(f"chown -R user:user {skills_dir}", timeout=30, user="root")
 		print(f"[_clone_skills_repo] ✓ Cloned {repo_url} -> {skills_dir}", flush=True)
@@ -375,7 +386,7 @@ class SandboxBackend(BaseSandbox):
 			try:
 				self._sandbox.commands.run(
 					f'bash /tmp/mount_s3_path.sh "{bucket}" "{s3_models_prefix}" "{self._user_models_mount}" "/tmp/rclone-models-user.log" immediate',
-					timeout=30, user="root", background=True,
+					timeout=0, request_timeout=0, user="root", background=True,
 				)
 			except Exception:
 				pass  # background launch may raise even on success; ignore and proceed to poll

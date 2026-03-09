@@ -261,9 +261,9 @@ outlook_subagent = SubAgent(
 # Unified skills directory: user skills + Anthropic skills installed via npx (bind mount at /workspace/.solven/skills)
 USER_SKILLS_PATH = "/.solven/skills/"
 
-oficial_subagent = SubAgent(
+oficial_notarial = SubAgent(
     name="oficial_notarial",
-    description="asistente para trabajar en escrituras notariales y documentos de todo tipo",
+    description="asistente para trabajar en escrituras, documentos legales de todo tipo y formato.",
     system_prompt="",
     model=ChatOpenRouter(
         model="minimax/minimax-m2.5",
@@ -285,6 +285,7 @@ graph = create_deep_agent(
     system_prompt="",
     backend=lambda rt: SandboxBackend(rt),
     subagents=[
+        oficial_notarial,
         gmail_subagent,
         outlook_subagent,
         catastro_subagent,

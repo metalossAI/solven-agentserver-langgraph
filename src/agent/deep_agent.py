@@ -3,6 +3,7 @@ import asyncio
 import os
 
 from deepagents.graph import SkillsMiddleware, FilesystemMiddleware, SubAgentMiddleware, TodoListMiddleware
+from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
 from dotenv import load_dotenv
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openrouter.chat_models import ChatOpenRouter
@@ -268,11 +269,8 @@ oficial_subagent = SubAgent(
         model="minimax/minimax-m2.5",
         api_key=os.getenv("OPENROUTER_API_KEY"),
     ),
-    middleware=[
-        SkillsMiddleware(
-            backend=SandboxBackend,
-            sources=[USER_SKILLS_PATH],
-        ),
+    skills=[
+        USER_SKILLS_PATH,
     ],
 )
 
@@ -280,6 +278,9 @@ graph = create_deep_agent(
     model=ChatOpenRouter(
         model="x-ai/grok-4.1-fast",
         api_key=os.getenv("OPENROUTER_API_KEY"),
+        model_kwargs={
+            "parallel_tool_calls": False,
+        }
     ),
     system_prompt="",
     backend=lambda rt: SandboxBackend(rt),
@@ -292,15 +293,12 @@ graph = create_deep_agent(
         "/.solven/AGENTS.md"
     ],
     middleware=[
-        initialize_sandbox,  # Initialize sandbox before agent starts (non-blocking)
+        initialize_sandbox,
         build_prompt,
         SkillsMiddleware(
             backend=SandboxBackend,
             sources=[USER_SKILLS_PATH],
         ),
-        #ToolEnforcementMiddleware(),  # Ensure agent makes tool calls first
-        #UniqueToolCallIdsMiddleware(),  # Globally unique tool call IDs (avoids assistant-ui duplicate-key crash)
-        #continuation_evaluation_middleware,  # Evaluate results and decide to continue (LAST)
     ],
     context_schema=AppContext,
 )

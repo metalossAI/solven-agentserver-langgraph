@@ -8,7 +8,7 @@ ARCHITECTURE OVERVIEW (bwrap isolation, /workspace as /):
 - Paths are never rewritten: we pass them through to the base and run commands as-is in bwrap; only
   result filtering applies (ls_info, glob_info, grep_raw exclude system dirs like /usr, /etc).
 - S3 thread workspace at /mnt/workspace-s3 (rclone FUSE). Optional preload: S3 -> /workspace. Persist: rsync /workspace -> S3.
-- Skills: .solven/skills = copy of solven-skills submodule. User models from S3 bind into escrituras/assets/templates, references, scripts/fill.
+- Skills: .solven/skills = clean clone of solven-skills. User models from S3 bind into escrituras/assets/templates, references, scripts/fill.
 
 Sandbox paths (host): /workspace (agent root in bwrap), /workspace/.solven/skills, /mnt/workspace-s3, /mnt/user-models.
 """
@@ -35,6 +35,7 @@ from src.models import AppContext
 from src.backend import _parse_skillmd_frontmatter
 
 SANDBOX_TEMPLATE = "solven-sandbox-v1"
+SKILLS_REPO_URL = "https://github.com/metalossAI/solven-skills.git"
 
 # Directories excluded from /workspace -> S3 sync. .solven/ (includes skills) excluded from sync.
 _RSYNC_EXCLUDES = (
@@ -91,7 +92,7 @@ class SandboxBackend(BaseSandbox):
 		self._workspace = "/workspace"
 		self._workspace_s3_mount = "/mnt/workspace-s3"
 		self._user_models_mount = "/mnt/user-models"  # S3 {tenant_id}/users/{user_id}/models FUSE mount; bound into escrituras/assets and references
-		self._workspace_skills_dir = "/workspace/.solven/skills"  # Copy of project solven-skills; excluded from sync
+		self._workspace_skills_dir = "/workspace/.solven/skills"  # Fresh cloned skills tree; excluded from sync
 
 		self._workspace_ready = False
 		self._initialized = False
@@ -238,14 +239,15 @@ class SandboxBackend(BaseSandbox):
 		except Exception as e:
 			print(f"[_ensure_initialized] ⚠ Preload start failed (non-critical): {e}", flush=True)
 
-		# Step 6: Copy .solven/skills from project solven-skills submodule
+		# Step 6: Clone .solven/skills from the canonical skills repository
 		try:
-			self._copy_skills_from_submodule()
+			self._clone_skills_repo()
 		except Exception as e:
-			print(f"[_ensure_initialized] ⚠ Copy skills from submodule failed (non-blocking): {e}", flush=True)
+			print(f"[_ensure_initialized] ⚠ Skills clone failed (non-blocking): {e}", flush=True)
 		# Fallback: if .solven/skills still missing and S3 template prefix set, sync from S3
 		if not self._check_skills_dir() and os.getenv("SKILL_S3_TEMPLATE_PREFIX", "").strip():
 			try:
+				print("[_ensure_initialized] Skills dir invalid after clone, trying S3 fallback", flush=True)
 				self._ensure_skills_from_s3()
 			except Exception as e:
 				print(f"[_ensure_initialized] ⚠ S3 skills fallback failed: {e}", flush=True)
@@ -310,54 +312,40 @@ class SandboxBackend(BaseSandbox):
 		finally:
 			self._sandbox.commands.run(f"umount {template_mount} 2>/dev/null || true", timeout=5, user="root")
 
-	def _get_skills_source_path(self) -> Optional[str]:
-		"""Path to solven-skills submodule (project dir). Prefer SKILLS_SOURCE_PATH env, else repo/solven-skills."""
-		env_path = os.getenv("SKILLS_SOURCE_PATH", "").strip()
-		if env_path:
-			path = os.path.abspath(os.path.expanduser(env_path))
-			return path if os.path.isdir(path) else None
-		# Default: solven-skills next to this package (repo root = parent of src)
-		root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-		path = os.path.join(root, "solven-skills")
-		return path if os.path.isdir(path) else None
-
-	def _copy_skills_from_submodule(self) -> None:
-		"""Copy project solven-skills submodule into /workspace/.solven/skills. Skips .git, __pycache__."""
-		source = self._get_skills_source_path()
-		if not source:
-			print("[_copy_skills_from_submodule] solven-skills not found (set SKILLS_SOURCE_PATH or add submodule)", flush=True)
-			return
+	def _clone_skills_repo(self) -> None:
+		"""Clone a fresh skills tree into /workspace/.solven/skills."""
 		skills_dir = self._workspace_skills_dir
-		self._sandbox.commands.run("mkdir -p /workspace/.solven", timeout=10, user="root")
+		parent_dir = os.path.dirname(skills_dir)
+		tmp_clone_dir = f"{skills_dir}.tmp"
+		repo_url = SKILLS_REPO_URL
+		git_username = (os.getenv("GIT_USERNAME") or "").strip() or None
+		git_token = (os.getenv("GIT_TOKEN") or os.getenv("GIT_TOKEn") or "").strip() or None
+		self._sandbox.commands.run(f"mkdir -p {parent_dir}", timeout=10, user="root")
+		self._sandbox.commands.run(
+			f"rm -rf {tmp_clone_dir} {skills_dir}",
+			timeout=30,
+			user="root",
+		)
 		try:
-			if self._sandbox.files.exists(skills_dir):
-				self._sandbox.commands.run(f"rm -rf {skills_dir}", timeout=30, user="root")
-		except Exception as e:
-			print(f"[_copy_skills_from_submodule] ⚠ Clear failed: {e}", flush=True)
-		skip_dirs = {".git", "__pycache__", ".venv", "venv"}
-		dirs_to_create = []
-		files_to_write = []
-		for dirpath, dirnames, filenames in os.walk(source, topdown=True):
-			dirnames[:] = [d for d in dirnames if d not in skip_dirs]
-			rel_dir = os.path.relpath(dirpath, source)
-			if rel_dir != ".":
-				dirs_to_create.append(rel_dir)
-			for name in filenames:
-				local_path = os.path.join(dirpath, name)
-				rel_path = os.path.relpath(local_path, source)
-				files_to_write.append((rel_path, local_path))
-		# Create dirs in sandbox
-		for rel_dir in sorted(dirs_to_create):
-			remote_dir = f"{skills_dir}/{rel_dir}"
-			self._sandbox.commands.run(f"mkdir -p {remote_dir}", timeout=10, user="root")
-		# Write files
-		for rel_path, local_path in files_to_write:
-			remote_path = f"{skills_dir}/{rel_path}"
-			with open(local_path, "rb") as f:
-				data = f.read()
-			self._sandbox.files.write(remote_path, data)
+			self._sandbox.git.clone(
+				url=repo_url,
+				path=tmp_clone_dir,
+				depth=1,
+				username=git_username,
+				password=git_token,
+				user="root",
+				timeout=180,
+			)
+		except Exception:
+			self._sandbox.commands.run(f"rm -rf {tmp_clone_dir}", timeout=30, user="root")
+			raise
+		self._sandbox.commands.run(
+			f"rm -rf {tmp_clone_dir}/.git && mv {shlex.quote(tmp_clone_dir)} {shlex.quote(skills_dir)}",
+			timeout=30,
+			user="root",
+		)
 		self._sandbox.commands.run(f"chown -R user:user {skills_dir}", timeout=30, user="root")
-		print(f"[_copy_skills_from_submodule] ✓ Copied {source} -> {skills_dir}", flush=True)
+		print(f"[_clone_skills_repo] ✓ Cloned {repo_url} -> {skills_dir}", flush=True)
 
 	def _mount_user_models(self) -> None:
 		"""Mount S3 {tenant_id}/users/{user_id}/models at /mnt/user-models, then bind:

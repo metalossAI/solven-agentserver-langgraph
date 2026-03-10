@@ -1,12 +1,4 @@
 from typing import Callable, Awaitable
-from langsmith import AsyncClient
-from langchain.agents.middleware import AgentMiddleware, ModelRequest, dynamic_prompt
-from langchain_core.messages import SystemMessage
-from langchain_core.prompts import ChatPromptTemplate
-from src.models import AppContext, SolvenState
-from src.sandbox_backend import SandboxBackend
-
-from typing import Callable, Awaitable
 
 from deepagents.middleware.skills import (
     SkillsMiddleware as BaseSkillsMiddleware,
@@ -14,34 +6,6 @@ from deepagents.middleware.skills import (
     _format_skill_annotations,
 )
 
-async def build_prompt_template(prompt_id: str, variables: dict) -> str:
-    """Pull a prompt by id and format it with the given variables. Returns the formatted string."""
-    client = AsyncClient()
-    base_prompt: ChatPromptTemplate = await client.pull_prompt(prompt_id)
-    return base_prompt.format(**variables)
-
-
-def create_prompt_middleware(
-    prompt_id: str,
-    get_variables: Callable[[ModelRequest], Awaitable[dict]],
-) -> Callable[[ModelRequest], Awaitable[SystemMessage]]:
-    """
-    Returns a @dynamic_prompt middleware that builds the system message for the given prompt_id.
-    The returned function can be passed at runtime (e.g. to create_agent(middleware=[...])).
-    get_variables(request) is called to obtain the format variables; the formatted template
-    is prepended to the request's system_message content_blocks.
-    """
-    @dynamic_prompt
-    async def middleware(request: ModelRequest) -> SystemMessage:
-        variables = await get_variables(request)
-        initial_prompt = await build_prompt_template(prompt_id, variables)
-        system_prompt = request.system_message
-        new_content = [
-            {"type": "text", "text": f"{initial_prompt}\n\n"},
-            *system_prompt.content_blocks,
-        ]
-        return SystemMessage(content=new_content)
-    return middleware
 
 class SkillsMiddleware(BaseSkillsMiddleware):
     """
@@ -84,3 +48,6 @@ class SkillsMiddleware(BaseSkillsMiddleware):
                 "  -> To read this skill, call the `load_skill` tool with "
                 f"the path `{skill['path']}`."
             )
+
+        return "\n".join(lines)
+

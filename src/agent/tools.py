@@ -7,7 +7,7 @@ from src.sandbox_backend import SandboxBackend
 from typing import Dict, Any, Optional, Annotated
 
 @tool
-async def cargar_habilidad(
+async def load_skill(
     path: Annotated[str, "La ruta del skill a cargar"],
     runtime: Annotated[ToolRuntime[AppContext], InjectedToolArg] = None
 ) -> str:
@@ -18,11 +18,16 @@ async def cargar_habilidad(
 		path: La ruta del skill a cargar
 	"""
 	backend: SandboxBackend = SandboxBackend(runtime)
-	responses : list[FileDownloadResponse] = await backend.download_files([path])
+	responses : list[FileDownloadResponse] = await backend.adownload_files([path])
 	if responses:
 		print(f"Cargada la habilidad {path}")
-		return responses[0].content
+		return ToolMessage(
+			content=responses[0].content,
+			status="success",
+			tool_call_id=runtime.tool_call_id,
+			name="load_skill",
+		)
 	else:
-		return "Error: No se pudo cargar la habilidad"
+		return ToolMessage(content="Error: No se pudo cargar la habilidad", status="error", tool_call_id=runtime.tool_call_id)
 
 

@@ -2,18 +2,16 @@ import datetime
 import asyncio
 import os
 
-from deepagents.graph import SkillsMiddleware, FilesystemMiddleware, SubAgentMiddleware, TodoListMiddleware
+from deepagents.graph import FilesystemMiddleware, SubAgentMiddleware, TodoListMiddleware
 from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
 from dotenv import load_dotenv
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_openrouter.chat_models import ChatOpenRouter
 from langgraph.types import Command
 load_dotenv()
 
 from langchain_openai.chat_models import ChatOpenAI
-from langsmith import AsyncClient
 from langchain.tools import ToolRuntime
-from langchain.agents.middleware import AgentMiddleware, ModelRequest, before_model, dynamic_prompt, ModelResponse, wrap_model_call, after_agent, hook_config
+from langchain.agents.middleware import AgentMiddleware, ModelRequest, before_model, ModelResponse, wrap_model_call, after_agent, hook_config
 
 from langchain_core.messages import SystemMessage, ToolMessage, AIMessage, HumanMessage
 from langchain.agents import create_agent
@@ -34,7 +32,8 @@ from src.llm import CODING_LLM as coding_llm
 from src.models import AppContext, SolvenState
 
 from src.agent_catastro.agent import subagent as catastro_subagent
-from src.agent.tools import cargar_habilidad
+from src.agent.tools import load_skill
+from src.agent.middleware import create_prompt_middleware
 from src.middleware.tool_call_ids import UniqueToolCallIdsMiddleware
 from src.utils.tickets import get_ticket
 from src.common_tools.files import solicitar_archivo
@@ -46,6 +45,7 @@ from typing import Callable, Awaitable
 # Import email tools
 from src.agent_email.gmail_tools import gmail_tools, gmail_send_email
 from src.agent_email.outlook_tools import outlook_tools
+from src.agent.custom_skills_middleware import SkillsMiddleware
 
 
 class ToolEnforcementMiddleware(AgentMiddleware):
@@ -170,39 +170,37 @@ async def initialize_sandbox(state: AgentState, runtime: Runtime[AppContext]):
 	return state
 
 
-@dynamic_prompt
-async def build_prompt(request: ModelRequest):
-    # Reuse existing backend instead of creating a new one
-    # Backend is already initialized in build_context
-    system_prompt : SystemMessage = request.system_message
-
+async def _get_solven_main_variables(request: ModelRequest) -> dict:
+    """Build format variables for the solven-main prompt from request/context."""
     from src.utils.config import get_user, get_thread_id
     user = get_user()
     user_name = user.name or "Usuario"
     user_role = user.role or "usuario"
     metadata = get_config().get("metadata") or {}
-    # Workspace runs have metadata.ticket_id (thread_id is the workspace thread). Customer chat has thread_id == ticket_id.
     ticket_id = metadata.get("ticket_id")
     thread_id = get_thread_id() or metadata.get("thread_id")
     id_for_ticket = ticket_id if ticket_id else thread_id
     ticket = await get_ticket(id_for_ticket)
+    return {
+        "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "name": user_name,
+        "language": "español",
+        "role": user_role,
+        "ticket": ticket,
+    }
 
-    client = AsyncClient()
-    base_prompt: ChatPromptTemplate = await client.pull_prompt("solven-main")
-    initial_prompt = base_prompt.format(
-        date=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        name=user_name,
-        language="español",
-        role=user_role,
-        ticket=ticket,
-    )
-    # SystemMessage: append BASE_AGENT_PROMPT to content_blocks
-    new_content = [
-        {"type": "text", "text": f"{initial_prompt}\n\n"},
-        *system_prompt.content_blocks,
-    ]
-    final_system_prompt = SystemMessage(content=new_content)
-    return final_system_prompt
+
+async def _get_official_notarial_variables(request: ModelRequest) -> dict:
+    """Build format variables for the official-notarial prompt from request/context."""
+    return {
+        "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "name": "Usuario",
+        "language": "español",
+    }
+
+# Middleware created by factory; pass at runtime to create_agent / create_deep_agent
+main_prompt = create_prompt_middleware("solven-main", _get_solven_main_variables)
+official_notarial_prompt = create_prompt_middleware("solven-subagent-oficial", _get_official_notarial_variables)
 
 @wrap_model_call
 async def dynamic_model_router(request: ModelRequest, handler):
@@ -263,7 +261,7 @@ USER_SKILLS_PATH = "/.solven/skills/"
 
 oficial_notarial = SubAgent(
     name="oficial_notarial",
-    description="asistente para trabajar en escrituras, documentos legales de todo tipo y formato.",
+    description="asistente para trabajar en escrituras/documentos legales de todo tipo y formato.",
     system_prompt="",
     model=ChatOpenRouter(
         model="z-ai/glm-5",
@@ -272,8 +270,12 @@ oficial_notarial = SubAgent(
             "parallel_tool_calls": False,
         }
     ),
-    skills=[
-        USER_SKILLS_PATH,
+    middleware=[
+        official_notarial_prompt,
+        SkillsMiddleware(
+            backend=SandboxBackend,
+            sources=[USER_SKILLS_PATH],
+        ),
     ],
 )
 
@@ -283,6 +285,7 @@ graph = create_deep_agent(
         api_key=os.getenv("OPENROUTER_API_KEY"),
     ),
     system_prompt="",
+    tools=[load_skill],
     backend=lambda rt: SandboxBackend(rt),
     subagents=[
         oficial_notarial,
@@ -295,7 +298,7 @@ graph = create_deep_agent(
     ],
     middleware=[
         initialize_sandbox,
-        build_prompt,
+        main_prompt,
         SkillsMiddleware(
             backend=SandboxBackend,
             sources=[USER_SKILLS_PATH],

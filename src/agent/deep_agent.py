@@ -299,10 +299,9 @@ graph = create_deep_agent(
     middleware=[
         initialize_sandbox,
         main_prompt,
-        SkillsMiddleware(
-            backend=SandboxBackend,
-            sources=[USER_SKILLS_PATH],
-        ),
+    ],
+    skills=[
+        USER_SKILLS_PATH,
     ],
     context_schema=AppContext,
 )

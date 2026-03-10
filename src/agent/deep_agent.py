@@ -246,6 +246,7 @@ gmail_subagent = SubAgent(
     system_prompt="",
     model=llm,
     tools=gmail_tools,
+    interrupt_on={"GMAIL_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]}}
 )
 
 outlook_subagent = SubAgent(
@@ -254,6 +255,7 @@ outlook_subagent = SubAgent(
     system_prompt="",
     model=llm,
     tools=outlook_tools,
+    interrupt_on={"OUTLOOK_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]}}
 )
 
 # Unified skills directory: user skills + Anthropic skills installed via npx (bind mount at /workspace/.solven/skills)

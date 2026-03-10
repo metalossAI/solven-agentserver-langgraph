@@ -8,9 +8,14 @@ ARCHITECTURE OVERVIEW (bwrap isolation, /workspace as /):
 - Paths are never rewritten: we pass them through to the base and run commands as-is in bwrap; only
   result filtering applies (ls_info, glob_info, grep_raw exclude system dirs like /usr, /etc).
 - S3 thread workspace at /mnt/workspace-s3 (rclone FUSE). Optional preload: S3 -> /workspace. Persist: rsync /workspace -> S3.
+  Main workspace sync excludes .solven/; .solven has its own S3 path and mount.
+- .solven is persisted to a separate mount at /mnt/workspace-solven (S3 prefix threads/{id}/.solven).
+  Preload: rsync /mnt/workspace-solven -> /workspace/.solven with --exclude=skills/. Persist: rsync
+  /workspace/.solven -> /mnt/workspace-solven with --exclude=skills/. So .solven is a folder synced to
+  that mount; skills is always local (cloned) and never synced to S3.
 - Skills: .solven/skills = clean clone of solven-skills. User models from S3 bind into escrituras/assets/templates and references.
 
-Sandbox paths (host): /workspace (agent root in bwrap), /workspace/.solven/skills, /mnt/workspace-s3, /mnt/user-models.
+Sandbox paths (host): /workspace (agent root in bwrap), /workspace/.solven/skills, /mnt/workspace-s3, /mnt/workspace-solven, /mnt/user-models.
 """
 import json
 import os
@@ -91,6 +96,7 @@ class SandboxBackend(BaseSandbox):
 		# Paths
 		self._workspace = "/workspace"
 		self._workspace_s3_mount = "/mnt/workspace-s3"
+		self._workspace_solven_mount = "/mnt/workspace-solven"  # S3 prefix threads/{id}/.solven; synced to /workspace/.solven (skills excluded)
 		self._user_models_mount = "/mnt/user-models"  # S3 {tenant_id}/users/{user_id}/models FUSE mount; bound into escrituras/assets and references
 		self._workspace_skills_dir = "/workspace/.solven/skills"  # Fresh cloned skills tree; excluded from sync
 
@@ -229,6 +235,23 @@ class SandboxBackend(BaseSandbox):
 			timeout=10, user="root",
 		)
 
+		# Step 5b: Preload .solven from dedicated mount (exclude skills), then ensure skills via clone
+		try:
+			self._sandbox.commands.run(
+				f"mkdir -p {self._workspace}/.solven",
+				timeout=10, user="root",
+			)
+			self._sandbox.commands.run(
+				f"rsync -a --exclude='skills/' {self._workspace_solven_mount}/ {self._workspace}/.solven/",
+				timeout=120, user="root",
+			)
+		except Exception as e:
+			print(f"[_ensure_initialized] ⚠ .solven preload from mount failed (non-critical): {e}", flush=True)
+		try:
+			self._clone_skills_repo()
+		except Exception as e:
+			print(f"[_ensure_initialized] ⚠ Skills clone failed (non-blocking): {e}", flush=True)
+
 		# Step 5: Optional preload S3 -> /workspace (background, non-blocking)
 		try:
 			self._sandbox.commands.run(
@@ -239,11 +262,7 @@ class SandboxBackend(BaseSandbox):
 		except Exception as e:
 			print(f"[_ensure_initialized] ⚠ Preload start failed (non-critical): {e}", flush=True)
 
-		# Step 6: Clone .solven/skills from the canonical skills repository
-		try:
-			self._clone_skills_repo()
-		except Exception as e:
-			print(f"[_ensure_initialized] ⚠ Skills clone failed (non-blocking): {e}", flush=True)
+		# Step 6: Fallback if .solven/skills still missing (e.g. clone failed)
 		# Fallback: if .solven/skills still missing and S3 template prefix set, sync from S3
 		if not self._check_skills_dir() and os.getenv("SKILL_S3_TEMPLATE_PREFIX", "").strip():
 			try:
@@ -537,6 +556,28 @@ class SandboxBackend(BaseSandbox):
 				f"Thread mount {'timed out' if is_timeout else 'failed'}: {e}\nLog:\n{log_output}"
 			)
 
+		# Second mount: .solven at threads/{id}/.solven (or solven) for persisting AGENTS.md etc.; skills excluded from sync
+		self._sandbox.commands.run(
+			f"mkdir -p {self._workspace_solven_mount}",
+			timeout=30, user="root",
+		)
+		s3_solven_prefix = f"{self._tenant_id}/threads/{self._thread_id}/.solven"
+		solven_mount_cmd = f'bash /tmp/mount_s3_path.sh "{bucket}" "{s3_solven_prefix}" "{self._workspace_solven_mount}" "/tmp/rclone-solven.log"'
+		try:
+			solven_result = self._sandbox.commands.run(solven_mount_cmd, timeout=120, user="root")
+			if solven_result.exit_code != 0:
+				print(f"[Mount] ⚠ .solven mount failed (exit {solven_result.exit_code}), continuing with empty .solven", flush=True)
+			else:
+				_time.sleep(1)
+				verify_solven = self._sandbox.commands.run(
+					f"ls {self._workspace_solven_mount} >/dev/null 2>&1 && echo 'MOUNT_OK' || echo 'MOUNT_FAILED'",
+					timeout=10,
+				)
+				if "MOUNT_OK" not in (verify_solven.stdout or ""):
+					print(f"[Mount] ⚠ .solven mount not accessible, continuing with empty .solven", flush=True)
+		except Exception as e:
+			print(f"[Mount] ⚠ .solven mount failed (non-critical): {e}", flush=True)
+
 	def _preload_upper_from_s3(self) -> None:
 		"""Optionally preload /workspace from S3 (one-time). Non-blocking; run in background to avoid blocking agent startup."""
 		try:
@@ -569,8 +610,23 @@ class SandboxBackend(BaseSandbox):
 		except Exception as e:
 			print(f"[Sync] ⚠️  persist failed (non-critical): {e}", flush=True)
 
+	def _sync_solven_to_s3(self) -> None:
+		"""Persist /workspace/.solven to the dedicated S3 mount, excluding skills/ (skills stay local/cloned)."""
+		try:
+			result = self._sandbox.commands.run(
+				f"rsync -av --exclude='skills/' {self._workspace}/.solven/ {self._workspace_solven_mount}/",
+				timeout=120,
+				user="root",
+			)
+			if result.exit_code == 0:
+				print(f"[Sync] ✓ .solven -> S3 (excl. skills)", flush=True)
+			else:
+				print(f"[Sync] ⚠️  .solven persist exit {result.exit_code}", flush=True)
+		except Exception as e:
+			print(f"[Sync] ⚠️  .solven persist failed (non-critical): {e}", flush=True)
+
 	def _start_background_syncs(self) -> None:
-		"""Start /workspace -> S3 sync in background. .solven/ excluded from sync."""
+		"""Start /workspace -> S3 and .solven -> S3 syncs in background. .solven/ excluded from main workspace sync; skills/ excluded from .solven sync."""
 		workspace_cmd = (
 			f"rsync -av {_RSYNC_ONE_FS} {_RSYNC_EXCLUDE_FLAGS} "
 			f"{self._workspace}/ {self._workspace_s3_mount}/"
@@ -580,6 +636,14 @@ class SandboxBackend(BaseSandbox):
 			print(f"[Sync] started background: /workspace -> /mnt/workspace-s3", flush=True)
 		except Exception as e:
 			print(f"[Sync] ⚠️  background sync start failed (non-critical): {e}", flush=True)
+		solven_cmd = (
+			f"rsync -av --exclude='skills/' {self._workspace}/.solven/ {self._workspace_solven_mount}/"
+		)
+		try:
+			self._sandbox.commands.run(solven_cmd, background=True, user="root")
+			print(f"[Sync] started background: .solven -> /mnt/workspace-solven", flush=True)
+		except Exception as e:
+			print(f"[Sync] ⚠️  .solven background sync start failed (non-critical): {e}", flush=True)
 
 	def _upload_mount_scripts(self) -> None:
 		"""Upload rclone mount scripts to sandbox from local files."""
@@ -763,7 +827,7 @@ class SandboxBackend(BaseSandbox):
 			truncated=False,
 		)
 	
-	
+
 	
 	async def aexecute(self, command: str) -> ExecuteResponse:
 		"""Async version of execute."""

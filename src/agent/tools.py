@@ -22,7 +22,7 @@ async def load_skill(
 	if responses:
 		print(f"Cargada la habilidad {path}")
 		return ToolMessage(
-			content=responses[0].content,
+			content=responses[0].content.decode("utf-8"),
 			status="success",
 			tool_call_id=runtime.tool_call_id,
 			name="load_skill",

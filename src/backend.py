@@ -4,6 +4,7 @@ Implements the BackendProtocol for virtual filesystem operations.
 """
 import os
 import re
+from langchain.tools import ToolRuntime
 import yaml
 from datetime import datetime
 from typing import Optional, Union
@@ -11,8 +12,17 @@ from fnmatch import fnmatch
 import asyncio
 import boto3
 from botocore.exceptions import ClientError
-from deepagents.backends.protocol import BackendProtocol, WriteResult, EditResult
+from deepagents.backends.protocol import (
+    BackendProtocol,
+    WriteResult,
+    EditResult,
+    ExecuteResponse,
+    FileDownloadResponse,
+    FileUploadResponse,
+)
 from deepagents.backends.utils import FileInfo, GrepMatch
+
+from src.models import AppContext
 
 
 def _parse_skillmd_frontmatter(skillmd: str) -> str:
@@ -42,26 +52,11 @@ def _parse_skillmd_frontmatter(skillmd: str) -> str:
     return match.group(1)
 
 
-class S3Backend(BackendProtocol):
+class _BaseS3Backend(BackendProtocol):
     """
-    S3-compatible backend for agent filesystem operations.
-    Works with MinIO, AWS S3, or any S3-compatible storage.
-    
-    Virtual Mounts:
-        - /workspace -> threads/{thread_id}/ (shared thread workspace)
-        - /ticket -> threads/{ticket_id}/ (ticket context files, if ticket_id provided)
-        - /skills -> {user_id}/skills/ (user's skills library with categories and resources)
-    
-    Args:
-        bucket: S3 bucket name
-        endpoint_url: MinIO/S3 endpoint URL (e.g., "http://localhost:9000")
-        access_key: S3 access key
-        secret_key: S3 secret key
-        region: AWS region (default: "us-east-1")
-        scope: Permission scope - 'read' (read-only) or 'write' (read+write). Default: 'write'
-        user_id: User ID for skills access
-        thread_id: Thread ID for workspace scoping
-        ticket_id: Ticket ID for ticket files access
+    Base S3 backend for agent filesystem operations (MinIO/AWS S3).
+    Use SolvenS3Backend in application code; it reads thread_id/company_id from config
+    and uses the tenant path company_id/threads/[thread_id].
     """
     
     def __init__(
@@ -1235,7 +1230,140 @@ class S3Backend(BackendProtocol):
             return None
         except Exception:
             return None
-            return None
+
+
+class SolvenS3Backend(_BaseS3Backend):
+    """
+    S3 backend that resolves thread_id and company_id from LangGraph config and uses
+    the tenant path structure: company_id/threads/[thread_id] for workspace and ticket.
+
+    Compatible with FilesystemMiddleware when instantiated with (runtime) like SandboxBackend.
+    Does not implement execute() (no shell); use for S3-only file operations.
+    """
+
+    def __init__(self, runtime: Optional[ToolRuntime[AppContext]] = None):
+        from src.utils.config import get_user, get_workspace_id
+
+        user = get_user()
+        workspace_id = get_workspace_id(runtime)
+        if not workspace_id:
+            raise RuntimeError(
+                "Cannot initialize SolvenS3Backend: thread_id not found in config"
+            )
+        if not user.company_id:
+            raise RuntimeError(
+                "Cannot initialize SolvenS3Backend: user company_id (tenant) not found in config"
+            )
+
+        bucket = os.getenv("S3_BUCKET", "scriba")
+        super().__init__(
+            bucket=bucket,
+            prefix="",
+            endpoint_url=os.getenv("S3_ENDPOINT_URL"),
+            access_key=os.getenv("S3_ACCESS_KEY_ID"),
+            secret_key=os.getenv("S3_ACCESS_SECRET") or os.getenv("S3_SECRET_KEY"),
+            region=os.getenv("S3_REGION", "us-east-1"),
+            scope="write",
+            user_id=user.id,
+            thread_id=workspace_id,
+            ticket_id=workspace_id,
+        )
+        company_id = user.company_id
+        self.mounts["/workspace"] = f"{company_id}/threads/{workspace_id}"
+        self.mounts["/ticket"] = f"{company_id}/threads/{workspace_id}"
+        if user.id:
+            self.mounts["/skills"] = f"{user.id}/skills"
+
+    @property
+    def id(self) -> str:
+        """Unique identifier for the backend instance."""
+        return f"s3-{self.thread_id}"
+
+    def execute(self, command: str) -> ExecuteResponse:
+        """Not supported: this backend has no shell. Use SandboxBackend for execute."""
+        return ExecuteResponse(
+            output="SolvenS3Backend does not support execute (no shell). Use file operations only.",
+            exit_code=1,
+            truncated=False,
+        )
+
+    def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+        """Download files from S3 by virtual path; returns content as bytes per path."""
+        self._ensure_bucket_exists()
+        responses = []
+        for path in paths:
+            try:
+                key = self._key(path)
+                try:
+                    response = self.s3_client.get_object(Bucket=self.bucket, Key=key)
+                    content = response["Body"].read()
+                    responses.append(
+                        FileDownloadResponse(path=path, content=content, error=None)
+                    )
+                except ClientError as e:
+                    if e.response["Error"]["Code"] == "NoSuchKey":
+                        responses.append(
+                            FileDownloadResponse(
+                                path=path, content=None, error="file_not_found"
+                            )
+                        )
+                    else:
+                        responses.append(
+                            FileDownloadResponse(
+                                path=path,
+                                content=None,
+                                error=f"download_error: {str(e)}",
+                            )
+                        )
+            except Exception as e:
+                responses.append(
+                    FileDownloadResponse(
+                        path=path, content=None, error=f"download_error: {str(e)}"
+                    )
+                )
+        return responses
+
+    def upload_files(
+        self, files: list[tuple[str, bytes]]
+    ) -> list[FileUploadResponse]:
+        """Upload files to S3 by virtual path."""
+        perm_error = self._check_write_permission()
+        if perm_error:
+            return [
+                FileUploadResponse(path=path, error=perm_error)
+                for path, _ in files
+            ]
+        self._ensure_bucket_exists()
+        responses = []
+        for path, content in files:
+            try:
+                key = self._key(path)
+                content_type = "application/octet-stream"
+                if path.endswith(".md") or path.endswith(".txt"):
+                    content_type = "text/plain; charset=utf-8"
+                self.s3_client.put_object(
+                    Bucket=self.bucket,
+                    Key=key,
+                    Body=content,
+                    ContentType=content_type,
+                    Metadata={"uploaded-by": "agent"},
+                )
+                responses.append(FileUploadResponse(path=path, error=None))
+            except Exception as e:
+                responses.append(
+                    FileUploadResponse(path=path, error=f"upload_error: {str(e)}")
+                )
+        return responses
+
+    async def adownload_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+        """Async version of download_files."""
+        return await asyncio.to_thread(self.download_files, paths)
+
+    async def aupload_files(
+        self, files: list[tuple[str, bytes]]
+    ) -> list[FileUploadResponse]:
+        """Async version of upload_files."""
+        return await asyncio.to_thread(self.upload_files, files)
 
 
 def create_s3_backend(
@@ -1243,92 +1371,49 @@ def create_s3_backend(
     prefix: str = "",
     endpoint_url: Optional[str] = None,
     access_key: Optional[str] = None,
-    secret_key: Optional[str] = None
-) -> S3Backend:
+    secret_key: Optional[str] = None,
+) -> SolvenS3Backend:
     """
-    Factory function to create an S3Backend instance.
+    Create SolvenS3Backend (thread_id/company_id from LangGraph config).
+    Bucket/creds from env. Call only when config is set (e.g. inside a request).
     """
-    return S3Backend(
-        bucket=bucket,
-        prefix=prefix,
-        endpoint_url=endpoint_url,
-        access_key=access_key,
-        secret_key=secret_key
-    )
+    return SolvenS3Backend(runtime=None)
+
 
 """
 Configuration for S3/MinIO backend.
 """
 
 
+def get_s3_backend_from_env() -> SolvenS3Backend:
+    """
+    Create SolvenS3Backend; thread_id/company_id from config, bucket/creds from env.
+    Call only when LangGraph config is set (e.g. inside a request).
+    """
+    return SolvenS3Backend(runtime=None)
 
-def get_s3_backend_from_env() -> S3Backend:
-    """
-    Create S3Backend from environment variables.
-    
-    Required environment variables:
-    - S3_BUCKET: Bucket name (default: "agent-files")
-    - S3_ENDPOINT_URL: MinIO/S3 endpoint (e.g., "http://localhost:9000")
-    - S3_ACCESS_KEY_ID: Access key
-    - S3_SECRET_KEY: Secret key
-    - S3_PREFIX: Optional prefix for all paths (default: "")
-    - S3_REGION: AWS region (default: "us-east-1")
-    """
-    return S3Backend(
-        bucket=os.getenv('S3_BUCKET', 'agent-files'),
-        prefix=os.getenv('S3_PREFIX', ''),
-        endpoint_url=os.getenv('S3_ENDPOINT_URL'),
-        access_key=os.getenv('S3_ACCESS_KEY_ID'),
-        secret_key=os.getenv('S3_SECRET_KEY'),
-        region=os.getenv('S3_REGION', 'us-east-1')
-    )
 
-def get_user_backend_sync(user_id: str, conversation_id: Optional[str] = None, scope: str = "write") -> S3Backend:
-    return S3Backend(
-        bucket=os.getenv('S3_BUCKET', 'scriba'),
-        prefix=user_id,
-        endpoint_url=os.getenv('S3_ENDPOINT_URL'),
-        access_key=os.getenv('S3_ACCESS_KEY_ID'),
-        secret_key=os.getenv('S3_SECRET_KEY'),
-        region=os.getenv('S3_REGION', 'us-east-1'),
-        scope=scope,
-        user_id=user_id,
-        conversation_id=conversation_id
-    )
+def get_user_backend_sync(
+    user_id: str, conversation_id: Optional[str] = None, scope: str = "write"
+) -> SolvenS3Backend:
+    """
+    Create SolvenS3Backend; user/thread from LangGraph config. Args kept for API compat.
+    """
+    return SolvenS3Backend(runtime=None)
 
-async def get_user_s3_backend(user_id: str, thread_id: Optional[str] = None, ticket_id: Optional[str] = None, scope: str = "write") -> S3Backend:
+
+async def get_user_s3_backend(
+    user_id: str,
+    thread_id: Optional[str] = None,
+    ticket_id: Optional[str] = None,
+    scope: str = "write",
+) -> SolvenS3Backend:
     """
-    Create S3Backend scoped to a specific user and optionally a thread and ticket.
-    Provides virtual mount points for organized file access.
-    
-    Args:
-        user_id: User ID for skills access
-        thread_id: Optional thread ID for shared workspace scoping
-        ticket_id: Optional ticket ID for ticket files access
-        scope: Permission scope - 'read' (read-only) or 'write' (read+write). Default: 'write'
-    
-    Returns:
-        S3Backend instance with virtual mounts:
-        - /workspace -> threads/{thread_id}/ (shared thread workspace)
-        - /ticket -> threads/{ticket_id}/ (ticket context files, if ticket_id provided)
-        - /skills -> {user_id}/skills/ (user's skills library)
-        
-    Example usage by agent:
-        backend.read("/workspace/notes.md")  # Read from thread workspace
-        backend.read("/ticket/requirements.md")  # Read from ticket files
-        backend.read("/skills/escrituras/compraventa/SKILL.md")  # Read skill
-        backend.read("/skills/escrituras/compraventa/plantilla.pdf")  # Read skill resource
+    Create SolvenS3Backend; user/thread/ticket from LangGraph config. Args kept for API compat.
+    Mounts: /workspace -> company_id/threads/thread_id, /ticket, /skills.
     """
-    
-    return S3Backend(
-        bucket=os.getenv('S3_BUCKET', 'scriba'),
-        prefix="",  # No user prefix for shared threads
-        endpoint_url=os.getenv('S3_ENDPOINT_URL'),
-        access_key=os.getenv('S3_ACCESS_KEY_ID'),
-        secret_key=os.getenv('S3_SECRET_KEY'),
-        region=os.getenv('S3_REGION', 'us-east-1'),
-        scope=scope,
-        user_id=user_id,
-        thread_id=thread_id,
-        ticket_id=ticket_id
-    )
+    return SolvenS3Backend(runtime=None)
+
+
+# Backward-compat alias: use SolvenS3Backend everywhere
+S3Backend = SolvenS3Backend

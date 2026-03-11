@@ -4,7 +4,9 @@ import asyncio
 import json
 import base64
 import os
+from datetime import datetime
 from typing import Any, Optional, List, Dict
+from pydantic import BaseModel, Field
 from src.sandbox_backend import SandboxBackend
 from src.s3_client import S3Client
 from langchain_core.tools import tool
@@ -13,6 +15,25 @@ from langgraph.types import interrupt
 from src.composio.types.gmail import GMAIL
 from src.composio.client import composio_client, execute_composio_tool, upload_file_to_composio
 from src.models import AppContext
+
+
+# Attachment models: spec for download request, info for list response
+class GmailAttachmentSpec(BaseModel):
+    """Specification for a single Gmail attachment to download."""
+
+    message_id: str = Field(description="The ID of the message containing the attachment.")
+    attachment_id: str = Field(description="The ID of the attachment to retrieve.")
+    file_name: str = Field(description="The name to save the attachment as.")
+    user_id: str = Field(default="me", description="Gmail user ID. Defaults to 'me'.")
+
+
+class GmailAttachmentInfo(BaseModel):
+    """Information about one attachment in a message (from get_attachment_list)."""
+
+    attachment_id: str = Field(description="The ID of the attachment.")
+    file_name: str = Field(description="The filename of the attachment.")
+    size: Optional[int] = Field(default=None, description="Size in bytes, if available.")
+    mime_type: Optional[str] = Field(default=None, description="MIME type, if available.")
 
 # Message Operations
 @tool(
@@ -639,77 +660,51 @@ async def gmail_modify_thread_labels(
 
 
 # Attachment Operations
-@tool(
-    GMAIL.tools.GET_ATTACHMENT,
-)
-async def gmail_get_attachment(
-    runtime: ToolRuntime[AppContext],
-    message_id: str,
-    attachment_id: str,
-    file_name: str,
-    user_id: str = "me",
-) -> str:
-    """
-    Retrieves a specific attachment by ID from a message in a user's Gmail mailbox.
-    Returns the workspace-relative path where the agent can access the file.
 
-    Args:
-        message_id (str): The ID of the message containing the attachment.
-        attachment_id (str): The ID of the attachment to retrieve.
-        file_name (str): The name of the file to save the attachment as.
-        user_id (str, optional): The ID of the user's Gmail account. Defaults to "me".
-        
-    Returns:
-        str: JSON string with success status and workspace path (e.g., /home/user/attachments/file.pdf)
-    """
+async def _download_one_attachment(
+    runtime: ToolRuntime[AppContext],
+    spec: GmailAttachmentSpec,
+) -> Dict[str, Any]:
+    """Download a single attachment via Composio and upload to S3. Returns a result dict."""
+    message_id = spec.message_id
+    attachment_id = spec.attachment_id
+    file_name = spec.file_name
+    user_id = spec.user_id
     arguments = {
         "message_id": message_id,
         "attachment_id": attachment_id,
         "file_name": file_name,
         "user_id": user_id,
     }
-
     result = await execute_composio_tool(GMAIL.tools.GET_ATTACHMENT, arguments, runtime)
-    
     try:
         result_data = json.loads(result)
-        
         attachment_bytes = None
-        
         if isinstance(result_data, dict):
             if "data" in result_data:
-                attachment_data_b64 = result_data["data"]
-                attachment_bytes = base64.b64decode(attachment_data_b64)
-                source_type = "base64"
+                attachment_bytes = base64.b64decode(result_data["data"])
             elif "file" in result_data:
-                import os
                 local_file_path = result_data["file"]
-                
                 if os.path.exists(local_file_path):
-                    file_size = os.path.getsize(local_file_path)
                     with open(local_file_path, "rb") as f:
                         attachment_bytes = f.read()
-                    source_type = "local_file"
                 else:
-                    return json.dumps({
+                    return {
                         "success": False,
+                        "file_name": file_name,
+                        "message_id": message_id,
+                        "attachment_id": attachment_id,
                         "message": f"Local file not found: {local_file_path}",
-                        "raw_result": result,
-                    }, indent=2)
-        
+                    }
         if attachment_bytes:
-            from datetime import datetime
-            
-            from src.utils.config import get_user, get_thread_id_from_config
+            from src.utils.config import get_user, get_workspace_id
             user = get_user()
-            thread_id = get_thread_id_from_config()
-            s3_prefix = f"{user.company_id}/threads/{thread_id}" if user.company_id else f"threads/{thread_id}"
+            workspace_id = get_workspace_id(runtime)
+            s3_prefix = f"{user.company_id}/threads/{workspace_id}" if user.company_id else f"threads/{workspace_id}"
             s3_client = S3Client(prefix=s3_prefix)
-            
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             safe_filename = file_name.replace(" ", "_").replace("/", "_")
             file_path = f"adjuntos/{timestamp}_{safe_filename}"
-            
             upload_result = await asyncio.to_thread(
                 s3_client.upload_file,
                 file_path=file_path,
@@ -718,51 +713,100 @@ async def gmail_get_attachment(
                     "message_id": message_id,
                     "attachment_id": attachment_id,
                     "source": "gmail",
-                    "thread_id": thread_id,
+                    "thread_id": workspace_id,
                     "original_filename": file_name,
                     "uploaded_at": datetime.now().isoformat(),
-                }
+                },
             )
-            
             if upload_result["success"]:
                 workspace_path = f"/home/user/{file_path}"
-                
-                return json.dumps({
+                return {
                     "success": True,
-                    "message": f"File saved to: {workspace_path}",
                     "path": workspace_path,
                     "file_name": file_name,
                     "message_id": message_id,
+                    "attachment_id": attachment_id,
                     "size_bytes": len(attachment_bytes),
-                }, indent=2)
-            else:
-                return json.dumps({
-                    "success": False,
-                    "message": f"S3 upload failed: {upload_result.get('error')}",
-                    "file_name": file_name,
-                    "upload_error": upload_result.get('error'),
-                }, indent=2)
-        else:
-            return json.dumps({
+                    "message": f"File saved to: {workspace_path}",
+                }
+            return {
                 "success": False,
-                "message": "Attachment data not found in response (expected 'data' or 'file' field)",
-                "raw_result": result,
-            }, indent=2)
-            
-    except json.JSONDecodeError:
-        return json.dumps({
+                "file_name": file_name,
+                "message_id": message_id,
+                "attachment_id": attachment_id,
+                "message": f"S3 upload failed: {upload_result.get('error')}",
+                "upload_error": upload_result.get("error"),
+            }
+        return {
             "success": False,
-            "message": "Failed to parse attachment response",
-            "raw_result": result,
-        }, indent=2)
-        
-    except Exception as e:
-        return json.dumps({
-            "success": False,
-            "message": f"Error processing attachment: {str(e)}",
             "file_name": file_name,
-        }, indent=2)
-    
+            "message_id": message_id,
+            "attachment_id": attachment_id,
+            "message": "Attachment data not found in response (expected 'data' or 'file' field)",
+        }
+    except json.JSONDecodeError:
+        return {
+            "success": False,
+            "file_name": file_name,
+            "message_id": message_id,
+            "attachment_id": attachment_id,
+            "message": "Failed to parse attachment response",
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "file_name": file_name,
+            "message_id": message_id,
+            "attachment_id": attachment_id,
+            "message": str(e),
+        }
+
+
+@tool(
+    GMAIL.tools.GET_ATTACHMENT,
+)
+async def gmail_get_attachment(
+    runtime: ToolRuntime[AppContext],
+    attachment: GmailAttachmentSpec,
+) -> str:
+    """
+    Retrieves a specific attachment by ID from a message in a user's Gmail mailbox.
+    Returns the workspace-relative path where the agent can access the file.
+    """
+    result = await _download_one_attachment(runtime, attachment)
+    return json.dumps(result, indent=2)
+
+@tool("gmail_download_attachments")
+async def gmail_download_attachments_list(
+    runtime: ToolRuntime[AppContext],
+    attachments: List[GmailAttachmentSpec],
+    user_id: str = "me",
+) -> str:
+    """
+    Downloads multiple Gmail attachments at once. Each attachment is fetched and saved to the
+    workspace (S3). Pass a list of attachment specs (message_id, attachment_id, file_name) from
+    get_attachment_list. Returns a JSON summary with success/path or error per file.
+    """
+    if not attachments:
+        return json.dumps({"success": True, "downloaded": 0, "results": []}, indent=2)
+    results: List[Dict[str, Any]] = []
+    for spec in attachments:
+        if spec.user_id == "me" and user_id != "me":
+            spec = GmailAttachmentSpec(
+                message_id=spec.message_id,
+                attachment_id=spec.attachment_id,
+                file_name=spec.file_name,
+                user_id=user_id,
+            )
+        one = await _download_one_attachment(runtime, spec)
+        results.append(one)
+    success_count = sum(1 for r in results if r.get("success"))
+    return json.dumps({
+        "success": success_count == len(results),
+        "downloaded": success_count,
+        "total": len(results),
+        "results": results,
+    }, indent=2)
 
 
 # Batch Operations
@@ -1094,6 +1138,7 @@ gmail_tools = [
     # __________________________________________________________
     # Attachment operations
     gmail_get_attachment,
+    gmail_download_attachments_list,
     # __________________________________________________________
     # Batch operations
     # gmail_batch_delete_messages,

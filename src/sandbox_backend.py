@@ -80,12 +80,12 @@ class SandboxBackend(BaseSandbox):
 		self._sandbox: Optional[Sandbox] = None
 		self._writer = get_stream_writer()
 
-		from src.utils.config import get_user, get_thread_id
+		from src.utils.config import get_user, get_workspace_id
 
-		thread_id = get_thread_id()
-		if not thread_id:
+		workspace_id = get_workspace_id(runtime)
+		if not workspace_id:
 			raise RuntimeError("Cannot initialize SandboxBackend: thread_id not found in config")
-		self._thread_id = thread_id
+		self._thread_id = workspace_id
 
 		user = get_user()  # raises RuntimeError if missing
 		self._user_id = user.id

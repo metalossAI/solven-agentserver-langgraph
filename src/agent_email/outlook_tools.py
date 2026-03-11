@@ -479,17 +479,17 @@ async def outlook_download_attachment(
         if attachment_bytes:
             from datetime import datetime
             from src.s3_client import S3Client
-            
-            from src.utils.config import get_user, get_thread_id_from_config
+
+            from src.utils.config import get_user, get_workspace_id
             user = get_user()
-            thread_id = get_thread_id_from_config()
-            s3_prefix = f"{user.company_id}/threads/{thread_id}" if user.company_id else f"threads/{thread_id}"
+            workspace_id = get_workspace_id(runtime)
+            s3_prefix = f"{user.company_id}/threads/{workspace_id}" if user.company_id else f"threads/{workspace_id}"
             s3_client = S3Client(prefix=s3_prefix)
-            
+
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             safe_filename = file_name.replace(" ", "_").replace("/", "_")
             file_path = f"adjuntos/{timestamp}_{safe_filename}"
-            
+
             upload_result = await asyncio.to_thread(
                 s3_client.upload_file,
                 file_path=file_path,
@@ -498,7 +498,7 @@ async def outlook_download_attachment(
                     "message_id": message_id,
                     "attachment_id": attachment_id,
                     "source": "outlook",
-                    "thread_id": thread_id,
+                    "thread_id": workspace_id,
                     "original_filename": file_name,
                     "uploaded_at": datetime.now().isoformat(),
                 }

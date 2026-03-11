@@ -5,6 +5,9 @@ from dotenv import load_dotenv
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openrouter.chat_models import ChatOpenRouter
 from langsmith import AsyncClient
+
+from src.agent_email.gmail_tools import gmail_get_attachment
+from src.agent_email.outlook_tools import outlook_add_event_attachment, outlook_download_attachment
 load_dotenv()
  
 from langchain.agents.middleware import ModelRequest, dynamic_prompt, AgentMiddleware, before_agent, AgentState
@@ -32,6 +35,7 @@ from src.llm import LLM as llm
 from src.agent_triage.models import InputTriageState, OutputTriageState, TriageState, TriageContext
 from src.middleware.tool_call_ids import UniqueToolCallIdsMiddleware
 from src.agent_triage.tools import (
+    seleccionar_ticket,
     crear_ticket,
     patch_ticket,
     buscar_tickets,
@@ -45,6 +49,7 @@ from src.agent_triage.tools import (
 )
 from src.utils.vector_store import search
 from src.utils.tickets import get_ticket
+from src.backend import SolvenS3Backend
 
 
 class ForceToolCallMiddleware(AgentMiddleware):
@@ -106,7 +111,7 @@ async def build_prompt(request: ModelRequest):
 
 gmail_subagent = SubAgent(
 	name="asistente_gmail",
-	description="agente para gestionar correo de Gmail: listar y leer correos (no envía correos)",
+	description="agente para leer emails, descargar adjuntos y gestionar informacion de emails de gmail",
 	system_prompt="",
 	model=llm,
 	tools=gmail_tools_triage,
@@ -114,7 +119,7 @@ gmail_subagent = SubAgent(
 
 outlook_subagent = SubAgent(
 	name="asistente_outlook",
-	description="agente para gestionar correo de Outlook: listar y leer correos (no envía correos)",
+	description="agente para leer emails, descargar adjuntos y gestionar informacion de emails de outlook",
 	system_prompt="",
 	model=llm,
 	tools=outlook_tools_triage,
@@ -125,7 +130,7 @@ ticket_triage_subagent = SubAgent(
 	description="Agente para gestión de tickets. Puede buscar, leer, crear y actualizar tickets.",
 	system_prompt="",
 	model=llm,
-	tools=[buscar_tickets, leer_ticket, leer_acciones, crear_ticket, patch_ticket, merge_tickets, descartar_evento, gestionar_acciones],
+	tools=[buscar_tickets, leer_ticket, leer_acciones, crear_ticket, patch_ticket, merge_tickets, descartar_evento, gestionar_acciones, seleccionar_ticket],
 )
 
 graph = create_deep_agent(
@@ -134,6 +139,7 @@ graph = create_deep_agent(
 		api_key=os.getenv("OPENROUTER_API_KEY"),
 	),
 	tools=[
+		seleccionar_ticket,
 		buscar_tickets,
 		leer_ticket,
 		leer_acciones,
@@ -142,7 +148,10 @@ graph = create_deep_agent(
 		merge_tickets,
 		descartar_evento,
 		gestionar_acciones,
+		gmail_get_attachment,
+		outlook_download_attachment
 	],
+	backend=lambda rt: SolvenS3Backend(rt),
 	subagents=[
 		gmail_subagent,
 		outlook_subagent,

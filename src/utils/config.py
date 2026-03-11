@@ -30,7 +30,7 @@ get_user_info_by_id(user_id, company_id) -> dict  (Supabase enrichment)
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field, ConfigDict
 from langgraph.config import get_config
@@ -115,6 +115,21 @@ def get_event_message() -> Optional[str]:
         return value if value else None
     except Exception:
         return None
+
+
+def get_workspace_id(runtime: Optional[Any] = None) -> Optional[str]:
+    """Return the current workspace/ticket path key for backends and file tools.
+
+    If runtime has .context with workspace_id set (e.g. after seleccionar_ticket),
+    returns that. Otherwise returns get_thread_id() so default behavior is unchanged.
+    """
+    if runtime is not None:
+        ctx = getattr(runtime, "context", None)
+        if ctx is not None:
+            wid = getattr(ctx, "workspace_id", None)
+            if wid:
+                return wid
+    return get_thread_id()
 
 
 # ── Backward-compatible shims (kept so existing callers don't break) ────────

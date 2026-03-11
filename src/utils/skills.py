@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field, field_validator
 from langchain_core.prompts import ChatPromptTemplate
 
 from src.models import Skill
-from src.backend import S3Backend
+from src.backend import SolvenS3Backend
 from src.llm import LLM_SKILL_MATCHING
 
 

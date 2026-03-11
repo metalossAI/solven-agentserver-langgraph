@@ -45,7 +45,8 @@ async def buscar_tickets(query: str, runtime: ToolRuntime[AppContext]) -> ToolMe
         
         return ToolMessage(
             content=result,
-            tool_call_id=runtime.tool_call_id
+            tool_call_id=runtime.tool_call_id,
+            name="buscar_tickets"
         )
         
     except Exception as e:
@@ -54,8 +55,59 @@ async def buscar_tickets(query: str, runtime: ToolRuntime[AppContext]) -> ToolMe
         return ToolMessage(
             content=f"Error al buscar tickets: {str(e)}. Por favor, intenta con términos más generales.",
             status="error",
-            tool_call_id=runtime.tool_call_id
+            tool_call_id=runtime.tool_call_id,
+            name="buscar_tickets"
         )
+
+
+@tool
+async def seleccionar_ticket(ticket_id: str, runtime: ToolRuntime[AppContext]) -> ToolMessage:
+    """
+    Establece el workspace actual al ticket indicado. Tras llamar a este tool, todas las
+    descargas de adjuntos, guardado de archivos y operaciones de backend usarán la ruta
+    de este ticket (company_id/threads/ticket_id). Llama a seleccionar_ticket después de
+    crear, leer o actualizar un ticket para que las siguientes acciones afecten a ese ticket.
+
+    Args:
+    - ticket_id: ID del ticket que se establecerá como workspace actual
+    """
+    try:
+        user = get_user()
+        company_id = user.company_id
+        if not company_id:
+            return ToolMessage(
+                content="Error: Usuario sin compañía asignada",
+                status="error",
+                tool_call_id=runtime.tool_call_id,
+                name="seleccionar_ticket",
+            )
+        supabase_async = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        ticket_response = await supabase_async.table("tickets").select("id").eq("id", ticket_id).eq("company_id", company_id).execute()
+        if not ticket_response.data or len(ticket_response.data) == 0:
+            return ToolMessage(
+                content=f"Error: No se encontró el ticket {ticket_id} o no pertenece a tu compañía",
+                status="error",
+                tool_call_id=runtime.tool_call_id,
+                name="seleccionar_ticket",
+            )
+        if runtime and getattr(runtime, "context", None) is not None:
+            runtime.context.workspace_id = ticket_id
+        return ToolMessage(
+            content=f"Workspace actual establecido al ticket {ticket_id}. Las descargas, adjuntos y operaciones de archivo usarán la ruta de este ticket.",
+            tool_call_id=runtime.tool_call_id,
+            name="seleccionar_ticket",
+        )
+    except Exception as e:
+        print(f"[ERROR] seleccionar_ticket failed: {type(e).__name__}: {str(e)}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return ToolMessage(
+            content=f"Error al seleccionar ticket: {str(e)}",
+            status="error",
+            tool_call_id=runtime.tool_call_id,
+            name="seleccionar_ticket",
+        )
+
 
 @tool
 async def leer_ticket(ticket_id: str, runtime: ToolRuntime[AppContext]) -> ToolMessage:
@@ -174,9 +226,11 @@ Descripción:
 {content}
 {actions_text}
 """
+        hint = f' Para que las siguientes acciones (descargar adjuntos, guardar archivos) usen este ticket, llama a seleccionar_ticket con ticket_id "{ticket_id}".'
         return ToolMessage(
-            content=response.strip(),
-            tool_call_id=runtime.tool_call_id
+            content=response.strip() + hint,
+            tool_call_id=runtime.tool_call_id,
+            name="leer_ticket"
         )
     except Exception as e:
         print(f"[ERROR] leer_ticket failed: {type(e).__name__}: {str(e)}", flush=True)
@@ -185,7 +239,8 @@ Descripción:
         return ToolMessage(
             content=f"Error al leer ticket: {str(e)}",
             status="error",
-            tool_call_id=runtime.tool_call_id
+            tool_call_id=runtime.tool_call_id,
+            name="leer_ticket"
         )
 
 @tool(args_schema=CrearTicketInput)
@@ -371,9 +426,11 @@ async def crear_ticket(
         
         print(f"[DEBUG] Ticket created successfully", flush=True)
         actions_msg = f" con {len(acciones) if acciones else 0} acciones" if acciones else ""
+        hint = f' Para que las siguientes acciones (descargar adjuntos, guardar archivos) usen este ticket, llama a seleccionar_ticket con ticket_id "{ticket_id}".'
         return ToolMessage(
-            content=f"Ticket creado con id {ticket_id} (prioridad: {prioridad}) para el cliente {correo_cliente}, asignado al usuario {user_id}{actions_msg}",
-            tool_call_id=runtime.tool_call_id
+            content=f"Ticket creado con id {ticket_id} (prioridad: {prioridad}) para el cliente {correo_cliente}, asignado al usuario {user_id}{actions_msg}.{hint}",
+            tool_call_id=runtime.tool_call_id,
+            name="crear_ticket"
         )
     except Exception as e:
         print(f"[ERROR] crear_ticket failed: {type(e).__name__}: {str(e)}", flush=True)
@@ -382,7 +439,8 @@ async def crear_ticket(
         return ToolMessage(
             content=f"Error al crear ticket: {str(e)}",
             status="error",
-            tool_call_id=runtime.tool_call_id
+            tool_call_id=runtime.tool_call_id,
+            name="crear_ticket"
         )
 
 @tool
@@ -411,7 +469,8 @@ async def patch_ticket(
             return ToolMessage(
                 content=f"Prioridad inválida: {prioridad}. Debe ser 'low', 'medium', 'high' o 'urgent'",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="patch_ticket"
             )
         
         user = get_user()
@@ -420,7 +479,8 @@ async def patch_ticket(
             return ToolMessage(
                 content="Error: Usuario sin compañía asignada",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="patch_ticket"
             )
 
         # Verify ticket belongs to user's company
@@ -430,7 +490,8 @@ async def patch_ticket(
             return ToolMessage(
                 content=f"Error: Ticket {ticket_id} no encontrado o no pertenece a tu compañía",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="patch_ticket"
             )
         
         ticket = ticket_check.data[0]
@@ -469,7 +530,8 @@ async def patch_ticket(
                 return ToolMessage(
                     content=f"Error: No se encontró el documento {document_id}",
                     status="error",
-                    tool_call_id=runtime.tool_call_id
+                    tool_call_id=runtime.tool_call_id,
+                    name="patch_ticket"
                 )
             
             existing_metadata = doc_response.data[0].get("metadata", {})
@@ -480,7 +542,8 @@ async def patch_ticket(
                 return ToolMessage(
                     content=f"Error: El documento {document_id} no pertenece a tu compañía",
                     status="error",
-                    tool_call_id=runtime.tool_call_id
+                    tool_call_id=runtime.tool_call_id,
+                    name="patch_ticket"
                 )
             
             # Update metadata with modification timestamp and new priority if provided
@@ -525,7 +588,8 @@ async def patch_ticket(
                 return ToolMessage(
                     content=f"Error al actualizar documento con embeddings: {str(e)}",
                     status="error",
-                    tool_call_id=runtime.tool_call_id
+                    tool_call_id=runtime.tool_call_id,
+                    name="patch_ticket"
                 )
         
         response_msg = f"Ticket {ticket_id} actualizado correctamente"
@@ -535,17 +599,20 @@ async def patch_ticket(
             response_msg += f" - Razón: {rejection_reason}"
         if descripcion:
             response_msg += f" - Descripción actualizada"
-            
+        response_msg += f' Para que las siguientes acciones (descargar adjuntos, guardar archivos) usen este ticket, llama a seleccionar_ticket con ticket_id "{ticket_id}".'
+
         return ToolMessage(
             content=response_msg,
-            tool_call_id=runtime.tool_call_id
+            tool_call_id=runtime.tool_call_id,
+            name="patch_ticket"
         )
     except Exception as e:
         print(f"[ERROR] patch_ticket failed for ticket_id={ticket_id}: {type(e).__name__}: {str(e)}", flush=True)
         return ToolMessage(
             content=f"Error al actualizar ticket: {str(e)}",
             status="error",
-            tool_call_id=runtime.tool_call_id
+            tool_call_id=runtime.tool_call_id,
+            name="patch_ticket"
         )
 
 @tool
@@ -586,7 +653,8 @@ async def descartar_evento(
                         ToolMessage(
                             content="Error: Usuario sin compañía asignada",
                             status="error",
-                            tool_call_id=runtime.tool_call_id
+                            tool_call_id=runtime.tool_call_id,
+                            name="descartar_evento"
                         )
                     ]
                 }
@@ -983,9 +1051,10 @@ async def merge_tickets(ticket_ids: list[str], runtime: ToolRuntime[AppContext] 
         response_msg = (
             f"Tickets fusionados exitosamente en nuevo ticket {merged_ticket_id} ({merged_title}). "
             f"Se fusionaron {len(ticket_ids)} tickets: {', '.join(ticket_ids)}. "
-            f"Prioridad: {highest_priority}, Estado: {merged_status}"
+            f"Prioridad: {highest_priority}, Estado: {merged_status}. "
+            f'Para que las siguientes acciones (descargar adjuntos, guardar archivos) usen este ticket, llama a seleccionar_ticket con ticket_id "{merged_ticket_id}".'
         )
-        
+
         print(f"[DEBUG] Merge completed successfully", flush=True)
         return ToolMessage(
             content=response_msg,
@@ -1180,10 +1249,11 @@ async def gestionar_acciones(
             
             modo_msg = "agregadas" if modo == "append" else "insertadas"
             response_msg = f"Se {modo_msg} {len(actions_to_insert)} acción(es) al ticket {ticket_id}"
-            
+
             if skipped_duplicates:
                 response_msg += f". Se omitieron {len(skipped_duplicates)} acción(es) duplicada(s): {', '.join(skipped_duplicates)}"
-            
+            response_msg += f' Para que las siguientes acciones (descargar adjuntos, guardar archivos) usen este ticket, llama a seleccionar_ticket con ticket_id "{ticket_id}".'
+
             return ToolMessage(
                 content=response_msg,
                 tool_call_id=runtime.tool_call_id
@@ -1224,6 +1294,7 @@ from src.agent_email.gmail_tools import (
     gmail_list_drafts,
     gmail_delete_draft,
 )
+
 from src.agent_email.outlook_tools import (
     outlook_list_messages,
     outlook_get_message,

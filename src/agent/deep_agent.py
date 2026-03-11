@@ -159,6 +159,10 @@ async def initialize_sandbox(state: AgentState, runtime: Runtime[AppContext]):
 	Uses asyncio.to_thread to avoid blocking the async event loop.
 	"""
 	try:
+		from src.utils.config import get_thread_id
+		thread_id = get_thread_id()
+		if thread_id and getattr(runtime, "context", None) is not None:
+			runtime.context.workspace_id = thread_id
 		backend = SandboxBackend(runtime)
 		await asyncio.to_thread(backend._ensure_initialized)
 		
@@ -355,26 +359,6 @@ agent = create_agent(
         SubAgentMiddleware(
             backend=SandboxBackend,
             subagents=[
-                #SubAgent(
-                #    name="oficial_notarial",
-                #    description="asistente para trabajar en escrituras/documentos legales de todo tipo y formato.",
-                #    system_prompt="",
-                #    tools=[load_skill],
-                #    model=ChatOpenRouter(
-                #        model="anthropic/claude-sonnet-4.6",
-                #        api_key=os.getenv("OPENROUTER_API_KEY"),
-                #        model_kwargs={
-                #            "parallel_tool_calls": False,
-                #        }
-                #    ),
-                #    middleware=[
-                #        official_notarial_prompt,
-                #        ModelFallbackMiddleware(
-                #            ChatOpenRouter(model="x-ai/grok-4.1-fast",api_key=os.getenv("OPENROUTER_API_KEY")),
-                #        ),
-                #        *gp_middleware
-                #    ],
-                #),
                 SubAgent(
                     name="asistente_gmail",
                     description="agente para gestionar correo de gmail - listar, leer y enviar correos electrónicos",

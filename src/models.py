@@ -34,9 +34,13 @@ class AppContext(BaseModel):
 
     model_name : Optional[str] = Field(default=None, description="The name of the model to use")
     company_id: Optional[str] = None
-    backend : Optional[Any] = None  # S3Backend - using Any to avoid schema issues
+    backend : Optional[Any] = None  # SolvenS3Backend - using Any to avoid schema issues
     ticket: Optional['Ticket'] = None # the upstandig ticket context which will serve as link wiht for customer communications
     skill_create: Optional[SkillCreate] = None
+    workspace_id: Optional[str] = Field(
+        default=None,
+        description="Current workspace/ticket path key for backends and file tools. When set (e.g. by seleccionar_ticket), all S3 and file operations use company_id/threads/{workspace_id}.",
+    )
 
 # Store Models to ensure orderd long term memory
 class Event(BaseModel):

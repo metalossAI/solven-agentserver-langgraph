@@ -3,19 +3,21 @@ import asyncio
 import os
 
 from deepagents.graph import FilesystemMiddleware, SubAgentMiddleware, TodoListMiddleware
+from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
 from dotenv import load_dotenv
+from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langchain_openrouter.chat_models import ChatOpenRouter
 from langgraph.types import Command
 load_dotenv()
 
 from langchain_openai.chat_models import ChatOpenAI
 from langchain.tools import ToolRuntime
-from langchain.agents.middleware import AgentMiddleware, ModelRequest, before_model, ModelResponse, wrap_model_call, after_agent, hook_config
+from langchain.agents.middleware import AgentMiddleware, ModelFallbackMiddleware, ModelRequest, before_model, ModelResponse, wrap_model_call, after_agent, hook_config
 
 from langchain_core.messages import SystemMessage, ToolMessage, AIMessage, HumanMessage
 from langchain.agents import create_agent
-from deepagents.middleware import FilesystemMiddleware, SubAgentMiddleware
+from deepagents.middleware import FilesystemMiddleware, SubAgentMiddleware, SummarizationMiddleware
 from langchain.agents.middleware import TodoListMiddleware
 
 from src.sandbox_backend import SandboxBackend
@@ -241,13 +243,13 @@ async def dynamic_model_router(request: ModelRequest, handler):
         return await handler(request)
 
 gmail_subagent = SubAgent(
-    name="asistente_gmail",
-    description="agente para gestionar correo de gmail - listar, leer y enviar correos electrónicos",
-    system_prompt="",
-    model=llm,
-    tools=gmail_tools,
-    interrupt_on={"GMAIL_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]}}
-)
+                    name="asistente_gmail",
+                    description="agente para gestionar correo de gmail - listar, leer y enviar correos electrónicos",
+                    system_prompt="",
+                    model=llm,
+                    tools=gmail_tools,
+                    #interrupt_on={"GMAIL_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]}}
+                )
 
 outlook_subagent = SubAgent(
     name="asistente_outlook",
@@ -255,7 +257,7 @@ outlook_subagent = SubAgent(
     system_prompt="",
     model=llm,
     tools=outlook_tools,
-    interrupt_on={"OUTLOOK_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]}}
+    #interrupt_on={"OUTLOOK_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]}}
 )
 
 # Unified skills directory: user skills + Anthropic skills installed via npx (bind mount at /workspace/.solven/skills)
@@ -266,7 +268,7 @@ oficial_notarial = SubAgent(
     description="asistente para trabajar en escrituras/documentos legales de todo tipo y formato.",
     system_prompt="",
     model=ChatOpenRouter(
-        model="z-ai/glm-5",
+        model="openai/gpt-oss-120b:nitro",
         api_key=os.getenv("OPENROUTER_API_KEY"),
         model_kwargs={
             "parallel_tool_calls": False,
@@ -306,4 +308,102 @@ graph = create_deep_agent(
         USER_SKILLS_PATH,
     ],
     context_schema=AppContext,
+)
+
+# Build general-purpose subagent with default middleware stack
+gp_middleware: list[AgentMiddleware] = [
+    initialize_sandbox,
+    TodoListMiddleware(),
+    FilesystemMiddleware(backend=SandboxBackend),
+    SummarizationMiddleware(
+            model=ChatOpenRouter(
+                model="x-ai/grok-4.1-fast",
+                api_key=os.getenv("OPENROUTER_API_KEY"),
+            ),
+            backend=SandboxBackend,
+            trigger=("fraction", 0.85),
+            trim_tokens_to_summarize=None,
+            truncate_args_settings=None,
+    ),
+    AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
+    PatchToolCallsMiddleware(),
+    SkillsMiddleware(backend=SandboxBackend, sources=[USER_SKILLS_PATH]),
+]
+
+agent = create_agent(
+    model=ChatOpenRouter(
+        model="google/gemini-3-flash-preview",
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+    ),
+    tools=[load_skill],
+    system_prompt="",
+    middleware=[
+        initialize_sandbox,
+        main_prompt,
+        ToolEnforcementMiddleware(),
+        FilesystemMiddleware(
+            backend=SandboxBackend,
+        ),
+        SkillsMiddleware(
+            backend=SandboxBackend,
+            sources=[USER_SKILLS_PATH],
+        ),
+        ModelFallbackMiddleware(
+            ChatOpenRouter(model="x-ai/grok-4.1-fast",api_key=os.getenv("OPENROUTER_API_KEY")),
+
+        ),
+        SubAgentMiddleware(
+            backend=SandboxBackend,
+            subagents=[
+                #SubAgent(
+                #    name="oficial_notarial",
+                #    description="asistente para trabajar en escrituras/documentos legales de todo tipo y formato.",
+                #    system_prompt="",
+                #    tools=[load_skill],
+                #    model=ChatOpenRouter(
+                #        model="anthropic/claude-sonnet-4.6",
+                #        api_key=os.getenv("OPENROUTER_API_KEY"),
+                #        model_kwargs={
+                #            "parallel_tool_calls": False,
+                #        }
+                #    ),
+                #    middleware=[
+                #        official_notarial_prompt,
+                #        ModelFallbackMiddleware(
+                #            ChatOpenRouter(model="x-ai/grok-4.1-fast",api_key=os.getenv("OPENROUTER_API_KEY")),
+                #        ),
+                #        *gp_middleware
+                #    ],
+                #),
+                SubAgent(
+                    name="asistente_gmail",
+                    description="agente para gestionar correo de gmail - listar, leer y enviar correos electrónicos",
+                    system_prompt="",
+                    model=llm,
+                    tools=gmail_tools,
+                    #interrupt_on={"GMAIL_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]}}
+                ),
+                SubAgent(
+                    name="asistente_outlook",
+                    description="agente para gestionar correo de outlook - listar, leer y enviar correos electrónicos",
+                    system_prompt="",
+                    model=llm,
+                    tools=outlook_tools,
+                    #interrupt_on={"OUTLOOK_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]}}
+                ),
+                catastro_subagent,
+            ],
+        ),
+        SummarizationMiddleware(
+            model=ChatOpenRouter(
+                model="x-ai/grok-4.1-fast",
+                api_key=os.getenv("OPENROUTER_API_KEY"),
+            ),
+            backend=SandboxBackend,
+            trigger=("fraction", 0.85),
+            trim_tokens_to_summarize=None,
+            truncate_args_settings=None,
+        ),
+        PatchToolCallsMiddleware(),
+    ],
 )

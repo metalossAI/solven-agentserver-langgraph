@@ -12,10 +12,10 @@ async def load_skill(
     runtime: Annotated[ToolRuntime[AppContext], InjectedToolArg] = None
 ) -> str:
 	"""
-	Carga un skill especifico.
+	Carga y leer un skill especifico.
 
 	Args:
-		path: La ruta del skill a cargar
+		path: La ruta del skill
 	"""
 	backend: SandboxBackend = SandboxBackend(runtime)
 	responses : list[FileDownloadResponse] = await backend.adownload_files([path])

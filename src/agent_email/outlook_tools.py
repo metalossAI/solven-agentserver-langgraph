@@ -4,14 +4,26 @@ import asyncio
 import json
 import base64
 import os
+from datetime import datetime
 from typing import Any, Optional, List, Dict
+from pydantic import BaseModel, Field
 from src.sandbox_backend import SandboxBackend
+from src.s3_client import S3Client
 from langchain_core.tools import tool
 from langchain.tools import ToolRuntime
 from langgraph.types import interrupt
 from src.composio.types.outlook import OUTLOOK
 from src.composio.client import composio_client, execute_composio_tool
 from src.models import AppContext
+
+
+class OutlookAttachmentSpec(BaseModel):
+    """Specification for a single Outlook attachment to download."""
+
+    message_id: str = Field(description="The ID of the message containing the attachment.")
+    attachment_id: str = Field(description="The ID of the attachment to retrieve.")
+    file_name: str = Field(description="The name to save the attachment as.")
+    user_id: str = Field(default="me", description="Outlook user ID. Defaults to 'me'.")
 
 @tool(
     OUTLOOK.tools.ADD_EVENT_ATTACHMENT,
@@ -431,6 +443,129 @@ async def outlook_delete_message(
     return await execute_composio_tool(OUTLOOK.tools.DELETE_MESSAGE, arguments, runtime)
 
 
+async def _download_one_outlook_attachment(
+    runtime: ToolRuntime[AppContext],
+    spec: OutlookAttachmentSpec,
+) -> Dict[str, Any]:
+    """Download a single Outlook attachment via Composio and upload to S3. Returns a result dict."""
+    message_id = spec.message_id
+    attachment_id = spec.attachment_id
+    file_name = spec.file_name
+    user_id = spec.user_id
+    arguments = {
+        "message_id": message_id,
+        "attachment_id": attachment_id,
+        "file_name": file_name,
+        "user_id": user_id,
+    }
+    arguments = {k: v for k, v in arguments.items() if v is not None}
+    result = await execute_composio_tool(OUTLOOK.tools.DOWNLOAD_OUTLOOK_ATTACHMENT, arguments, runtime)
+    if isinstance(result, str) and result.strip().startswith("Error"):
+        return {
+            "success": False,
+            "file_name": file_name,
+            "message_id": message_id,
+            "attachment_id": attachment_id,
+            "message": result.strip(),
+        }
+    try:
+        result_data = json.loads(result)
+        attachment_bytes = None
+        if isinstance(result_data, str):
+            try:
+                attachment_bytes = base64.b64decode(result_data)
+            except Exception:
+                attachment_bytes = None
+        elif isinstance(result_data, dict):
+            raw = result_data.get("data") or result_data.get("body") or result_data.get("content")
+            if isinstance(raw, dict):
+                raw = raw.get("data") or raw.get("dataBase64")
+            if isinstance(raw, str):
+                try:
+                    attachment_bytes = base64.b64decode(raw)
+                except Exception:
+                    attachment_bytes = None
+            if attachment_bytes is None:
+                raw = result_data.get("file") or result_data.get("filePath")
+                if isinstance(raw, str) and os.path.exists(raw):
+                    with open(raw, "rb") as f:
+                        attachment_bytes = f.read()
+                elif isinstance(raw, str):
+                    return {
+                        "success": False,
+                        "file_name": file_name,
+                        "message_id": message_id,
+                        "attachment_id": attachment_id,
+                        "message": f"Local file not found: {raw}",
+                    }
+        if attachment_bytes:
+            from src.utils.config import get_user, get_workspace_id
+            user = get_user()
+            workspace_id = get_workspace_id(runtime)
+            s3_prefix = f"{user.company_id}/threads/{workspace_id}" if user.company_id else f"threads/{workspace_id}"
+            s3_client = S3Client(prefix=s3_prefix)
+            name_for_path = (file_name or "").strip().lstrip("/")
+            safe_filename = name_for_path.replace(" ", "_").replace("/", "_") or "attachment"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            file_path = f"adjuntos/{timestamp}_{safe_filename}"
+            upload_result = await asyncio.to_thread(
+                s3_client.upload_file,
+                file_path=file_path,
+                content=attachment_bytes,
+                metadata={
+                    "message_id": message_id,
+                    "attachment_id": attachment_id,
+                    "source": "outlook",
+                    "thread_id": workspace_id,
+                    "original_filename": file_name,
+                    "uploaded_at": datetime.now().isoformat(),
+                },
+            )
+            if upload_result["success"]:
+                workspace_path = f"/home/user/{file_path}"
+                return {
+                    "success": True,
+                    "path": workspace_path,
+                    "file_name": file_name,
+                    "message_id": message_id,
+                    "attachment_id": attachment_id,
+                    "size_bytes": len(attachment_bytes),
+                    "message": f"File saved to: {workspace_path}",
+                }
+            return {
+                "success": False,
+                "file_name": file_name,
+                "message_id": message_id,
+                "attachment_id": attachment_id,
+                "message": f"S3 upload failed: {upload_result.get('error')}",
+                "upload_error": upload_result.get("error"),
+            }
+        return {
+            "success": False,
+            "file_name": file_name,
+            "message_id": message_id,
+            "attachment_id": attachment_id,
+            "message": "Attachment data not found in response (expected 'data' or 'file' field)",
+        }
+    except json.JSONDecodeError as e:
+        preview = (result or "")[:200].replace("\n", " ")
+        return {
+            "success": False,
+            "file_name": file_name,
+            "message_id": message_id,
+            "attachment_id": attachment_id,
+            "message": f"Failed to parse attachment response as JSON: {e}. Preview: {preview!r}",
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "file_name": file_name,
+            "message_id": message_id,
+            "attachment_id": attachment_id,
+            "message": str(e),
+        }
+
+
 @tool(
     OUTLOOK.tools.DOWNLOAD_OUTLOOK_ATTACHMENT,
 )
@@ -445,103 +580,47 @@ async def outlook_download_attachment(
     Downloads a specific file attachment from an email message in Outlook and uploads it to S3.
     Returns the workspace-relative path where the agent can access the file.
     """
-    arguments = {
-        "attachment_id": attachment_id,
-        "file_name": file_name,
-        "message_id": message_id,
-        "user_id": user_id,
-    }
-    arguments = {k: v for k, v in arguments.items() if v is not None}
-    result = await execute_composio_tool(OUTLOOK.tools.DOWNLOAD_OUTLOOK_ATTACHMENT, arguments, runtime)
-    
-    try:
-        result_data = json.loads(result)
-        
-        attachment_bytes = None
-        
-        if isinstance(result_data, dict):
-            if "data" in result_data:
-                attachment_data_b64 = result_data["data"]
-                attachment_bytes = base64.b64decode(attachment_data_b64)
-            elif "file" in result_data:
-                local_file_path = result_data["file"]
-                
-                if os.path.exists(local_file_path):
-                    with open(local_file_path, "rb") as f:
-                        attachment_bytes = f.read()
-                else:
-                    return json.dumps({
-                        "success": False,
-                        "message": f"Local file not found: {local_file_path}",
-                        "raw_result": result,
-                    }, indent=2)
-        
-        if attachment_bytes:
-            from datetime import datetime
-            from src.s3_client import S3Client
+    spec = OutlookAttachmentSpec(
+        message_id=message_id,
+        attachment_id=attachment_id,
+        file_name=file_name,
+        user_id=user_id or "me",
+    )
+    res = await _download_one_outlook_attachment(runtime, spec)
+    return json.dumps(res, indent=2)
 
-            from src.utils.config import get_user, get_workspace_id
-            user = get_user()
-            workspace_id = get_workspace_id(runtime)
-            s3_prefix = f"{user.company_id}/threads/{workspace_id}" if user.company_id else f"threads/{workspace_id}"
-            s3_client = S3Client(prefix=s3_prefix)
 
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            safe_filename = file_name.replace(" ", "_").replace("/", "_")
-            file_path = f"adjuntos/{timestamp}_{safe_filename}"
-
-            upload_result = await asyncio.to_thread(
-                s3_client.upload_file,
-                file_path=file_path,
-                content=attachment_bytes,
-                metadata={
-                    "message_id": message_id,
-                    "attachment_id": attachment_id,
-                    "source": "outlook",
-                    "thread_id": workspace_id,
-                    "original_filename": file_name,
-                    "uploaded_at": datetime.now().isoformat(),
-                }
+@tool("outlook_download_attachments")
+async def outlook_download_attachments(
+    runtime: ToolRuntime[AppContext],
+    attachments: List[OutlookAttachmentSpec],
+    user_id: str = "me",
+) -> str:
+    """
+    Downloads multiple Outlook attachments at once. Each attachment is fetched and saved to the
+    workspace (S3). Pass a list of attachment specs (message_id, attachment_id, file_name) from
+    list_outlook_attachments. Returns a JSON summary with success/path or error per file.
+    """
+    if not attachments:
+        return json.dumps({"success": True, "downloaded": 0, "results": []}, indent=2)
+    results: List[Dict[str, Any]] = []
+    for spec in attachments:
+        if spec.user_id == "me" and user_id != "me":
+            spec = OutlookAttachmentSpec(
+                message_id=spec.message_id,
+                attachment_id=spec.attachment_id,
+                file_name=spec.file_name,
+                user_id=user_id,
             )
-            
-            if upload_result["success"]:
-                workspace_path = f"/home/user/{file_path}"
-                
-                return json.dumps({
-                    "success": True,
-                    "message": f"File saved to: {workspace_path}",
-                    "path": workspace_path,
-                    "file_name": file_name,
-                    "message_id": message_id,
-                    "size_bytes": len(attachment_bytes),
-                }, indent=2)
-            else:
-                return json.dumps({
-                    "success": False,
-                    "message": f"S3 upload failed: {upload_result.get('error')}",
-                    "file_name": file_name,
-                    "upload_error": upload_result.get('error'),
-                }, indent=2)
-        else:
-            return json.dumps({
-                "success": False,
-                "message": "Attachment data not found in response (expected 'data' or 'file' field)",
-                "raw_result": result,
-            }, indent=2)
-            
-    except json.JSONDecodeError:
-        return json.dumps({
-            "success": False,
-            "message": "Failed to parse attachment response",
-            "raw_result": result,
-        }, indent=2)
-        
-    except Exception as e:
-        return json.dumps({
-            "success": False,
-            "message": f"Error processing attachment: {str(e)}",
-            "file_name": file_name,
-        }, indent=2)
+        one = await _download_one_outlook_attachment(runtime, spec)
+        results.append(one)
+    success_count = sum(1 for r in results if r.get("success"))
+    return json.dumps({
+        "success": success_count == len(results),
+        "downloaded": success_count,
+        "total": len(results),
+        "results": results,
+    }, indent=2)
 
 
 @tool(
@@ -1657,6 +1736,7 @@ outlook_tools = [
     # Attachment operations
     outlook_list_attachments,
     outlook_download_attachment,
+    outlook_download_attachments,
     outlook_add_mail_attachment,
     outlook_create_attachment_upload_session,
     # __________________________________________________________

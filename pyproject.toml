@@ -1,42 +1,42 @@
 [project]
 name = "agent"
 version = "0.0.1"
-description = "Starter template for making a new agent LangGraph."
+description = "Solven agent server"
 authors = [
-    { name = "William Fu-Hinthorn", email = "13333726+hinthornw@users.noreply.github.com" },
+    { name = "Metaloss Intelligence", email = "admin@metaloss.es" },
 ]
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
-    "boto3>=1.40.71",
-    "composio>=0.10.10",
-    "composio-langchain>=0.10.10",
-    "copilotkit>=0.1.70",
-    "deepagents>=0.3.7a1",
-    "e2b>=2.10.1",
-    "elasticsearch>=8.16.0,<9.0.0",
-    "langchain>=1.0.3",
-    "langchain-cloudflare>=0.1.9",
-    "langchain-community>=0.4.1",
-    "langchain-docling>=2.0.0",
-    "langchain-elasticsearch-lc1>=1.0.2",
-    "langchain-groq>=0.2.0",
-    "langchain-ibm>=1.0.1",
-    "langchain-mcp-adapters>=0.1.14",
-    "langchain-openai>=1.0.1",
-    "langchain-openrouter>=0.0.2",
-    "langchain-postgres>=0.0.16",
-    "langgraph>=1.0.2",
-    "langsmith>=0.4.48",
-    "modal>=1.3.5",
-    "smithery>=0.4.4",
-    "supabase>=2.25.0",
+    "boto3",
+    "composio",
+    "composio-langchain",
+    "copilotkit",
+    "deepagents",
+    "e2b",
+    "elasticsearch>=8,<9",
+    "langchain",
+    "langchain-cloudflare",
+    "langchain-community",
+    "langchain-docling",
+    "langchain-elasticsearch-lc1",
+    "langchain-groq",
+    "langchain-ibm",
+    "langchain-mcp-adapters",
+    "langchain-openai",
+    "langchain-openrouter",
+    "langchain-postgres",
+    "langgraph",
+    "langsmith",
+    "modal",
+    "smithery",
+    "supabase",
 ]
 
 
 [project.optional-dependencies]
-dev = ["mypy>=1.11.1", "ruff>=0.6.1"]
+dev = ["mypy", "ruff"]
 
 [build-system]
 requires = ["setuptools>=73.0.0", "wheel"]
@@ -78,9 +78,9 @@ convention = "google"
 
 [dependency-groups]
 dev = [
-    "anyio>=4.7.0",
-    "langgraph-cli[inmem]>=0.4.7",
-    "mypy>=1.13.0",
-    "pytest>=8.3.5",
-    "ruff>=0.8.2",
+    "anyio",
+    "langgraph-cli[inmem]",
+    "mypy",
+    "pytest",
+    "ruff",
 ]

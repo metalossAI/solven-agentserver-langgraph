@@ -10,7 +10,6 @@ from deepagents.middleware.skills import (
 class SkillsMiddleware(BaseSkillsMiddleware):
     """
     Custom SkillsMiddleware for Solven.
-
     Same behavior as deepagents.middleware.skills.SkillsMiddleware, but the
     system prompt explicitly instructs the model to use the `load_skill` tool
     to read full skill instructions instead of reading the files directly.

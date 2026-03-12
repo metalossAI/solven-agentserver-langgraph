@@ -677,24 +677,46 @@ async def _download_one_attachment(
         "user_id": user_id,
     }
     result = await execute_composio_tool(GMAIL.tools.GET_ATTACHMENT, arguments, runtime)
+    # Composio client may return plain error strings (not JSON)
+    if isinstance(result, str) and result.strip().startswith("Error"):
+        return {
+            "success": False,
+            "file_name": file_name,
+            "message_id": message_id,
+            "attachment_id": attachment_id,
+            "message": result.strip(),
+        }
     try:
         result_data = json.loads(result)
         attachment_bytes = None
-        if isinstance(result_data, dict):
-            if "data" in result_data:
-                attachment_bytes = base64.b64decode(result_data["data"])
-            elif "file" in result_data:
-                local_file_path = result_data["file"]
-                if os.path.exists(local_file_path):
-                    with open(local_file_path, "rb") as f:
+        if isinstance(result_data, str):
+            # Composio sometimes returns raw base64 as JSON string (e.g. "base64...")
+            try:
+                attachment_bytes = base64.b64decode(result_data)
+            except Exception:
+                attachment_bytes = None
+        elif isinstance(result_data, dict):
+            # Try common keys for base64 payload (Composio / Gmail API shapes)
+            raw = result_data.get("data") or result_data.get("body") or result_data.get("content")
+            if isinstance(raw, dict):
+                raw = raw.get("data") or raw.get("dataBase64")
+            if isinstance(raw, str):
+                try:
+                    attachment_bytes = base64.b64decode(raw)
+                except Exception:
+                    attachment_bytes = None
+            if attachment_bytes is None:
+                raw = result_data.get("file") or result_data.get("filePath")
+                if isinstance(raw, str) and os.path.exists(raw):
+                    with open(raw, "rb") as f:
                         attachment_bytes = f.read()
-                else:
+                elif isinstance(raw, str):
                     return {
                         "success": False,
                         "file_name": file_name,
                         "message_id": message_id,
                         "attachment_id": attachment_id,
-                        "message": f"Local file not found: {local_file_path}",
+                        "message": f"Local file not found: {raw}",
                     }
         if attachment_bytes:
             from src.utils.config import get_user, get_workspace_id
@@ -703,7 +725,9 @@ async def _download_one_attachment(
             s3_prefix = f"{user.company_id}/threads/{workspace_id}" if user.company_id else f"threads/{workspace_id}"
             s3_client = S3Client(prefix=s3_prefix)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            safe_filename = file_name.replace(" ", "_").replace("/", "_")
+            # Normalize: strip leading/trailing slashes so "/Acta.docx" -> "Acta.docx"
+            name_for_path = (file_name or "").strip().lstrip("/")
+            safe_filename = name_for_path.replace(" ", "_").replace("/", "_") or "attachment"
             file_path = f"adjuntos/{timestamp}_{safe_filename}"
             upload_result = await asyncio.to_thread(
                 s3_client.upload_file,
@@ -744,13 +768,14 @@ async def _download_one_attachment(
             "attachment_id": attachment_id,
             "message": "Attachment data not found in response (expected 'data' or 'file' field)",
         }
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        preview = (result or "")[:200].replace("\n", " ")
         return {
             "success": False,
             "file_name": file_name,
             "message_id": message_id,
             "attachment_id": attachment_id,
-            "message": "Failed to parse attachment response",
+            "message": f"Failed to parse attachment response as JSON: {e}. Preview: {preview!r}",
         }
     except Exception as e:
         return {

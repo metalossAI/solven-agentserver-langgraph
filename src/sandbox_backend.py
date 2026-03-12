@@ -229,9 +229,9 @@ class SandboxBackend(BaseSandbox):
 		# Step 3: S3 workspace mount
 		self._mount_s3_buckets()
 
-		# Step 4: Create plain /workspace (no overlay)
+		# Step 4: Create plain /workspace (no overlay); no tmp in workspace—bwrap uses tmpfs for /tmp
 		self._sandbox.commands.run(
-			f"mkdir -p {self._workspace} {self._workspace}/tmp",
+			f"mkdir -p {self._workspace}",
 			timeout=10, user="root",
 		)
 
@@ -578,23 +578,6 @@ class SandboxBackend(BaseSandbox):
 		except Exception as e:
 			print(f"[Mount] ⚠ .solven mount failed (non-critical): {e}", flush=True)
 
-	def _preload_upper_from_s3(self) -> None:
-		"""Optionally preload /workspace from S3 (one-time). Non-blocking; run in background to avoid blocking agent startup."""
-		try:
-			self._sandbox.commands.run(
-				f"rsync -av {_RSYNC_ONE_FS} {_RSYNC_EXCLUDE_FLAGS} "
-				f"{self._workspace_s3_mount}/ {self._workspace}/",
-				timeout=180,
-				user="root",
-			)
-			self._sandbox.commands.run(
-				f"chown -R user:user {self._workspace} 2>/dev/null || true",
-				timeout=30, user="root",
-			)
-			print(f"[Sync] ✓ S3 -> /workspace (preload)", flush=True)
-		except Exception as e:
-			print(f"[Sync] ⚠️  S3->/workspace preload failed (non-critical): {e}", flush=True)
-
 	def _sync_workspace_to_s3(self) -> None:
 		"""Persist /workspace to S3 (excludes .solven/, virtualenvs, node_modules/, etc.). Blocking; prefer _start_background_syncs()."""
 		try:
@@ -669,7 +652,7 @@ class SandboxBackend(BaseSandbox):
 		"""Environment for commands run in /workspace (cwd=/workspace, HOME=/workspace)."""
 		return {
 			"HOME": self._workspace,
-			"TMPDIR": f"{self._workspace}/tmp",
+			"TMPDIR": "/tmp",
 			"PATH": f"{self._workspace}/.venv/bin:{self._workspace}/.local/bin:{self._workspace}/.bun/bin:/usr/local/bin:/usr/bin:/bin",
 			"UV_PROJECT_ENVIRONMENT": f"{self._workspace}/.venv",
 			"VIRTUAL_ENV": f"{self._workspace}/.venv",
@@ -741,7 +724,7 @@ class SandboxBackend(BaseSandbox):
 			"--ro-bind", "/etc", "/etc",
 			"--proc", "/proc",
 			"--dev", "/dev",
-			"--bind", f"{ws}/tmp", "/tmp",
+			"--tmpfs", "/tmp",
 			"--chdir", "/",
 			"--setenv", "HOME", "/",
 			"--setenv", "PWD", "/",
@@ -835,11 +818,13 @@ class SandboxBackend(BaseSandbox):
 
 	def ls_info(self, path: str) -> list[FileInfo]:
 		"""List files; path passed through. Return only workspace paths (filter out system dirs)."""
+		self._ensure_initialized()
 		result = super().ls_info(path)
 		return [p for p in result if self._is_workspace_path(p["path"])]
 
 	def glob_info(self, pattern: str, path: str = "/") -> list["FileInfo"]:
 		"""List files matching pattern via find -iname (case-insensitive) so e.g. **/acta* matches ACTA JUNTA UNIVERSAL."""
+		self._ensure_initialized()
 		search_path = path.rstrip("/") or "/"
 		# Basename part for -iname: **/acta* -> acta*, **/*.pdf -> *.pdf
 		basename_pattern = pattern.split("/")[-1] if "/" in pattern else pattern
@@ -866,6 +851,7 @@ class SandboxBackend(BaseSandbox):
 		glob: str | None = None,	
 	) -> "list[GrepMatch] | str":
 		"""Same as base (grep -rHnF via execute) but with --exclude-dir so root search is fast."""
+		self._ensure_initialized()
 		search_path = shlex.quote((path or ".").rstrip("/") or "/")
 		skip_dirs = set(_WORKSPACE_SEARCH_SKIP_DIRS)
 		exclude_dirs = " ".join(f"--exclude-dir={d}" for d in skip_dirs)

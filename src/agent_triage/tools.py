@@ -1284,6 +1284,7 @@ async def gestionar_acciones(
 # ---------------------------------------------------------------------------
 
 from src.agent_email.gmail_tools import (
+    gmail_download_attachments_list,
     gmail_list_labels,
     gmail_list_threads,
     gmail_get_attachment,
@@ -1296,6 +1297,7 @@ from src.agent_email.gmail_tools import (
 )
 
 from src.agent_email.outlook_tools import (
+    outlook_download_attachments,
     outlook_list_messages,
     outlook_get_message,
     outlook_search_messages,
@@ -1306,6 +1308,7 @@ from src.agent_email.outlook_tools import (
 
 gmail_tools_triage = [
     gmail_list_threads,
+    gmail_download_attachments_list,
     gmail_get_attachment,
     gmail_fetch_message_by_message_id,
     gmail_fetch_message_by_thread_id,
@@ -1320,6 +1323,7 @@ outlook_tools_triage = [
     outlook_get_message,
     outlook_search_messages,
     outlook_list_attachments,
+    outlook_download_attachments,
     outlook_download_attachment,
     outlook_get_mail_delta,
 ]

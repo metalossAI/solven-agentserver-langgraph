@@ -1317,7 +1317,7 @@ def get_s3_backend_from_env() -> S3Backend:
 
 async def get_user_backend(user_id: str, conversation_id: Optional[str] = None, scope: str = "write") -> S3Backend:
     backend = S3Backend(
-        bucket=os.getenv('S3_BUCKET', 'scriba'),
+        bucket=os.getenv('S3_BUCKET_NAME', 'scriba'),
         prefix=user_id,
         endpoint_url=os.getenv('S3_ENDPOINT_URL'),
         access_key=os.getenv('S3_ACCESS_KEY_ID'),
@@ -1353,7 +1353,7 @@ async def get_user_s3_backend(user_id: str, thread_id: Optional[str] = None, tic
     """
     
     return S3Backend(
-        bucket=os.getenv('S3_BUCKET', 'scriba'),
+        bucket=os.getenv('S3_BUCKET_NAME', 'scriba'),
         prefix="",  # No user prefix for shared threads
         endpoint_url=os.getenv('S3_ENDPOINT_URL'),
         access_key=os.getenv('S3_ACCESS_KEY_ID'),
@@ -1634,7 +1634,7 @@ async def get_s3_file_uploader() -> S3FileUploader:
         S3FileUploader instance configured from environment
     """
     return S3FileUploader(
-        bucket=os.getenv('S3_BUCKET', 'scriba'),
+        bucket=os.getenv('S3_BUCKET_NAME', 'scriba'),
         endpoint_url=os.getenv('S3_ENDPOINT_URL'),
         access_key=os.getenv('S3_ACCESS_KEY_ID'),
         secret_key=os.getenv('S3_SECRET_KEY'),

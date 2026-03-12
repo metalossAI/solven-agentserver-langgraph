@@ -368,6 +368,24 @@ agent = create_agent(
             backend=SandboxBackend,
             subagents=[
                 SubAgent(
+                    name="oficial_notarial",
+                    description="asistente para trabajar en escrituras notariales",
+                    system_prompt="",
+                    model=ChatOpenRouter(
+                        model="openai/gpt-oss-120b:nitro",
+                        api_key=os.getenv("OPENROUTER_API_KEY"),
+                    ),
+                    tools=[load_skill],
+                    middleware=[
+                        official_notarial_prompt,
+                        SkillsMiddleware(
+                            backend=SandboxBackend,
+                            sources=[USER_SKILLS_PATH],
+                            exclude_skills=["docx"],
+                        ),
+                    ],
+                ),
+                SubAgent(
                     name="asistente_gmail",
                     description="agente para gestionar correo de gmail - listar, leer y enviar correos electrónicos",
                     system_prompt="",

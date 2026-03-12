@@ -1255,7 +1255,7 @@ class SolvenS3Backend(_BaseS3Backend):
                 "Cannot initialize SolvenS3Backend: user company_id (tenant) not found in config"
             )
 
-        bucket = os.getenv("S3_BUCKET", "scriba")
+        bucket = os.getenv("S3_BUCKET_NAME", "scriba")
         super().__init__(
             bucket=bucket,
             prefix="",

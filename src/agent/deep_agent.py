@@ -48,6 +48,7 @@ from typing import Callable, Awaitable
 from src.agent_email.gmail_tools import gmail_tools, gmail_send_email
 from src.agent_email.outlook_tools import outlook_tools
 from src.agent.custom_skills_middleware import SkillsMiddleware
+from src.utils.openrouter import OpenRouterContentMiddleware
 
 
 class ToolEnforcementMiddleware(AgentMiddleware):
@@ -162,7 +163,11 @@ async def initialize_sandbox(state: AgentState, runtime: Runtime[AppContext]):
 		from src.utils.config import get_thread_id
 		thread_id = get_thread_id()
 		if thread_id and getattr(runtime, "context", None) is not None:
-			runtime.context.workspace_id = thread_id
+			ctx = runtime.context
+			if isinstance(ctx, dict):
+				ctx["workspace_id"] = thread_id
+			else:
+				ctx.workspace_id = thread_id
 		backend = SandboxBackend(runtime)
 		await asyncio.to_thread(backend._ensure_initialized)
 		
@@ -307,6 +312,7 @@ graph = create_deep_agent(
     middleware=[
         initialize_sandbox,
         main_prompt,
+        OpenRouterContentMiddleware(),
     ],
     skills=[
         USER_SKILLS_PATH,
@@ -317,6 +323,7 @@ graph = create_deep_agent(
 # Build general-purpose subagent with default middleware stack
 gp_middleware: list[AgentMiddleware] = [
     initialize_sandbox,
+    OpenRouterContentMiddleware(),
     TodoListMiddleware(),
     FilesystemMiddleware(backend=SandboxBackend),
     SummarizationMiddleware(
@@ -344,6 +351,7 @@ agent = create_agent(
     middleware=[
         initialize_sandbox,
         main_prompt,
+        OpenRouterContentMiddleware(),
         ToolEnforcementMiddleware(),
         FilesystemMiddleware(
             backend=SandboxBackend,

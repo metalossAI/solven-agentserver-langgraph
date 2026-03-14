@@ -5,6 +5,15 @@ from e2b import Template, wait_for_timeout
 
 load_dotenv()
 
+# Reliability-first layout (sandbox_backend uses these paths).
+SOLVEN_THREADS = "/var/lib/solven/threads"
+SOLVEN_RUNTIME = "/var/lib/solven/runtime"
+SOLVEN_USERS = "/var/lib/solven/users"
+OPT_SOLVEN_SKILLS = "/opt/solven/skills"
+MNT_USER = "/mnt/user"
+WORKSPACES = "/workspaces"
+SKILLS_REPO_URL = os.getenv("SKILLS_REPO_URL", "https://github.com/metalossAI/solven-skills.git")
+
 # Build environment variables dictionary
 # NOTE: S3 credentials are NOT included here - they must be passed at sandbox creation time
 # to ensure mounts happen with actual THREAD_ID/USER_ID values, not during template build
@@ -97,10 +106,13 @@ template = (
     .npm_install(["docx"])
     # Note: docx will be installed per-thread using bun for better isolation
     # ============================================================================
-    # Python Dependencies (pip)
+    # Python Dependencies (pip + apt for sync daemon)
     # ============================================================================
+    # Sync daemon runs with /usr/bin/python3; ensure watchdog is available system-wide
+    .apt_install(["python3-watchdog"])
     # Required across all three skills (DOCX + PDF + XLSX)
     .pip_install([
+        "watchdog",
         "lxml",
         "python-docx",
         # DOCX dependencies
@@ -141,18 +153,22 @@ template = (
     # Create directory for rclone config (config will be created at runtime)
     .run_cmd("mkdir -p /root/.config/rclone", user="root")
     # ============================================================================
-    # Start Command - Rclone S3 Mounts
+    # Start Command - Reliability-first boot: layout, crash recovery, optional skills
     # ============================================================================
-    # Using rclone instead of mountpoint because:
-    # 1. Mountpoint for S3 is AWS-native and has issues with Supabase S3 endpoints
-    # 2. Rclone fully supports S3-compatible storage with custom endpoints
-    # 3. Proven to work with Supabase storage
+    # S3 mounting is done by sandbox_backend.py on first use (no credentials at build time).
     .set_start_cmd(
-        """
-        # Note: S3 mounting is now handled by sandbox_backend.py after sandbox creation
-        # This start command just prepares the mount point directories
+        f"""
+        set -e
+        # 1. Create layout
         sudo mkdir -p /root/.config/rclone
-        echo "[Template] Sandbox initialized (mounts will be configured by backend)"
+        sudo mkdir -p {SOLVEN_THREADS} {SOLVEN_RUNTIME} {SOLVEN_USERS} {OPT_SOLVEN_SKILLS} {MNT_USER} {WORKSPACES}
+        # 2. Crash recovery: runtime is ephemeral, safe to clear on startup
+        sudo rm -rf {SOLVEN_RUNTIME}/*
+        # 3. Clone skills to /opt/solven/skills if not present (backend rsyncs into runtime)
+        if [ ! -d {OPT_SOLVEN_SKILLS}/.git ]; then
+          sudo git clone --depth 1 {SKILLS_REPO_URL} {OPT_SOLVEN_SKILLS} || true
+        fi
+        echo "[Template] Sandbox boot complete (mounts configured by backend on first request)"
         """,
         wait_for_timeout(2_000)
     )

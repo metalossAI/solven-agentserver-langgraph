@@ -5,12 +5,12 @@
 #   $2: S3 path (e.g., "threads/thread-123")
 #   $3: Local mount point (e.g., "/mnt/r2/threads/thread-123")
 #   $4: Log file path (e.g., "/tmp/rclone-thread.log")
-#   $5: Optional. "read-only" = read-only mount; "immediate" = --vfs-write-back 0 (for skills, avoids buffered writes).
+#   $5: Optional. "read-only" = read-only mount; "immediate" = --vfs-write-back 0; "user" = user folder (longer dir-cache).
 
 set -e
 
 if [ $# -lt 4 ]; then
-    echo "ERROR: Usage: $0 <bucket> <s3_path> <mount_point> <log_file> [read-only|immediate]" >&2
+    echo "ERROR: Usage: $0 <bucket> <s3_path> <mount_point> <log_file> [read-only|immediate|user]" >&2
     exit 1
 fi
 
@@ -20,10 +20,12 @@ MOUNT_POINT="$3"
 LOG_FILE="$4"
 READONLY_ARG=""
 WRITEBACK_ARG="--vfs-write-back 1s"
+DIR_CACHE_TIME="30s"
 if [ $# -ge 5 ]; then
     case "$5" in
         read-only) READONLY_ARG="--read-only" ;;
-        immediate) WRITEBACK_ARG="--vfs-write-back 0" ;;  # Skills: write-through, no buffering (avoids stale reads)
+        immediate) WRITEBACK_ARG="--vfs-write-back 0" ;;  # Skills: write-through, no buffering
+        user)      DIR_CACHE_TIME="10m" ;;  # User folder: longer cache so listings are stable (per spec)
     esac
 fi
 
@@ -34,17 +36,28 @@ if ! sudo mkdir -p "${MOUNT_POINT}"; then
     exit 1
 fi
 
-echo "[mount] Mounting s3remote:${BUCKET}/${S3_PATH} to ${MOUNT_POINT} ${READONLY_ARG}"
-# Mount with rclone in background using nohup (more reliable than --daemon)
+# If already mounted (e.g. from a previous run), unmount so rclone can mount here
+if mountpoint -q "${MOUNT_POINT}" 2>/dev/null; then
+    echo "[mount] Unmounting existing mount at ${MOUNT_POINT}..."
+    sudo umount "${MOUNT_POINT}" 2>/dev/null || true
+    sudo umount -l "${MOUNT_POINT}" 2>/dev/null || true
+    sleep 3
+fi
+
+# Allow mounting over non-empty dir (e.g. leftover from previous run or mkdir -p)
+# Omit --poll-interval: not supported by all S3-compatible remotes and can cause fatal errors
+# Path must be "bucket/key" because we do not set bucket in rclone config.
+echo "[mount] Mounting s3remote:${BUCKET}/${S3_PATH} to ${MOUNT_POINT} ${READONLY_ARG} (dir-cache=${DIR_CACHE_TIME})"
 nohup sudo rclone --config /root/.config/rclone/rclone.conf mount \
   "s3remote:${BUCKET}/${S3_PATH}" \
   "${MOUNT_POINT}" \
   --allow-other \
+  --allow-non-empty \
   ${READONLY_ARG} \
   --vfs-cache-mode full \
   ${WRITEBACK_ARG} \
-  --poll-interval 2s \
-  --dir-cache-time 2s \
+  --dir-cache-time "${DIR_CACHE_TIME}" \
+  --vfs-read-ahead 4M \
   --log-file "${LOG_FILE}" \
   --log-level INFO > /dev/null 2>&1 &
 

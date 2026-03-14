@@ -39,8 +39,9 @@ class SkillsMiddleware(BaseSkillsMiddleware):
         exclude_skills: list[str] | None = None,
         **kwargs,
     ) -> None:
-        super().__init__(backend=backend, sources=sources, **kwargs)
-        raw = list(exclude_skills or []) + list(kwargs.get("exclude_skills") or [])
+        # Base only accepts (backend, sources); do not pass exclude_skills or other kwargs
+        raw = list(exclude_skills or []) + list(kwargs.pop("exclude_skills", None) or [])
+        super().__init__(backend=backend, sources=sources)
         self._exclude_skills: set[str] = {s.strip().lower() for s in raw if s}
 
     def _filtered_skills(self, skills: list[SkillMetadata]) -> list[SkillMetadata]:
@@ -74,14 +75,15 @@ class SkillsMiddleware(BaseSkillsMiddleware):
         lines: list[str] = []
         for skill in skills:
             annotations = _format_skill_annotations(skill)
-            desc_line = f"- **{skill['name']}**: {skill['description']}"
+            desc_line = f"- **{skill.get('name', '')}**: {skill.get('description', '')}"
             if annotations:
                 desc_line += f" ({annotations})"
             lines.append(desc_line)
 
-            if skill["allowed_tools"]:
+            allowed = skill.get("allowed_tools") or []
+            if allowed:
                 lines.append(
-                    f"  -> Allowed tools: {', '.join(skill['allowed_tools'])}"
+                    f"  -> Allowed tools: {', '.join(allowed)}"
                 )
 
             # Key change from the base middleware: instead of telling the model
@@ -89,7 +91,7 @@ class SkillsMiddleware(BaseSkillsMiddleware):
             # tool with the path as input.
             lines.append(
                 "  -> To read this skill, call the `load_skill` tool with "
-                f"the path `{skill['path']}`."
+                f"the path `{skill.get('path', '')}`."
             )
 
         return "\n".join(lines)

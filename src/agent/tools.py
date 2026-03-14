@@ -3,7 +3,7 @@ from langchain_core.tools import tool, InjectedToolArg
 from langchain_core.messages import ToolMessage
 from langchain.tools import ToolRuntime
 from src.models import AppContext
-from src.sandbox_backend import SandboxBackend
+from src.sandbox_backend import get_backend
 from typing import Dict, Any, Optional, Annotated
 
 @tool
@@ -17,7 +17,7 @@ async def load_skill(
 	Args:
 		path: La ruta del skill
 	"""
-	backend: SandboxBackend = SandboxBackend(runtime)
+	backend = get_backend(runtime)
 	responses : list[FileDownloadResponse] = await backend.adownload_files([path])
 	if responses:
 		print(f"Cargada la habilidad {path}")

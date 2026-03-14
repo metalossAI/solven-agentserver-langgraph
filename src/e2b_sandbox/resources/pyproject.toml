@@ -2,22 +2,17 @@
 name = "workspace"
 version = "0.1.0"
 requires-python = ">=3.11"
+# DOCX: defusedxml, python-docx | PDF: pypdf, pdfplumber, reportlab | XLSX: openpyxl, pandas | OCR: pytesseract, pdf2image | Pillow
 dependencies = [
-    # DOCX dependencies
     "defusedxml",
     "python-docx",
-    # PDF dependencies
     "pypdf",
     "pdfplumber",
     "reportlab",
-    # XLSX dependencies
     "openpyxl",
-    # Shared dependencies
     "pandas",
-    # Optional / Conditional (PDF OCR & table export)
     "pytesseract",
     "pdf2image",
-    # Additional utilities
     "Pillow",
 ]
 

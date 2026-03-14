@@ -23,7 +23,8 @@ if ! sudo mkdir -p /root/.config/rclone; then
     exit 1
 fi
 
-# Build rclone config based on whether using Supabase or AWS S3
+# Build rclone config. Do NOT set bucket here so that mount/copy paths always use "bucket/key"
+# format (e.g. s3remote:bucketname/tenant/users/user_id). Otherwise path would be wrong.
 echo "[config] Writing rclone configuration..."
 if [ -n "${S3_ENDPOINT_URL}" ]; then
   # Supabase S3 or custom endpoint

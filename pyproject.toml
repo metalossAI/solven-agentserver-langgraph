@@ -19,6 +19,7 @@ dependencies = [
     "langchain",
     "langchain-cloudflare",
     "langchain-community",
+    "docling",
     "langchain-docling",
     "langchain-elasticsearch-lc1",
     "langchain-groq",

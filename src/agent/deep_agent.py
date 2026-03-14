@@ -338,15 +338,16 @@ gp_middleware: list[AgentMiddleware] = [
     ),
     AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
     PatchToolCallsMiddleware(),
-    SkillsMiddleware(backend=SandboxBackend, sources=[USER_SKILLS_PATH]),
 ]
 
 agent = create_agent(
     model=ChatOpenRouter(
         model="google/gemini-3-flash-preview",
         api_key=os.getenv("OPENROUTER_API_KEY"),
+        model_kwargs={
+            "parallel_tool_calls": True,
+        }
     ),
-    tools=[load_skill],
     system_prompt="",
     middleware=[
         initialize_sandbox,
@@ -356,10 +357,6 @@ agent = create_agent(
         FilesystemMiddleware(
             backend=SandboxBackend,
         ),
-        SkillsMiddleware(
-            backend=SandboxBackend,
-            sources=[USER_SKILLS_PATH],
-        ),
         ModelFallbackMiddleware(
             ChatOpenRouter(model="x-ai/grok-4.1-fast",api_key=os.getenv("OPENROUTER_API_KEY")),
 
@@ -368,16 +365,42 @@ agent = create_agent(
             backend=SandboxBackend,
             subagents=[
                 SubAgent(
-                    name="oficial_notarial",
-                    description="asistente para trabajar en escrituras notariales",
-                    system_prompt="",
+                    name="editor_docx",
+                    description="asistente para editar documentos docx",
+                    system_prompt="google/gemini-3-flash-preview",
                     model=ChatOpenRouter(
-                        model="openai/gpt-oss-120b:nitro",
+                        model="google/gemini-3-flash-preview",
                         api_key=os.getenv("OPENROUTER_API_KEY"),
+                        model_kwargs={
+                            "parallel_tool_calls": False,
+                        }
                     ),
                     tools=[load_skill],
                     middleware=[
                         official_notarial_prompt,
+                        *gp_middleware,
+                        SkillsMiddleware(
+                            backend=SandboxBackend,
+                            sources=[USER_SKILLS_PATH],
+                            exclude_skills=["escrituras"],
+                        ),
+                    ],
+                ),
+                SubAgent(
+                    name="oficial_notarial",
+                    description="asistente para trabajar en escrituras notariales",
+                    system_prompt="",
+                    model=ChatOpenRouter(
+                        model="google/gemini-3-flash-preview",
+                        api_key=os.getenv("OPENROUTER_API_KEY"),
+                        model_kwargs={
+                            "parallel_tool_calls": False,
+                        }
+                    ),
+                    tools=[load_skill],
+                    middleware=[
+                        official_notarial_prompt,
+                        *gp_middleware,
                         SkillsMiddleware(
                             backend=SandboxBackend,
                             sources=[USER_SKILLS_PATH],
@@ -416,4 +439,4 @@ agent = create_agent(
         ),
         PatchToolCallsMiddleware(),
     ],
-)
+).with_config({"recursion_limit": 1000})

@@ -1640,3 +1640,162 @@ async def get_s3_file_uploader() -> S3FileUploader:
         secret_key=os.getenv('S3_SECRET_KEY'),
         region=os.getenv('S3_REGION', 'us-east-1')
     )
+
+
+# ---------------------------------------------------------------------------
+# Workspace tarball + manifest helpers (for E2B sandbox hydrate/persist)
+# Key pattern: {tenant_id}/threads/{thread_id}/workspace.tar.gz | workspace-manifest.json | <relative_path>
+# ---------------------------------------------------------------------------
+
+WORKSPACE_TAR_KEY = "workspace.tar.gz"
+WORKSPACE_MANIFEST_KEY = "workspace-manifest.json"
+
+
+_workspace_s3_client = None
+
+
+def _get_workspace_s3_client():
+    """Lazy boto3 S3 client for workspace operations (same config as S3Backend)."""
+    global _workspace_s3_client
+    if _workspace_s3_client is None:
+        endpoint = os.getenv('S3_ENDPOINT_URL')
+        config = None
+        if endpoint and 'supabase.co' in endpoint:
+            config = Config(s3={'addressing_style': 'path'})
+        _workspace_s3_client = boto3.client(
+            's3',
+            endpoint_url=endpoint,
+            aws_access_key_id=os.getenv('S3_ACCESS_KEY_ID'),
+            aws_secret_access_key=os.getenv('S3_ACCESS_SECRET') or os.getenv('S3_SECRET_KEY'),
+            region_name=os.getenv('S3_REGION', 'us-east-1'),
+            config=config,
+        )
+    return _workspace_s3_client
+
+
+def _workspace_prefix(tenant_id: str, thread_id: str) -> str:
+    """S3 prefix for thread workspace: {tenant_id}/threads/{thread_id}/"""
+    return f"{tenant_id}/threads/{thread_id}/"
+
+
+def _workspace_tar_key(tenant_id: str, thread_id: str) -> str:
+    """Full S3 key for workspace tarball."""
+    return f"{_workspace_prefix(tenant_id, thread_id)}{WORKSPACE_TAR_KEY}"
+
+
+def get_presigned_download_url(tenant_id: str, thread_id: str, expiry_sec: int = 3600) -> str:
+    """Presigned GET URL for workspace.tar.gz."""
+    client = _get_workspace_s3_client()
+    bucket = os.getenv('S3_BUCKET_NAME', 'scriba')
+    key = _workspace_tar_key(tenant_id, thread_id)
+    url = client.generate_presigned_url(
+        'get_object',
+        Params={'Bucket': bucket, 'Key': key},
+        ExpiresIn=expiry_sec,
+    )
+    return url
+
+
+def get_presigned_upload_url(tenant_id: str, thread_id: str, expiry_sec: int = 3600) -> str:
+    """Presigned PUT URL for workspace.tar.gz."""
+    client = _get_workspace_s3_client()
+    bucket = os.getenv('S3_BUCKET_NAME', 'scriba')
+    key = _workspace_tar_key(tenant_id, thread_id)
+    url = client.generate_presigned_url(
+        'put_object',
+        Params={'Bucket': bucket, 'Key': key, 'ContentType': 'application/gzip'},
+        ExpiresIn=expiry_sec,
+    )
+    return url
+
+
+def upload_thread_file(tenant_id: str, thread_id: str, relative_path: str, content: Union[bytes, bytearray]) -> None:
+    """PUT one file at {tenant_id}/threads/{thread_id}/{relative_path} (for triage/agents)."""
+    client = _get_workspace_s3_client()
+    bucket = os.getenv('S3_BUCKET_NAME', 'scriba')
+    key = f"{_workspace_prefix(tenant_id, thread_id)}{relative_path.lstrip('/')}"
+    body = bytes(content) if isinstance(content, bytearray) else content
+    client.put_object(Bucket=bucket, Key=key, Body=body)
+
+
+def list_workspace_loose_objects(tenant_id: str, thread_id: str) -> list:
+    """
+    List S3 objects under thread workspace prefix; exclude workspace.tar.gz and workspace-manifest.json.
+    Returns list of dicts with 'key', 'size', 'last_modified'.
+    """
+    client = _get_workspace_s3_client()
+    bucket = os.getenv('S3_BUCKET_NAME', 'scriba')
+    prefix = _workspace_prefix(tenant_id, thread_id)
+    out = []
+    paginator = client.get_paginator('list_objects_v2')
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get('Contents') or []:
+            key = obj.get('Key', '')
+            if not key or key.endswith('/'):
+                continue
+            if key == prefix + WORKSPACE_TAR_KEY or key == prefix + WORKSPACE_MANIFEST_KEY:
+                continue
+            out.append({
+                'key': key,
+                'size': obj.get('Size', 0),
+                'last_modified': obj.get('LastModified'),
+            })
+    return out
+
+
+def get_workspace_object(tenant_id: str, thread_id: str, relative_path: str) -> Optional[bytes]:
+    """GET object at {tenant_id}/threads/{thread_id}/{relative_path}; return bytes or None if 404."""
+    client = _get_workspace_s3_client()
+    bucket = os.getenv('S3_BUCKET_NAME', 'scriba')
+    key = f"{_workspace_prefix(tenant_id, thread_id)}{relative_path.lstrip('/')}"
+    try:
+        resp = client.get_object(Bucket=bucket, Key=key)
+        return resp['Body'].read()
+    except ClientError as e:
+        if e.response.get('Error', {}).get('Code') == 'NoSuchKey':
+            return None
+        raise
+
+
+def get_workspace_manifest(tenant_id: str, thread_id: str) -> Optional[dict]:
+    """GET and parse workspace-manifest.json; return dict or None."""
+    import json
+    client = _get_workspace_s3_client()
+    bucket = os.getenv('S3_BUCKET_NAME', 'scriba')
+    key = f"{_workspace_prefix(tenant_id, thread_id)}{WORKSPACE_MANIFEST_KEY}"
+    try:
+        resp = client.get_object(Bucket=bucket, Key=key)
+        body = resp['Body'].read().decode('utf-8')
+        return json.loads(body)
+    except ClientError as e:
+        if e.response.get('Error', {}).get('Code') == 'NoSuchKey':
+            return None
+        raise
+
+
+def put_workspace_manifest(tenant_id: str, thread_id: str, manifest_dict: dict) -> None:
+    """PUT workspace-manifest.json with JSON body."""
+    import json
+    client = _get_workspace_s3_client()
+    bucket = os.getenv('S3_BUCKET_NAME', 'scriba')
+    key = f"{_workspace_prefix(tenant_id, thread_id)}{WORKSPACE_MANIFEST_KEY}"
+    body = json.dumps(manifest_dict).encode('utf-8')
+    client.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=body,
+        ContentType='application/json',
+    )
+
+
+def delete_workspace_loose_objects(tenant_id: str, thread_id: str, keys: list) -> None:
+    """Delete given S3 keys (full keys) under the thread workspace. No-op if keys empty."""
+    if not keys:
+        return
+    client = _get_workspace_s3_client()
+    bucket = os.getenv('S3_BUCKET_NAME', 'scriba')
+    for key in keys:
+        try:
+            client.delete_object(Bucket=bucket, Key=key)
+        except ClientError:
+            pass

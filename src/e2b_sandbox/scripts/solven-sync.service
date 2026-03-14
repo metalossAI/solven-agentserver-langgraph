@@ -1,0 +1,15 @@
+[Unit]
+Description=Solven workspace and user-models sync daemon (rclone + watchdog)
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/solven/sync.env
+ExecStart=/usr/bin/python3 /tmp/sync_daemon.py
+Restart=always
+RestartSec=2
+StandardOutput=append:/tmp/sync_daemon.log
+StandardError=append:/tmp/sync_daemon.log
+
+[Install]
+WantedBy=multi-user.target

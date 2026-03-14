@@ -10,7 +10,7 @@ ARCHITECTURE (reliability-first: two-tier storage, explicit sync boundaries):
 - /workspaces/{thread_id} — symlink to runtime for compatibility; bwrap binds runtime as /.
 - /opt/solven/skills — shared skills (git clone at boot); rsync into runtime .solven at thread init.
 - /mnt/user — rclone mount of S3 {tenant}/users/{user_id}; templates/references from here into runtime .solven. If mount fails, fallback: rclone sync -> /var/lib/solven/users/{user_id}.
-- Persist: rsync runtime -> thread store (exclude .venv, node_modules, .bun, .git), then rclone sync thread store -> S3.
+- Persist: rsync runtime -> thread store (local checkpoint), then rclone sync thread store -> S3. When background=True, sync runs in a daemon thread so tool calls return immediately.
 - Crash recovery: on sandbox start, rm -rf /var/lib/solven/runtime/* (runtime is ephemeral).
 """
 
@@ -18,6 +18,7 @@ import base64
 import os
 import re
 import shlex
+import threading
 import asyncio
 import time as _time
 from pathlib import Path
@@ -55,7 +56,7 @@ _WORKSPACE_SEARCH_SKIP_DIRS = frozenset({
     "usr", "etc", "proc", "dev", "sys", "run", "tmp",
     "bin", "sbin", "lib", "lib64",
     "node_modules", ".venv", "venv", "env", ".bun",
-    ".git",
+    ".git", ".venv", "mnt", "usr", "etc", "proc", "dev", "sys", "run", "lib", "lib64", "bin", "sbin", "tmp", "cache",
 })
 
 # Top-level names to hide from agent in ls_info/glob_info/grep_raw (bwrap exposes /usr, /etc, etc.).
@@ -64,14 +65,51 @@ _AGENT_HIDDEN_TOPLEVEL = frozenset({
 })
 
 
+def _context_backend(ctx) -> Optional["SandboxBackend"]:
+	"""Get backend from runtime context (dict or object)."""
+	if ctx is None:
+		return None
+	if isinstance(ctx, dict):
+		return ctx.get("backend")
+	return getattr(ctx, "backend", None)
+
+
+def _context_set_backend(ctx, backend: "SandboxBackend") -> None:
+	"""Store backend in runtime context (dict or object)."""
+	if ctx is None:
+		return
+	if isinstance(ctx, dict):
+		ctx["backend"] = backend
+	else:
+		setattr(ctx, "backend", backend)
+
+
+def get_backend(runtime: ToolRuntime[AppContext]) -> "SandboxBackend":
+	"""Return the backend for this run; reuses instance from context when already configured."""
+	return SandboxBackend(runtime)
+
+
 class SandboxBackend(BaseSandbox):
 	"""
 	E2B Sandbox backend with bwrap isolation: /workspace is bound to / inside the container.
 	Paths are never rewritten; only result filtering (ls_info, glob_info, grep_raw) hides system dirs.
 	Init and sync run outside bwrap; execute (and thus read/write/edit/ls_info/glob_info/grep_raw) run inside bwrap.
+	Reuses one instance per run: runtime.context stores the backend; __new__ returns it so tool calls are fast.
 	"""
 
+	def __new__(cls, runtime: ToolRuntime[AppContext], *args, **kwargs):
+		ctx = getattr(runtime, "context", None)
+		existing = _context_backend(ctx)
+		if existing is not None and isinstance(existing, cls):
+			return existing
+		return super().__new__(cls)
+
 	def __init__(self, runtime: ToolRuntime[AppContext]):
+		# Reused instance from __new__: only refresh writer and skip full init
+		if getattr(self, "_initialized", False):
+			self._writer = get_stream_writer()
+			return
+		self._runtime = runtime
 		self._sandbox: Optional[Sandbox] = None
 		self._writer = get_stream_writer()
 
@@ -100,6 +138,7 @@ class SandboxBackend(BaseSandbox):
 		self._workspace_ready = False
 		self._initialized = False
 		self._bwrap_available: Optional[bool] = None
+		self.runtime = runtime
 
 	def _s3_envs(self) -> dict[str, str]:
 		"""S3-related env vars from host for sandbox.commands.run(..., envs=). Ensures rclone/config see credentials."""
@@ -247,15 +286,18 @@ class SandboxBackend(BaseSandbox):
 				return
 			except Exception:
 				pass  # pull failed (e.g. corrupt or detached), fall through to re-clone
-		# Remove existing dir if present (rm -rf exits 0 even when path is missing)
+		# Clone into a fresh directory then move; avoids git BUG "initial ref transaction called with existing refs"
+		# when the target path already has leftover .git/refs from a previous failed or partial clone.
+		clone_dest = f"{OPT_SOLVEN_SKILLS}.clone"
 		self._sandbox.commands.run(
-			f"rm -rf {shlex.quote(OPT_SOLVEN_SKILLS)}",
+			f"rm -rf {shlex.quote(clone_dest)} {shlex.quote(OPT_SOLVEN_SKILLS)}",
 			timeout=15, user="root",
 		)
+		self._sandbox.commands.run(f"mkdir -p {shlex.quote(os.path.dirname(OPT_SOLVEN_SKILLS))}", timeout=5, user="root")
 		try:
 			self._sandbox.git.clone(
 				SKILLS_REPO_URL,
-				path=OPT_SOLVEN_SKILLS,
+				path=clone_dest,
 				username=os.getenv("GIT_USERNAME"),
 				password=os.getenv("GIT_TOKEN"),
 				depth=1,
@@ -265,6 +307,10 @@ class SandboxBackend(BaseSandbox):
 		except Exception as e:
 			msg = getattr(e, "stderr", None) or getattr(e, "stdout", None) or str(e)
 			raise RuntimeError(f"Failed to clone skills repo into {OPT_SOLVEN_SKILLS}: {msg}") from e
+		self._sandbox.commands.run(
+			f"mv {shlex.quote(clone_dest)} {shlex.quote(OPT_SOLVEN_SKILLS)}",
+			timeout=10, user="root",
+		)
 
 	def _hydrate_thread_store(self) -> None:
 		"""Ensure thread store exists: rclone sync S3 -> /var/lib/solven/threads/{thread_id}. Only when necessary."""
@@ -423,33 +469,67 @@ class SandboxBackend(BaseSandbox):
 		self._workspace_ready = True
 		self._ensure_bwrap()
 		self._initialized = True
+		ctx = getattr(getattr(self, "runtime", None) or getattr(self, "_runtime", None), "context", None)
+		_context_set_backend(ctx, self)
 		self._writer("Espacio de trabajo listo")
 
-	def persist_workspace(self, background: bool = True) -> None:
-		"""Two-step persist: rsync runtime -> thread store (exclude env dirs), then rclone sync thread store -> S3."""
+	_PERSIST_EXCLUDES = (".venv", "node_modules", ".bun", ".git")
+
+	def _sync_runtime_to_thread_store(self) -> None:
+		"""Step 1: fast local sync from runtime workspace -> thread store (local atomic checkpoint)."""
 		if not self._sandbox or not self._workspace_ready:
 			return
 		excludes = " ".join(
-			f"--exclude {shlex.quote(d)}" for d in (".venv", "node_modules", ".bun", ".git")
+			f"--exclude {shlex.quote(d)}" for d in self._PERSIST_EXCLUDES
+		)
+		cmd = (
+			f"rsync -a --delete {excludes} "
+			f"{shlex.quote(self._runtime_workspace)}/ {shlex.quote(self._thread_store)}/"
+		)
+		try:
+			self._sandbox.commands.run(cmd, timeout=300, user="root")
+		except Exception:
+			pass
+
+	def _sync_thread_store_to_s3(self) -> None:
+		"""Step 2: reliable remote sync from thread store -> S3."""
+		if not self._sandbox or not self._workspace_ready:
+			return
+		excludes = " ".join(
+			f"--exclude {shlex.quote(d)}" for d in self._PERSIST_EXCLUDES
+		)
+		bucket = (os.getenv("S3_BUCKET_NAME") or "solven-testing").strip()
+		remote = f"s3remote:{bucket}/{self._tenant_id}/threads/{self._thread_id}"
+		cmd = (
+			f"rclone sync --config /root/.config/rclone/rclone.conf "
+			f"--fast-list --transfers 8 --no-update-modtime {excludes} "
+			f"{shlex.quote(self._thread_store)}/ {shlex.quote(remote)}/"
 		)
 		try:
 			self._sandbox.commands.run(
-				f"rsync -a --delete {excludes} "
-				f"{shlex.quote(self._runtime_workspace)}/ {shlex.quote(self._thread_store)}/",
-				timeout=300, user="root",
-			)
-		except Exception:
-			return
-		bucket = (os.getenv("S3_BUCKET_NAME") or "solven-testing").strip()
-		remote = f"s3remote:{bucket}/{self._tenant_id}/threads/{self._thread_id}"
-		try:
-			self._sandbox.commands.run(
-				f"rclone sync --config /root/.config/rclone/rclone.conf "
-				f"{shlex.quote(self._thread_store)}/ {shlex.quote(remote)}/",
-				timeout=300, user="root", envs=self._s3_envs(),
+				cmd,
+				timeout=300,
+				user="root",
+				envs=self._s3_envs(),
 			)
 		except Exception:
 			pass
+
+	def _do_persist(self) -> None:
+		"""Two-step persist: runtime -> thread store (local checkpoint), then thread store -> S3. Runs in caller or background thread."""
+		if not self._sandbox or not self._workspace_ready:
+			return
+		self._sync_runtime_to_thread_store()
+		self._sync_thread_store_to_s3()
+
+	def persist_workspace(self, background: bool = True) -> None:
+		"""Persist workspace reliably: runtime -> thread store -> S3. When background=True, runs in a daemon thread so the caller returns immediately."""
+		if not self._sandbox or not self._workspace_ready:
+			return
+		if background:
+			threading.Thread(target=self._do_persist, daemon=True).start()
+			return
+		self._do_persist()
 
 	def _upload_mount_scripts(self) -> None:
 		"""Upload rclone mount scripts: write to /root then copy to /tmp (avoids E2B/shell redirect issues with /tmp)."""

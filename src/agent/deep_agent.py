@@ -20,7 +20,7 @@ from langchain.agents import create_agent
 from deepagents.middleware import FilesystemMiddleware, SubAgentMiddleware, SummarizationMiddleware
 from langchain.agents.middleware import TodoListMiddleware
 
-from src.sandbox_backend import SandboxBackend
+from src.sandbox_backend import SandboxBackend, get_backend
 
  
 from langgraph.runtime import Runtime
@@ -170,7 +170,8 @@ async def initialize_sandbox(state: AgentState, runtime: Runtime[AppContext]):
 				ctx.workspace_id = thread_id
 		backend = SandboxBackend(runtime)
 		await asyncio.to_thread(backend._ensure_initialized)
-		
+		if getattr(runtime, "context", None) is not None and not isinstance(runtime.context, dict):
+			runtime.context.backend = backend
 	except Exception as e:
 		print(f"[initialize_sandbox] ✗ Error initializing sandbox: {e}", flush=True)
 		import traceback
@@ -286,7 +287,7 @@ oficial_notarial = SubAgent(
     middleware=[
         official_notarial_prompt,
         SkillsMiddleware(
-            backend=SandboxBackend,
+            backend=get_backend,
             sources=[USER_SKILLS_PATH],
         ),
     ],
@@ -299,7 +300,7 @@ graph = create_deep_agent(
     ),
     system_prompt="",
     tools=[load_skill],
-    backend=lambda rt: SandboxBackend(rt),
+    backend=SandboxBackend,
     subagents=[
         oficial_notarial,
         gmail_subagent,
@@ -325,13 +326,13 @@ gp_middleware: list[AgentMiddleware] = [
     initialize_sandbox,
     OpenRouterContentMiddleware(),
     TodoListMiddleware(),
-    FilesystemMiddleware(backend=SandboxBackend),
+    FilesystemMiddleware(backend=get_backend),
     SummarizationMiddleware(
             model=ChatOpenRouter(
                 model="x-ai/grok-4.1-fast",
                 api_key=os.getenv("OPENROUTER_API_KEY"),
             ),
-            backend=SandboxBackend,
+            backend=get_backend,
             trigger=("fraction", 0.85),
             trim_tokens_to_summarize=None,
             truncate_args_settings=None,
@@ -355,14 +356,14 @@ agent = create_agent(
         OpenRouterContentMiddleware(),
         ToolEnforcementMiddleware(),
         FilesystemMiddleware(
-            backend=SandboxBackend,
+            backend=get_backend,
         ),
         ModelFallbackMiddleware(
             ChatOpenRouter(model="x-ai/grok-4.1-fast",api_key=os.getenv("OPENROUTER_API_KEY")),
 
         ),
         SubAgentMiddleware(
-            backend=SandboxBackend,
+            backend=get_backend,
             subagents=[
                 SubAgent(
                     name="editor_docx",
@@ -380,7 +381,7 @@ agent = create_agent(
                         official_notarial_prompt,
                         *gp_middleware,
                         SkillsMiddleware(
-                            backend=SandboxBackend,
+                            backend=get_backend,
                             sources=[USER_SKILLS_PATH],
                             exclude_skills=["escrituras"],
                         ),
@@ -402,7 +403,7 @@ agent = create_agent(
                         official_notarial_prompt,
                         *gp_middleware,
                         SkillsMiddleware(
-                            backend=SandboxBackend,
+                            backend=get_backend,
                             sources=[USER_SKILLS_PATH],
                             exclude_skills=["docx"],
                         ),
@@ -432,7 +433,7 @@ agent = create_agent(
                 model="x-ai/grok-4.1-fast",
                 api_key=os.getenv("OPENROUTER_API_KEY"),
             ),
-            backend=SandboxBackend,
+            backend=get_backend,
             trigger=("fraction", 0.85),
             trim_tokens_to_summarize=None,
             truncate_args_settings=None,

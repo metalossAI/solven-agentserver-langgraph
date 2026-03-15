@@ -18,8 +18,8 @@ async def load_skill(
 		path: La ruta del skill
 	"""
 	backend = get_backend(runtime)
-	responses : list[FileDownloadResponse] = await backend.adownload_files([path])
-	if responses:
+	responses: list[FileDownloadResponse] = await backend.adownload_files([path])
+	if responses and responses[0].content is not None:
 		print(f"Cargada la habilidad {path}")
 		return ToolMessage(
 			content=responses[0].content.decode("utf-8"),
@@ -28,6 +28,7 @@ async def load_skill(
 			name="load_skill",
 		)
 	else:
-		return ToolMessage(content="Error: No se pudo cargar la habilidad", status="error", tool_call_id=runtime.tool_call_id)
+		reason = "archivo vacío o no se pudo leer" if responses else "archivo no encontrado"
+		return ToolMessage(content=f"Error: No se pudo cargar la habilidad ({reason}): {path}", status="error", tool_call_id=runtime.tool_call_id)
 
 

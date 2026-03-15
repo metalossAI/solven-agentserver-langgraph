@@ -47,7 +47,7 @@ from typing import Callable, Awaitable
 # Import email tools
 from src.agent_email.gmail_tools import gmail_tools, gmail_send_email
 from src.agent_email.outlook_tools import outlook_tools
-from src.agent.custom_skills_middleware import SkillsMiddleware
+from src.agent.middleware import SkillsMiddleware
 from src.utils.openrouter import OpenRouterContentMiddleware
 
 

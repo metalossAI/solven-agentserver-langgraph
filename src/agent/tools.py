@@ -29,6 +29,6 @@ async def load_skill(
 		)
 	else:
 		reason = "archivo vacío o no se pudo leer" if responses else "archivo no encontrado"
-		return ToolMessage(content=f"Error: No se pudo cargar la habilidad ({reason}): {path}", status="error", tool_call_id=runtime.tool_call_id)
+		return ToolMessage(name="load_skill", content=f"Error: No se pudo cargar la habilidad ({reason}): {path}", status="error", tool_call_id=runtime.tool_call_id)
 
 

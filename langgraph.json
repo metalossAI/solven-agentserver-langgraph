@@ -2,16 +2,10 @@
   "$schema": "https://langgra.ph/schema.json",
   "dependencies": ["."],
   "graphs": {
-    "solven": "./src/agent/deep_agent.py:agent",
+    "solven": "./src/agent/deep_agent.py:graph",
     "ticket_triage": "./src/agent_triage/agent.py:graph",
     "customer_chat": "./src/agent_customer_chat/deep_agent.py:graph"
   },
   "env": ".env",
-  "image_distro": "wolfi",
-  "http": {
-    "configurable_headers": {
-      "includes": ["x-user-id", "x-user-name", "x-user-email", "x-user-role", "x-company-id"],
-      "excludes": ["authorization", "x-api-key"]
-    }
-  }
+  "image_distro": "wolfi"
 }

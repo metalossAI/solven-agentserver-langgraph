@@ -289,20 +289,20 @@ oficial_notarial = SubAgent(
         SkillsMiddleware(
             backend=get_backend,
             sources=[USER_SKILLS_PATH],
+            exclude_skills=["docx"],
         ),
     ],
 )
 
 graph = create_deep_agent(
     model=ChatOpenRouter(
-        model="x-ai/grok-4.1-fast",
+        model="google/gemini-3-flash-preview",
         api_key=os.getenv("OPENROUTER_API_KEY"),
     ),
     system_prompt="",
     tools=[load_skill],
     backend=SandboxBackend,
     subagents=[
-        oficial_notarial,
         gmail_subagent,
         outlook_subagent,
         catastro_subagent,
@@ -313,10 +313,17 @@ graph = create_deep_agent(
     middleware=[
         initialize_sandbox,
         main_prompt,
+        ModelFallbackMiddleware(
+            ChatOpenRouter(
+                model="x-ai/grok-4.1-fast",
+                api_key=os.getenv("OPENROUTER_API_KEY")
+            ),
+        ),
+        SkillsMiddleware(
+            backend=get_backend,
+            sources=[USER_SKILLS_PATH],
+        ),
         OpenRouterContentMiddleware(),
-    ],
-    skills=[
-        USER_SKILLS_PATH,
     ],
     context_schema=AppContext,
 )

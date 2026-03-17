@@ -2,15 +2,16 @@
 E2B Sandbox backend for DeepAgents using S3.
 Implements the BackendProtocol for filesystem operations in an isolated sandbox environment.
 
-ARCHITECTURE (rclone mount workspace):
-=====================================
+ARCHITECTURE:
+=============
 - One E2B sandbox per user; lifecycle: on_timeout=pause, auto_resume=true.
-- /workspaces/{thread_id}/project/ — rclone mount of S3 tenant/threads/{thread_id}/ (VFS write-back, auto-sync).
-- /workspaces/{thread_id}/.solven/skills/ — local copy (rsync from /opt/solven/skills) + user models (rclone copy from S3).
+- /workspaces/{thread_id}/  — workspace root; bound to / in bwrap (no .solven in workspace).
+- /opt/solven/skills/  — system-level git clone; bound to /.solven/skills in bwrap (shared by all threads).
+- /opt/solven/user-models/{templates,references}/  — rclone copy from S3; bound into /.solven/skills/escrituras in bwrap.
 - /workspaces/{thread_id}/.venv/, node_modules/ — local (uv sync, bun install); set up once, survive pause.
-- bwrap binds project/ -> /, .solven -> /.solven, .venv -> /.venv, node_modules -> /node_modules.
-- Persist: user models only (rclone copy .solven/escrituras -> S3); project files auto-sync via rclone VFS.
-- Init is idempotent: check-before-do so resume is fast (mountpoint -q, SKILL.md, .venv/bin/python).
+- bwrap: workspace/ -> /  |  --dir /.solven  |  /opt/solven/skills -> /.solven/skills  |  user-models sub-binds  |  .venv, node_modules.
+- Persist: rclone sync workspace/ -> S3:threads/{id}/ + rclone copy user-models -> S3:users/{id}/models/.
+- Init is idempotent: hydrate workspace, ensure skills repo, pull user models, install envs; resume re-pulls user models only.
 """
 
 import base64
@@ -45,6 +46,8 @@ SKILLS_REPO_URL = "https://github.com/metalossAI/solven-skills.git"
 
 SOLVEN_LOCKS = "/var/lib/solven/locks"  # Per-thread persist locks (flock)
 OPT_SOLVEN_SKILLS = "/opt/solven/skills"
+OPT_SOLVEN_USER_MODELS = "/opt/solven/user-models"
+OPT_SOLVEN_USER_MODELS_NORMALIZED = "/opt/solven/user-models/templates_normalized"  # Writable; syncs to S3 templates/normalized/
 WORKSPACES = "/workspaces"
 RCLONE_CACHE_BASE = "/tmp/rclone-cache"
 
@@ -128,8 +131,7 @@ class SandboxBackend(BaseSandbox):
 		self._tenant_id = user.company_id
 
 		self._workspace = f"{WORKSPACES}/{self._thread_id}"
-		self._project = f"{self._workspace}/project"
-		self._solven = f"{self._workspace}/.solven"
+		# workspace IS the agent root; /.solven is bwrap-virtual, backed by /opt/solven/skills + user-models
 		self._venv = f"{self._workspace}/.venv"
 		self._node_modules = f"{self._workspace}/node_modules"
 
@@ -153,32 +155,22 @@ class SandboxBackend(BaseSandbox):
 
 	def _resolve_workspace_path(self, path: str) -> str:
 		"""
-		Resolve agent-visible path to real path. Agent / = project (S3 mount); /.solven/* = workspace .solven.
+		Resolve agent-visible path to real path. Agent / = workspace root.
 		Normalizes and constrains so '..' cannot escape.
 		"""
 		if not path or path.strip() in ("", "/"):
-			return self._project
+			return self._workspace
 		p = path.strip().replace("\\", "/").lstrip("/")
-		if p.startswith(".solven/"):
-			base = self._workspace
-			resolved = os.path.normpath(f"{base}/{p}")
-			if not resolved.startswith(self._solven):
-				return self._project
-		else:
-			base = self._project
-			resolved = os.path.normpath(f"{base}/{p}")
-			if not resolved.startswith(self._project):
-				return self._project
+		resolved = os.path.normpath(f"{self._workspace}/{p}")
+		if not resolved.startswith(self._workspace):
+			return self._workspace
 		return resolved
 
 	def _to_agent_path(self, real_path: str) -> str:
-		"""Convert real path under project or .solven to agent-visible path (where / = project root)."""
-		if real_path.startswith(self._project):
-			suffix = real_path[len(self._project):].lstrip("/")
+		"""Convert real path under workspace to agent-visible path (where / = workspace root)."""
+		if real_path.startswith(self._workspace):
+			suffix = real_path[len(self._workspace):].lstrip("/")
 			return f"/{suffix}" if suffix else "/"
-		if real_path.startswith(self._solven):
-			suffix = real_path[len(self._solven):].lstrip("/")
-			return f"/.solven/{suffix}" if suffix else "/.solven"
 		return real_path
 
 	def _is_workspace_path(self, agent_path: str) -> bool:
@@ -266,103 +258,54 @@ class SandboxBackend(BaseSandbox):
 		_user_sandbox_cache[user_key] = self._sandbox.sandbox_id
 
 	def _ensure_boot_dirs(self) -> None:
-		"""Create layout (idempotent): workspace, project, .solven, .venv, node_modules, locks, skills, rclone cache."""
+		"""Create layout (idempotent): workspace, .venv, node_modules, /opt/solven/skills, user-models, locks, rclone cache."""
 		cache_dir = f"{RCLONE_CACHE_BASE}/{self._thread_id}"
 		self._sandbox.commands.run(
-			f"mkdir -p {shlex.quote(self._workspace)} {shlex.quote(self._project)} {shlex.quote(self._solven)} "
-			f"{shlex.quote(self._venv)} {shlex.quote(self._node_modules)} "
-			f"{shlex.quote(SOLVEN_LOCKS)} {shlex.quote(OPT_SOLVEN_SKILLS)} {shlex.quote(RCLONE_CACHE_BASE)} {shlex.quote(cache_dir)} "
+			f"mkdir -p {shlex.quote(self._workspace)} {shlex.quote(self._venv)} {shlex.quote(self._node_modules)} "
+			f"{shlex.quote(OPT_SOLVEN_SKILLS)} "
+			f"{OPT_SOLVEN_USER_MODELS}/templates {OPT_SOLVEN_USER_MODELS}/references "
+			# templates/normalized: stub inside the ro-bind source so bwrap can overlay it without mkdir-ing into ro fs
+			f"{OPT_SOLVEN_USER_MODELS}/templates/normalized {shlex.quote(OPT_SOLVEN_USER_MODELS_NORMALIZED)} "
+			f"{shlex.quote(SOLVEN_LOCKS)} {shlex.quote(RCLONE_CACHE_BASE)} {shlex.quote(cache_dir)} "
 			f"/root/.config/rclone",
 			timeout=10, user="root",
 		)
 
-	def _cleanup_ghost_mounts(self) -> None:
-		"""Lazy-unmount any leftover bind mounts from old overlayfs sessions (transition safety)."""
-		try:
-			self._sandbox.commands.run(
-				"awk '$2 ~ \"^/var/lib/solven/runtime\" {print $2}' /proc/mounts | sort -r | xargs -r -I{} umount -l {} 2>/dev/null || true",
-				timeout=15, user="root",
-			)
-			self._sandbox.commands.run(
-				"mountpoint -q /opt/solven/skills && umount -l /opt/solven/skills 2>/dev/null || true",
-				timeout=5, user="root",
-			)
-		except Exception as e:
-			logging.warning("_cleanup_ghost_mounts: %s", e)
-
-	def _mount_project(self) -> None:
-		"""Mount S3 thread path at project/. Idempotent: skip if already mounted and responsive. If broken, lazy-umount then mount."""
+	def _hydrate_from_s3(self) -> None:
+		"""Pull latest thread workspace from S3 into workspace/. Idempotent rclone sync. Excludes .solven, .venv, node_modules (local-only; populated separately)."""
 		bucket = (os.getenv("S3_BUCKET_NAME") or "solven-testing").strip()
 		remote = f"s3remote:{bucket}/{self._tenant_id}/threads/{self._thread_id}"
-		proj = shlex.quote(self._project)
-		cache_dir = shlex.quote(f"{RCLONE_CACHE_BASE}/{self._thread_id}")
-		# Already mounted and responsive -> skip (E2B raises on non-zero, so catch and treat as "not mounted")
-		try:
-			r = self._sandbox.commands.run(
-				f"mountpoint -q {proj}/ && ls {proj}/ >/dev/null 2>&1",
-				timeout=5, user="root",
-			)
-			if r.exit_code == 0:
-				return
-		except CommandExitException:
-			pass  # not mounted or ls failed (e.g. exit 32) -> continue to umount and mount
-		# Broken or not mounted: lazy-umount if it was a mount point (ignore non-zero)
-		try:
-			self._sandbox.commands.run(f"umount -l {proj}/ 2>/dev/null || true", timeout=10, user="root")
-		except CommandExitException:
-			pass
-		# rclone mount requires an empty directory (exit 32 if not). When not a mount point, wipe and recreate.
-		# E2B can raise CommandExitException for mountpoint -q (e.g. exit 32); treat as "not a mount point".
-		try:
-			r_mountpoint = self._sandbox.commands.run(f"mountpoint -q {proj}/", timeout=5, user="root")
-			is_mount = r_mountpoint.exit_code == 0
-		except CommandExitException:
-			is_mount = False
-		if not is_mount:
-			try:
-				self._sandbox.commands.run(f"rm -rf {proj}", timeout=15, user="root")
-				self._sandbox.commands.run(f"mkdir -p {proj}", timeout=5, user="root")
-			except CommandExitException as e:
-				logging.warning("_mount_project ensure empty dir: %s", e)
-		# Mount with VFS full cache and write-back; dir-cache-time 0 so listings always hit S3 (no RC in E2B daemon)
+		excludes = "--exclude '.solven/**' --exclude '.venv/**' --exclude 'node_modules/**' --exclude '.bun/**' --exclude '.git/**'"
 		cmd = (
-			f"rclone mount {remote}/ {proj}/ "
+			f"rclone sync {shlex.quote(remote)}/ {shlex.quote(self._workspace)}/ "
 			f"--config /root/.config/rclone/rclone.conf "
-			f"--vfs-cache-mode full --vfs-write-back 5s --vfs-cache-max-size 2G "
-			f"--dir-cache-time 0 --poll-interval 5s "
-			f"--cache-dir {cache_dir} --daemon --allow-other --no-checksum --no-update-modtime"
+			f"--fast-list --transfers 4 --no-update-modtime {excludes} "
+			f"2>/dev/null || true"
 		)
 		try:
-			self._sandbox.commands.run(cmd, timeout=30, user="root", envs=self._s3_envs())
-		except CommandExitException as e:
-			# exit 32 = directory not empty; force empty and retry once
-			if getattr(e, "exit_code", None) == 32:
-				self._sandbox.commands.run(f"umount -l {proj}/ 2>/dev/null || true", timeout=10, user="root")
-				self._sandbox.commands.run(f"rm -rf {proj}", timeout=15, user="root")
-				self._sandbox.commands.run(f"mkdir -p {proj}", timeout=5, user="root")
-				self._sandbox.commands.run(cmd, timeout=30, user="root", envs=self._s3_envs())
-			else:
-				raise
-		# Wait up to 10s for mount to become responsive
-		for _ in range(10):
-			_time.sleep(1)
-			try:
-				r = self._sandbox.commands.run(f"ls {proj}/ >/dev/null 2>&1", timeout=5, user="root")
-				if r.exit_code == 0:
-					return
-			except CommandExitException:
-				pass
-		raise RuntimeError("rclone mount did not become responsive within 10s")
+			self._sandbox.commands.run(cmd, timeout=120, user="root", envs=self._s3_envs())
+		except Exception as e:
+			logging.warning("_hydrate_from_s3: %s", e)
+
+	def _ensure_skills_mount_dirs(self) -> None:
+		"""Ensure bwrap mount-point dirs exist inside /opt/solven/skills (for user-models sub-binds)."""
+		try:
+			self._sandbox.commands.run(
+				f"mkdir -p {OPT_SOLVEN_SKILLS}/escrituras/assets/templates "
+				f"{OPT_SOLVEN_SKILLS}/escrituras/references 2>/dev/null || true",
+				timeout=10, user="root",
+			)
+		except Exception as e:
+			logging.warning("_ensure_skills_mount_dirs: %s", e)
 
 	def _ensure_skills_repo(self) -> None:
-		"""Ensure /opt/solven/skills has the skills git clone. Update in-place (pull or fetch+reset) when the repo already exists — never delete it while it may be bind-mounted. Fresh clone only when .git/HEAD is absent."""
-		# Avoid "dubious ownership" when repo dir is owned by different user (e.g. template vs root)
+		"""Ensure /opt/solven/skills has the skills git clone. Update in-place (pull or fetch+reset) when repo exists. Fresh clone directly into path (no temp dir)."""
 		self._sandbox.commands.run(
 			f"git config --global --add safe.directory {shlex.quote(OPT_SOLVEN_SKILLS)} 2>/dev/null || true",
 			timeout=5, user="root",
 		)
 		if self._sandbox.files.exists(f"{OPT_SOLVEN_SKILLS}/.git/HEAD"):
-			# Repo exists (survives sandbox pause/resume). Try to update in-place; never rm -rf while bind-mounted.
+			# Repo exists. Try to update in-place.
 			try:
 				self._sandbox.git.pull(
 					path=OPT_SOLVEN_SKILLS,
@@ -371,10 +314,10 @@ class SandboxBackend(BaseSandbox):
 					user="root",
 					timeout=60,
 				)
+				self._ensure_skills_mount_dirs()
 				return
 			except Exception as e:
 				logging.warning("_ensure_skills_repo git pull: %s", e)
-			# pull failed (detached HEAD, diverged, etc.): fetch + hard reset in-place
 			try:
 				token = os.getenv("GIT_TOKEN") or ""
 				username_git = os.getenv("GIT_USERNAME") or ""
@@ -386,23 +329,22 @@ class SandboxBackend(BaseSandbox):
 					timeout=60, user="root",
 				)
 				if r.exit_code == 0:
+					self._ensure_skills_mount_dirs()
 					return
 			except Exception as e:
 				logging.warning("_ensure_skills_repo fetch+reset: %s", e)
-			# Repo exists but can't update — leave as-is (stale content is still usable)
 			return
 
-		# No repo at all: fresh clone into a temp dir then move
-		clone_dest = f"{OPT_SOLVEN_SKILLS}.clone"
+		# No repo: remove existing dir and clone directly into OPT_SOLVEN_SKILLS (no temp dir).
 		self._sandbox.commands.run(
-			f"rm -rf {shlex.quote(clone_dest)}",
+			f"rm -rf {shlex.quote(OPT_SOLVEN_SKILLS)}",
 			timeout=15, user="root",
 		)
 		self._sandbox.commands.run(f"mkdir -p {shlex.quote(os.path.dirname(OPT_SOLVEN_SKILLS))}", timeout=5, user="root")
 		try:
 			self._sandbox.git.clone(
 				SKILLS_REPO_URL,
-				path=clone_dest,
+				path=OPT_SOLVEN_SKILLS,
 				username=os.getenv("GIT_USERNAME"),
 				password=os.getenv("GIT_TOKEN"),
 				depth=1,
@@ -412,59 +354,36 @@ class SandboxBackend(BaseSandbox):
 		except Exception as e:
 			msg = getattr(e, "stderr", None) or getattr(e, "stdout", None) or str(e)
 			raise RuntimeError(f"Failed to clone skills repo into {OPT_SOLVEN_SKILLS}: {msg}") from e
-		self._sandbox.commands.run(
-			f"mv {shlex.quote(clone_dest)} {shlex.quote(OPT_SOLVEN_SKILLS)}",
-			timeout=10, user="root",
-		)
+		self._ensure_skills_mount_dirs()
 
-	def _sync_user_models_down(self) -> None:
-		"""Copy user models from S3 into workspace .solven/skills/escrituras (templates, references)."""
+	def _pull_user_models(self) -> None:
+		"""Copy user-specific templates, templates/normalized, and references from S3:users/{id}/models/ into /opt/solven/user-models. Fast; idempotent."""
 		bucket = (os.getenv("S3_BUCKET_NAME") or "solven-testing").strip()
-		user_id_str = str(self._user_id).strip()
-		s3_base = f"s3remote:{bucket}/{self._tenant_id}/users/{user_id_str}"
-		escrituras = f"{self._solven}/skills/escrituras"
-		templates_dst = f"{escrituras}/assets/templates"
-		references_dst = f"{escrituras}/references"
-		self._sandbox.commands.run(
-			f"mkdir -p {shlex.quote(templates_dst)} {shlex.quote(references_dst)}",
-			timeout=10, user="root",
-		)
-		rclone = "rclone copy --config /root/.config/rclone/rclone.conf --fast-list --transfers 4 --no-update-modtime"
-		for remote_sub, local_dst in [
-			(f"{s3_base}/models/templates", templates_dst),
-			(f"{s3_base}/models/references", references_dst),
+		s3_user_base = f"s3remote:{bucket}/{self._tenant_id}/users/{self._user_id}/models"
+		templates_dst = f"{OPT_SOLVEN_USER_MODELS}/templates"
+		references_dst = f"{OPT_SOLVEN_USER_MODELS}/references"
+		cfg = "--config /root/.config/rclone/rclone.conf --fast-list --transfers 4 --no-update-modtime"
+		try:
+			self._sandbox.commands.run(
+				# templates/normalized stub must live inside templates/ so bwrap can overlay it without touching the ro-bind filesystem
+				f"mkdir -p {shlex.quote(templates_dst)} {shlex.quote(references_dst)} "
+				f"{OPT_SOLVEN_USER_MODELS}/templates/normalized {shlex.quote(OPT_SOLVEN_USER_MODELS_NORMALIZED)}",
+				timeout=10, user="root",
+			)
+		except Exception as e:
+			logging.warning("_pull_user_models mkdir: %s", e)
+		for src, dst in [
+			(f"{s3_user_base}/templates", templates_dst),
+			(f"{s3_user_base}/references", references_dst),
+			(f"{s3_user_base}/templates/normalized", OPT_SOLVEN_USER_MODELS_NORMALIZED),
 		]:
 			try:
 				self._sandbox.commands.run(
-					f"{rclone} {shlex.quote(remote_sub)}/ {shlex.quote(local_dst)}/ 2>/dev/null || true",
-					timeout=120, user="root", envs=self._s3_envs(),
+					f"rclone copy {shlex.quote(src)}/ {shlex.quote(dst)}/ {cfg} 2>/dev/null || true",
+					timeout=60, user="root", envs=self._s3_envs(),
 				)
 			except Exception as e:
-				logging.warning("_sync_user_models_down %s -> %s: %s", remote_sub, local_dst, e)
-
-	def _populate_solven(self) -> None:
-		"""Materialize .solven/skills: rsync from /opt/solven/skills; user models via rclone copy from S3. Skip rsync if SKILL.md present (resume)."""
-		solven_skills = f"{self._solven}/skills"
-		self._sandbox.commands.run(f"mkdir -p {shlex.quote(solven_skills)}", timeout=10, user="root")
-		skill_marker = f"{solven_skills}/escrituras/SKILL.md"
-		try:
-			if self._sandbox.files.exists(skill_marker):
-				self._sync_user_models_down()
-				self._sandbox.commands.run(f"chown -R user:user {shlex.quote(self._solven)} 2>/dev/null || true", timeout=30, user="root")
-				return
-		except Exception as e:
-			logging.warning("_populate_solven skip-check: %s", e)
-		try:
-			r = self._sandbox.commands.run(
-				f"rsync -a {shlex.quote(OPT_SOLVEN_SKILLS)}/ {shlex.quote(solven_skills)}/",
-				timeout=120, user="root",
-			)
-			if r.exit_code != 0:
-				logging.warning("_populate_solven skills rsync exit %s: %s", r.exit_code, (r.stderr or r.stdout or "")[:200])
-		except Exception as e:
-			logging.warning("_populate_solven skills rsync: %s", e)
-		self._sync_user_models_down()
-		self._sandbox.commands.run(f"chown -R user:user {shlex.quote(self._solven)} 2>/dev/null || true", timeout=30, user="root")
+				logging.warning("_pull_user_models copy %s: %s", src, e)
 
 	def _ensure_thread_env(self) -> None:
 		"""Create .venv and node_modules inside workspace only when missing. Excluded from rclone sync."""
@@ -511,27 +430,17 @@ class SandboxBackend(BaseSandbox):
 			logging.warning("_ensure_thread_env bun install: %s", e)
 
 	def _ensure_workspace_ready(self) -> None:
-		"""Lightweight health check: if project mount dead, remount; if SKILL.md absent, repopulate .solven."""
+		"""Lightweight health check on resume: ensure skills repo present, then re-pull user models."""
 		if not self._sandbox or not getattr(self, "_workspace_ready", False):
 			return
 		try:
-			r = self._sandbox.commands.run(
-				f"mountpoint -q {shlex.quote(self._project)}/ && ls {shlex.quote(self._project)}/ >/dev/null 2>&1",
-				timeout=5, user="root",
-			)
-			if r.exit_code != 0:
-				self._mount_project()
-		except (CommandExitException, Exception) as e:
-			logging.warning("_ensure_workspace_ready mount check: %s", e)
-		try:
-			skill_marker = f"{self._solven}/skills/escrituras/SKILL.md"
-			if not self._sandbox.files.exists(skill_marker):
-				self._populate_solven()
+			if self._sandbox.files.exists(f"{OPT_SOLVEN_SKILLS}/.git/HEAD"):
+				self._pull_user_models()
 		except Exception as e:
-			logging.warning("_ensure_workspace_ready skills repopulate: %s", e)
+			logging.warning("_ensure_workspace_ready: %s", e)
 
 	def _ensure_initialized(self) -> None:
-		"""Ensure sandbox and thread workspace are initialized (idempotent). Steps: ghost cleanup -> sandbox -> mkdir -> rclone -> mount -> skills -> .solven -> env -> chown -> liveness."""
+		"""Ensure sandbox and thread workspace are initialized (idempotent). Steps: sandbox -> mkdir -> rclone -> hydrate -> skills -> user-models -> env -> chown."""
 		if self._initialized:
 			self._ensure_workspace_ready()
 			return
@@ -540,49 +449,32 @@ class SandboxBackend(BaseSandbox):
 		self._get_or_create_user_sandbox()
 		logging.info("Preparando espacio de trabajo...")
 
-		# 2. Lazy-unmount legacy bind mounts (transition safety; requires _sandbox)
-		self._cleanup_ghost_mounts()
-
-		# 3. Boot layout (dirs); rclone config
+		# 2. Boot layout (dirs); rclone config
 		self._ensure_boot_dirs()
 		self._configure_rclone()
 
-		# 4. Mount project (S3 -> project/ via rclone mount; idempotent)
-		self._mount_project()
+		# 3. Hydrate project from S3 (rclone sync; local project/ no FUSE)
+		self._hydrate_from_s3()
 
-		# 5. Ensure shared skills repo (clone if missing/broken)
+		# 4. Ensure shared skills repo (clone if missing/broken)
 		self._ensure_skills_repo()
 
-		# 6. Populate .solven (skills + user models; idempotent)
-		self._populate_solven()
+		# 5. Pull user templates/references from S3 into /opt/solven/user-models
+		self._pull_user_models()
 
-		# 7. Per-thread env (.venv, node_modules)
+		# 6. Per-thread env (.venv, node_modules)
 		try:
 			self._ensure_thread_env()
 		except Exception as e:
 			logging.warning("_ensure_thread_env at init: %s", e)
 
-		# 8. chown workspace
+		# 7. chown workspace
 		self._sandbox.commands.run(f"chown -R user:user {shlex.quote(self._workspace)}", timeout=60, user="root")
 
-		# 9. Liveness: project mount responsive
+		# 9. Verify skills populated; warn if empty
 		try:
-			r = self._sandbox.commands.run(
-				f"mountpoint -q {shlex.quote(self._project)}/ && ls {shlex.quote(self._project)}/ >/dev/null 2>&1",
-				timeout=5, user="root",
-			)
-			alive = r.exit_code == 0
-		except Exception as e:
-			logging.warning("liveness check mount: %s", e)
-			alive = False
-		if not alive:
-			raise RuntimeError("Sandbox project mount missing or unresponsive after init")
-
-		# 10. Verify skills populated; warn if empty
-		try:
-			skill_marker = f"{self._solven}/skills/escrituras/SKILL.md"
-			if not self._sandbox.files.exists(skill_marker):
-				logging.warning(".solven/skills/escrituras/SKILL.md not found after init — skills may be unavailable")
+			if not self._sandbox.files.exists(f"{OPT_SOLVEN_SKILLS}/escrituras/SKILL.md"):
+				logging.warning("%s/escrituras/SKILL.md not found after init — skills may be unavailable", OPT_SOLVEN_SKILLS)
 		except Exception as e:
 			logging.warning("skills marker check after init: %s", e)
 
@@ -594,22 +486,32 @@ class SandboxBackend(BaseSandbox):
 		logging.info("Espacio de trabajo listo")
 
 	def _persist_shell_cmd(self) -> str:
-		"""Build persist as single shell command: user models only (rclone copy .solven/escrituras -> S3). Project files auto-sync via rclone VFS. Serialized per thread via flock."""
+		"""Build persist as single shell command (serialized per thread via flock):
+		1. rclone sync workspace/ -> S3:threads/{id}/ (excluding .solven/.venv/node_modules/etc.)
+		2. rclone copy user templates -> S3:users/{id}/models/templates/
+		3. rclone copy user templates_normalized -> S3:users/{id}/models/templates/normalized/
+		4. rclone copy user references -> S3:users/{id}/models/references/
+		"""
 		persist_lock = f"{SOLVEN_LOCKS}/{self._thread_id}.persist.lock"
 		bucket = (os.getenv("S3_BUCKET_NAME") or "solven-testing").strip()
-		user_id_str = str(self._user_id).strip()
-		remote_templates = f"s3remote:{bucket}/{self._tenant_id}/users/{user_id_str}/models/templates"
-		remote_references = f"s3remote:{bucket}/{self._tenant_id}/users/{user_id_str}/models/references"
-		escrituras = f"{self._solven}/skills/escrituras"
-		rclone = "rclone copy --config /root/.config/rclone/rclone.conf --fast-list --transfers 4 --no-update-modtime"
-		inner = (
-			f"{rclone} {shlex.quote(escrituras)}/assets/templates/ {shlex.quote(remote_templates)}/ 2>/dev/null || true && "
-			f"{rclone} {shlex.quote(escrituras)}/references/ {shlex.quote(remote_references)}/ 2>/dev/null || true"
-		)
+		threads_remote = f"s3remote:{bucket}/{self._tenant_id}/threads/{self._thread_id}"
+		s3_user_base = f"s3remote:{bucket}/{self._tenant_id}/users/{self._user_id}/models"
+		excludes = "--exclude '.solven/**' --exclude '.venv/**' --exclude 'node_modules/**' --exclude '.bun/**' --exclude '.git/**'"
+		cfg = "--config /root/.config/rclone/rclone.conf --fast-list --transfers 4 --no-update-modtime"
+
+		templates_src = f"{OPT_SOLVEN_USER_MODELS}/templates"
+		references_src = f"{OPT_SOLVEN_USER_MODELS}/references"
+
+		sync_project = f"rclone sync {cfg} {excludes} {shlex.quote(self._workspace)}/ {shlex.quote(threads_remote)}/ 2>/dev/null || true"
+		copy_templates = f"rclone copy {cfg} {shlex.quote(templates_src)}/ {shlex.quote(s3_user_base + '/templates')}/ 2>/dev/null || true"
+		copy_normalized = f"rclone copy {cfg} {shlex.quote(OPT_SOLVEN_USER_MODELS_NORMALIZED)}/ {shlex.quote(s3_user_base + '/templates/normalized')}/ 2>/dev/null || true"
+		copy_references = f"rclone copy {cfg} {shlex.quote(references_src)}/ {shlex.quote(s3_user_base + '/references')}/ 2>/dev/null || true"
+
+		inner = f"{sync_project} && {copy_templates} && {copy_normalized} && {copy_references}"
 		return f"flock -n {shlex.quote(persist_lock)} -c {shlex.quote(inner)}"
 
 	def persist_workspace(self, background: bool = True) -> None:
-		"""Persist user models to S3 (project files auto-sync via rclone VFS). Skips when not dirty."""
+		"""Persist local project/ to S3 (rclone sync). User models auto-sync via rclone VFS mount. Skips when not dirty."""
 		if not self._sandbox or not self._workspace_ready:
 			return
 		if not self._dirty:
@@ -706,12 +608,16 @@ class SandboxBackend(BaseSandbox):
 		return None
 
 	def _build_bwrap_command(self, command: str) -> str:
-		"""Wrap command in bwrap; bind project/ -> /, .solven -> /.solven, .venv -> /.venv, node_modules -> /node_modules."""
+		"""Wrap command in bwrap: workspace → /; --dir /.solven; /opt/solven/skills and user-models bound into /.solven/skills."""
 		path_env = "/.venv/bin:/.local/bin:/.bun/bin:/node_modules/.bin:/usr/local/bin:/usr/bin:/bin"
 		args = [
 			"bwrap",
-			"--bind", self._project, "/",
-			"--bind", self._solven, "/.solven",
+			"--bind", self._workspace, "/",
+			"--dir", "/.solven",
+			"--bind", OPT_SOLVEN_SKILLS, "/.solven/skills",
+			"--ro-bind", f"{OPT_SOLVEN_USER_MODELS}/templates", "/.solven/skills/escrituras/assets/templates",
+			"--bind", OPT_SOLVEN_USER_MODELS_NORMALIZED, "/.solven/skills/escrituras/assets/templates/normalized",
+			"--bind", f"{OPT_SOLVEN_USER_MODELS}/references", "/.solven/skills/escrituras/references",
 			"--bind", self._venv, "/.venv",
 			"--bind", self._node_modules, "/node_modules",
 			"--ro-bind", "/usr", "/usr",

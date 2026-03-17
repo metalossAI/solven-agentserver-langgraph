@@ -3,15 +3,6 @@ E2B Sandbox backend for DeepAgents using S3.
 Implements the BackendProtocol for filesystem operations in an isolated sandbox environment.
 
 ARCHITECTURE:
-=============
-- One E2B sandbox per user; lifecycle: on_timeout=pause, auto_resume=true.
-- /workspaces/{thread_id}/  — workspace root; bound to / in bwrap (no .solven in workspace).
-- /opt/solven/skills/  — system-level git clone; bound to /.solven/skills in bwrap (shared by all threads).
-- /opt/solven/user-models/{templates,references}/  — rclone copy from S3; bound into /.solven/skills/escrituras in bwrap.
-- /workspaces/{thread_id}/.venv/, node_modules/ — local (uv sync, bun install); set up once, survive pause.
-- bwrap: workspace/ -> /  |  --dir /.solven  |  /opt/solven/skills -> /.solven/skills  |  user-models sub-binds  |  .venv, node_modules.
-- Persist: rclone sync workspace/ -> S3:threads/{id}/ + rclone copy user-models -> S3:users/{id}/models/.
-- Init is idempotent: hydrate workspace, ensure skills repo, pull user models, install envs; resume re-pulls user models only.
 """
 
 import base64

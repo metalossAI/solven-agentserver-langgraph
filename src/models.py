@@ -34,7 +34,7 @@ class AppContext(BaseModel):
 
     model_name : Optional[str] = Field(default=None, description="The name of the model to use")
     company_id: Optional[str] = None
-    backend : Optional[Any] = None  # SolvenS3Backend - using Any to avoid schema issues
+    backend : Optional[Any] = Field(default=None, exclude=True)  # runtime-only; excluded from serialization so gRPC checkpointer can JSON-serialize context
     ticket: Optional['Ticket'] = None # the upstandig ticket context which will serve as link wiht for customer communications
     skill_create: Optional[SkillCreate] = None
     workspace_id: Optional[str] = Field(

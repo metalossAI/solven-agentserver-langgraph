@@ -1,12 +1,12 @@
 from __future__ import annotations
+import logging
+import os
 from typing import Callable, Awaitable
 from langsmith import AsyncClient
+from langsmith.utils import LangSmithError
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, dynamic_prompt
 from langchain_core.messages import SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
-
-
-from typing import Callable, Awaitable
 
 from deepagents.middleware.skills import (
     SkillsMiddleware as BaseSkillsMiddleware,
@@ -14,11 +14,28 @@ from deepagents.middleware.skills import (
     _format_skill_annotations,
 )
 
+# Fallback when LangSmith returns 403 or is unreachable (e.g. wrong key or private prompt).
+# Uses the same variable names as solven-main so format(**variables) works.
+_DEFAULT_SOLVEN_MAIN = (
+    "Eres un asistente experto. Fecha: {date}. Usuario: {name} (rol: {role}). "
+    "Idioma: {language}. Contexto del ticket: {ticket}"
+)
+
 async def build_prompt_template(prompt_id: str, variables: dict) -> str:
-    """Pull a prompt by id and format it with the given variables. Returns the formatted string."""
-    client = AsyncClient()
-    base_prompt: ChatPromptTemplate = await client.pull_prompt(prompt_id)
-    return base_prompt.format(**variables)
+    """Pull a prompt by id and format it with the given variables. On LangSmith error (e.g. 403), use a local fallback."""
+    try:
+        client = AsyncClient()
+        base_prompt: ChatPromptTemplate = await client.pull_prompt(prompt_id)
+        return base_prompt.format(**variables)
+    except LangSmithError as e:
+        logging.warning("LangSmith pull_prompt failed (%s), using fallback for prompt_id=%s", e, prompt_id)
+    except Exception as e:
+        logging.warning("pull_prompt failed (%s), using fallback for prompt_id=%s", e, prompt_id)
+    # Fallback: format a minimal template with whatever variables we have (no KeyError)
+    try:
+        return _DEFAULT_SOLVEN_MAIN.format(**{k: variables.get(k, "") for k in ("date", "name", "role", "language", "ticket")})
+    except Exception:
+        return _DEFAULT_SOLVEN_MAIN.format(date="", name="", role="", language="español", ticket="")
 
 
 def create_prompt_middleware(

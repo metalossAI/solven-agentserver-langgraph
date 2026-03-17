@@ -27,7 +27,7 @@ from langgraph.runtime import Runtime
 
 from langgraph.config import get_config
 
-from deepagents import create_deep_agent, SubAgent
+from deepagents import MemoryMiddleware, create_deep_agent, SubAgent
 
 from src.llm import LLM as llm, google_gemini
 from src.llm import CODING_LLM as coding_llm
@@ -303,12 +303,10 @@ graph = create_deep_agent(
     tools=[load_skill],
     backend=SandboxBackend,
     subagents=[
+        oficial_notarial,
         gmail_subagent,
         outlook_subagent,
         catastro_subagent,
-    ],
-    memory=[
-        "/.solven/AGENTS.md"
     ],
     middleware=[
         initialize_sandbox,
@@ -322,6 +320,12 @@ graph = create_deep_agent(
         SkillsMiddleware(
             backend=get_backend,
             sources=[USER_SKILLS_PATH],
+        ),
+        MemoryMiddleware(
+            backend=get_backend,
+            sources=[
+                "/.solven/AGENTS.md"
+            ],
         ),
         OpenRouterContentMiddleware(),
     ],
@@ -373,8 +377,8 @@ agent = create_agent(
             backend=get_backend,
             subagents=[
                 SubAgent(
-                    name="editor_docx",
-                    description="asistente para editar documentos docx",
+                    name="document_editor",
+                    description="asistente para editar documentos de todo tipo y formato.",
                     system_prompt="google/gemini-3-flash-preview",
                     model=ChatOpenRouter(
                         model="google/gemini-3-flash-preview",

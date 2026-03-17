@@ -5,12 +5,8 @@ from e2b import Template, wait_for_timeout
 
 load_dotenv()
 
-# Reliability-first layout (sandbox_backend uses these paths).
-SOLVEN_THREADS = "/var/lib/solven/threads"
-SOLVEN_RUNTIME = "/var/lib/solven/runtime"
-SOLVEN_USERS = "/var/lib/solven/users"
+# Rclone mount workspace layout (sandbox_backend uses these paths).
 OPT_SOLVEN_SKILLS = "/opt/solven/skills"
-MNT_USER = "/mnt/user"
 WORKSPACES = "/workspaces"
 SKILLS_REPO_URL = os.getenv("SKILLS_REPO_URL", "https://github.com/metalossAI/solven-skills.git")
 
@@ -153,22 +149,14 @@ template = (
     # Create directory for rclone config (config will be created at runtime)
     .run_cmd("mkdir -p /root/.config/rclone", user="root")
     # ============================================================================
-    # Start Command - Reliability-first boot: layout, crash recovery, optional skills
+    # Start Command - Rclone mount workspace: layout, optional skills clone
     # ============================================================================
-    # S3 mounting is done by sandbox_backend.py on first use (no credentials at build time).
+    # Mounts are configured by sandbox_backend.py on first use (no credentials at build time).
     .set_start_cmd(
-        f"""
+        """
         set -e
-        # 1. Create layout
-        sudo mkdir -p /root/.config/rclone
-        sudo mkdir -p {SOLVEN_THREADS} {SOLVEN_RUNTIME} {SOLVEN_USERS} {OPT_SOLVEN_SKILLS} {MNT_USER} {WORKSPACES}
-        # 2. Crash recovery: runtime is ephemeral, safe to clear on startup
-        sudo rm -rf {SOLVEN_RUNTIME}/*
-        # 3. Clone skills to /opt/solven/skills if not present (backend rsyncs into runtime)
-        if [ ! -d {OPT_SOLVEN_SKILLS}/.git ]; then
-          sudo git clone --depth 1 {SKILLS_REPO_URL} {OPT_SOLVEN_SKILLS} || true
-        fi
-        echo "[Template] Sandbox boot complete (mounts configured by backend on first request)"
+        sudo mkdir -p /root/.config/rclone /workspaces /opt/solven/skills /var/lib/solven/locks /tmp/rclone-cache
+        echo "[Template] Sandbox boot complete (skills repo and mounts configured by backend per workspace)"
         """,
         wait_for_timeout(2_000)
     )

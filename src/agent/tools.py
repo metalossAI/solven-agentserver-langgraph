@@ -20,7 +20,6 @@ async def load_skill(
 	backend = get_backend(runtime)
 	responses: list[FileDownloadResponse] = await backend.adownload_files([path])
 	if responses and responses[0].content is not None:
-		print(f"Cargada la habilidad {path}")
 		return ToolMessage(
 			content=responses[0].content.decode("utf-8"),
 			status="success",

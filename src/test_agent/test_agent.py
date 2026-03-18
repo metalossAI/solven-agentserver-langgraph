@@ -6,8 +6,9 @@ from dotenv import load_dotenv
 import time
 load_dotenv()
 
-@tool
-def test_tool_call(tool_number: int):
+@tool(description="Test tool that returns the number passed to it. Use for testing tool-call functionality.")
+def test_tool_call(tool_number: int) -> str:
+    """Return the number passed to the tool for testing."""
     return f"test {tool_number}"
 
 agent = create_agent(

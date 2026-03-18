@@ -40,8 +40,6 @@ class AppContext(BaseModel):
         default=None,
         description="Current workspace/ticket path key for backends and file tools. When set (e.g. by seleccionar_ticket), all S3 and file operations use company_id/threads/{workspace_id}.",
     )
-    # Reused SandboxBackend instance for the run; excluded from serialization (gRPC) so subagents get a fresh backend.
-    backend: Optional[Any] = Field(default=None, exclude=True)
 
 # Store Models to ensure orderd long term memory
 class Event(BaseModel):

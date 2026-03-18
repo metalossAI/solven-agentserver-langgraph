@@ -61,29 +61,21 @@ _READ_AS_DOCUMENT_EXTENSIONS = frozenset({
     ".jpg", ".jpeg", ".png", ".gif", ".webp", ".tiff", ".tif", ".bmp",
 })
 
-
-def _context_backend(ctx) -> Optional["SandboxBackend"]:
-	"""Get backend from runtime context (dict or object)."""
-	if ctx is None:
-		return None
-	if isinstance(ctx, dict):
-		return ctx.get("backend")
-	return getattr(ctx, "backend", None)
-
-
-def _context_set_backend(ctx, backend: "SandboxBackend") -> None:
-	"""Store backend in runtime context (dict or object)."""
-	if ctx is None:
-		return
-	if isinstance(ctx, dict):
-		ctx["backend"] = backend
-	else:
-		setattr(ctx, "backend", backend)
+# Marker file written inside E2B workspace after full init; any new SandboxBackend instance can skip full setup if it exists.
+_WORKSPACE_READY_MARKER = ".workspace_ready"
 
 
 def get_backend(runtime: ToolRuntime[AppContext]) -> "SandboxBackend":
-	"""Return the backend for this run; reuses instance from context when already configured."""
-	return SandboxBackend(runtime)
+	"""Return a SandboxBackend for this runtime. Reuses runtime.context.backend when set (same run); excluded from serialization so gRPC subagents get a fresh instance."""
+	ctx = getattr(runtime, "context", None)
+	if ctx is not None:
+		existing = getattr(ctx, "backend", None)
+		if existing is not None and isinstance(existing, SandboxBackend):
+			return existing
+	backend = SandboxBackend(runtime)
+	if ctx is not None:
+		ctx.backend = backend
+	return backend
 
 
 class SandboxBackend(BaseSandbox):
@@ -91,20 +83,10 @@ class SandboxBackend(BaseSandbox):
 	E2B Sandbox backend with bwrap isolation: /workspace is bound to / inside the container.
 	Paths are never rewritten; only result filtering (ls_info, glob_info, grep_raw) hides system dirs.
 	Init and sync run outside bwrap; execute (and thus read/write/edit/ls_info/glob_info/grep_raw) run inside bwrap.
-	Reuses one instance per run: runtime.context stores the backend; __new__ returns it so tool calls are fast.
+	One instance per get_backend(runtime) call; _ensure_initialized is idempotent via _initialized flag and workspace marker file.
 	"""
 
-	def __new__(cls, runtime: ToolRuntime[AppContext], *args, **kwargs):
-		ctx = getattr(runtime, "context", None)
-		existing = _context_backend(ctx)
-		if existing is not None and isinstance(existing, cls):
-			return existing
-		return super().__new__(cls)
-
 	def __init__(self, runtime: ToolRuntime[AppContext]):
-		# Reused instance from __new__: skip full init
-		if getattr(self, "_initialized", False):
-			return
 		self._runtime = runtime
 		self._sandbox: Optional[Sandbox] = None
 
@@ -421,59 +403,59 @@ class SandboxBackend(BaseSandbox):
 			logging.warning("_ensure_thread_env bun install: %s", e)
 
 	def _ensure_workspace_ready(self) -> None:
-		"""Lightweight health check on resume: ensure skills repo present, then re-pull user models."""
+		"""Lightweight health check when already initialized (same run). Only verifies skills repo exists; user models were already pulled at init."""
 		if not self._sandbox or not getattr(self, "_workspace_ready", False):
 			return
 		try:
-			if self._sandbox.files.exists(f"{OPT_SOLVEN_SKILLS}/.git/HEAD"):
-				self._pull_user_models()
+			if not self._sandbox.files.exists(f"{OPT_SOLVEN_SKILLS}/.git/HEAD"):
+				logging.warning("_ensure_workspace_ready: skills repo missing")
 		except Exception as e:
 			logging.warning("_ensure_workspace_ready: %s", e)
 
 	def _ensure_initialized(self) -> None:
-		"""Ensure sandbox and thread workspace are initialized (idempotent). Steps: sandbox -> mkdir -> rclone -> hydrate -> skills -> user-models -> env -> chown."""
+		"""Ensure sandbox and thread workspace are initialized (idempotent). Fast path via _initialized flag or workspace marker file."""
 		if self._initialized:
 			self._ensure_workspace_ready()
 			return
 
-		# 1. Per-user sandbox (connect or create with lifecycle)
+		# Connect or resume the per-user E2B sandbox (fast: ~1s API call)
 		self._get_or_create_user_sandbox()
-		logging.info("Preparando espacio de trabajo...")
 
-		# 2. Boot layout (dirs); rclone config
+		# Fast path: workspace was already set up in a previous run (marker lives inside E2B sandbox)
+		marker = f"{self._workspace}/{_WORKSPACE_READY_MARKER}"
+		try:
+			if self._sandbox.files.exists(marker):
+				self._pull_user_models()
+				self._workspace_ready = True
+				self._initialized = True
+				return
+		except Exception:
+			pass
+
+		# Full first-time setup
+		logging.info("Preparando espacio de trabajo...")
 		self._ensure_boot_dirs()
 		self._configure_rclone()
-
-		# 3. Hydrate project from S3 (rclone sync; local project/ no FUSE)
 		self._hydrate_from_s3()
-
-		# 4. Ensure shared skills repo (clone if missing/broken)
 		self._ensure_skills_repo()
-
-		# 5. Pull user templates/references from S3 into /opt/solven/user-models
 		self._pull_user_models()
-
-		# 6. Per-thread env (.venv, node_modules)
 		try:
 			self._ensure_thread_env()
 		except Exception as e:
 			logging.warning("_ensure_thread_env at init: %s", e)
-
-		# 7. chown workspace
 		self._sandbox.commands.run(f"chown -R user:user {shlex.quote(self._workspace)}", timeout=60, user="root")
-
-		# 9. Verify skills populated; warn if empty
 		try:
 			if not self._sandbox.files.exists(f"{OPT_SOLVEN_SKILLS}/escrituras/SKILL.md"):
 				logging.warning("%s/escrituras/SKILL.md not found after init — skills may be unavailable", OPT_SOLVEN_SKILLS)
 		except Exception as e:
 			logging.warning("skills marker check after init: %s", e)
-
 		self._workspace_ready = True
 		self._ensure_bwrap()
 		self._initialized = True
-		ctx = getattr(getattr(self, "runtime", None) or getattr(self, "_runtime", None), "context", None)
-		_context_set_backend(ctx, self)
+		try:
+			self._sandbox.files.write(marker, "ready")
+		except Exception as e:
+			logging.warning("Could not write workspace marker: %s", e)
 		logging.info("Espacio de trabajo listo")
 
 	def _persist_shell_cmd(self) -> str:

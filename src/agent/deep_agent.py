@@ -447,4 +447,5 @@ agent = create_agent(
         ),
         PatchToolCallsMiddleware(),
     ],
+    context_schema=AppContext,
 ).with_config({"recursion_limit": 1000})

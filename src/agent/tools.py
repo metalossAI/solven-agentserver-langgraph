@@ -2,11 +2,24 @@ from deepagents.backends.protocol import FileDownloadResponse
 from langchain_core.tools import tool, InjectedToolArg
 from langchain_core.messages import ToolMessage
 from langchain.tools import ToolRuntime
+from pydantic import BaseModel, Field, field_serializer, ConfigDict
 from src.models import AppContext
 from src.sandbox_backend import get_backend
 from typing import Dict, Any, Optional, Annotated
 
-@tool
+
+class LoadSkillArgs(BaseModel):
+    """Args for load_skill; runtime excluded from serialization to avoid PydanticSerializationUnexpectedValue (Expected none)."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    path: str = Field(description="La ruta del skill a cargar")
+    runtime: Optional[ToolRuntime[AppContext]] = None
+
+    @field_serializer("runtime")
+    def _serialize_runtime(self, v: Optional[ToolRuntime[AppContext]]) -> Any:
+        return None
+
+
+@tool(args_schema=LoadSkillArgs)
 async def load_skill(
     path: Annotated[str, "La ruta del skill a cargar"],
     runtime: Annotated[ToolRuntime[AppContext], InjectedToolArg] = None

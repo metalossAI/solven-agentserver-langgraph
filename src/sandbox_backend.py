@@ -27,6 +27,15 @@ from typing import Optional
 # Process-level cache: one sandbox_id per user_id so we always reuse the same sandbox (avoids duplicates from dev restarts/sync).
 _user_sandbox_cache: dict[str, str] = {}
 
+# Process-level SandboxBackend instance cache keyed by thread_id.
+# Reuses the same initialized instance across all tool calls within a thread so that
+# _ensure_initialized() returns immediately (self._initialized is True) rather than
+# reconnecting to E2B on every call. Never stored in runtime.context; invisible to
+# gRPC checkpoint serialization.
+_BACKEND_INSTANCES: dict[str, "SandboxBackend"] = {}
+_BACKEND_INSTANCE_ORDER: list[str] = []   # insertion order for eviction
+_BACKEND_INSTANCES_MAX = 256              # bound memory: one sandbox per active thread
+
 from e2b import Sandbox, SandboxQuery, SandboxState
 from e2b.sandbox.commands.command_handle import CommandExitException
 
@@ -75,16 +84,42 @@ _WORKSPACE_READY_MARKER = ".workspace_ready"
 
 
 def get_backend(runtime: ToolRuntime[AppContext]) -> "SandboxBackend":
-	"""Return a SandboxBackend for this runtime. Reuses runtime.context.backend when set (same run); excluded from serialization so gRPC subagents get a fresh instance."""
-	ctx = getattr(runtime, "context", None)
-	if ctx is not None:
-		existing = getattr(ctx, "backend", None)
-		if existing is not None and isinstance(existing, SandboxBackend):
-			return existing
+	"""Return a SandboxBackend for this runtime.
+
+	Reuses the same instance per thread_id (process-local cache) so that tool calls within a
+	conversation reuse the live E2B connection and _ensure_initialized() returns immediately after
+	the first call. Never stored in runtime.context, so gRPC checkpoint serialization is safe.
+
+	If the cached instance has a stale sandbox (e.g. the E2B process died), the next operation
+	will raise; evict the bad entry by calling invalidate_backend(thread_id) and retry.
+	"""
+	from src.utils.config import get_workspace_id
+	thread_id = get_workspace_id(runtime)
+
+	if thread_id and thread_id in _BACKEND_INSTANCES:
+		return _BACKEND_INSTANCES[thread_id]
+
 	backend = SandboxBackend(runtime)
-	if ctx is not None:
-		ctx.backend = backend
+
+	if thread_id:
+		# Evict oldest entry when at capacity (simple FIFO)
+		while len(_BACKEND_INSTANCES) >= _BACKEND_INSTANCES_MAX and _BACKEND_INSTANCE_ORDER:
+			oldest = _BACKEND_INSTANCE_ORDER.pop(0)
+			_BACKEND_INSTANCES.pop(oldest, None)
+		_BACKEND_INSTANCES[thread_id] = backend
+		_BACKEND_INSTANCE_ORDER.append(thread_id)
+
 	return backend
+
+
+def invalidate_backend(thread_id: str) -> None:
+	"""Remove a cached SandboxBackend for thread_id. Use when a sandbox connection goes stale
+	so the next get_backend() call creates a fresh instance and reconnects."""
+	_BACKEND_INSTANCES.pop(thread_id, None)
+	try:
+		_BACKEND_INSTANCE_ORDER.remove(thread_id)
+	except ValueError:
+		pass
 
 
 class SandboxBackend(BaseSandbox):
@@ -92,7 +127,8 @@ class SandboxBackend(BaseSandbox):
 	E2B Sandbox backend with bwrap isolation: /workspace is bound to / inside the container.
 	Paths are never rewritten; only result filtering (ls_info, glob_info, grep_raw) hides system dirs.
 	Init and sync run outside bwrap; execute (and thus read/write/edit/ls_info/glob_info/grep_raw) run inside bwrap.
-	One instance per get_backend(runtime) call; _ensure_initialized is idempotent via _initialized flag and workspace marker file.
+	Initialization is idempotent: workspace marker file and per-user E2B cache ensure new instances
+	skip full setup when the workspace is already ready. Call ensure_ready() to init; use is_available() to check.
 	"""
 
 	def __init__(self, runtime: ToolRuntime[AppContext]):
@@ -422,10 +458,25 @@ class SandboxBackend(BaseSandbox):
 			logging.warning("_ensure_workspace_ready: %s", e)
 
 	def _ensure_initialized(self) -> None:
-		"""Ensure sandbox and thread workspace are initialized (idempotent). Fast path via _initialized flag or workspace marker file."""
+		"""Ensure sandbox and thread workspace are initialized (idempotent).
+
+		Fast path: if _initialized is True, does a lightweight workspace health check and returns.
+		When a cached instance is reused across tool calls this is the path taken — no E2B API calls.
+
+		If the sandbox connection becomes stale (sandbox died while the instance was cached), the
+		health check will notice and set _initialized=False so the next call does a full reconnect.
+		"""
 		if self._initialized:
-			self._ensure_workspace_ready()
-			return
+			# Verify the live sandbox connection is still usable; reset if stale.
+			try:
+				self._ensure_workspace_ready()
+			except Exception as e:
+				logging.warning("[ensure_initialized] sandbox health check failed, will reconnect: %s", e)
+				self._initialized = False
+				self._workspace_ready = False
+				self._sandbox = None
+			else:
+				return
 
 		# Connect or resume the per-user E2B sandbox (fast: ~1s API call)
 		self._get_or_create_user_sandbox()
@@ -466,6 +517,14 @@ class SandboxBackend(BaseSandbox):
 		except Exception as e:
 			logging.warning("Could not write workspace marker: %s", e)
 		logging.info("Espacio de trabajo listo")
+
+	def ensure_ready(self) -> None:
+		"""Public entrypoint to ensure sandbox and workspace are initialized (idempotent). Use from middleware."""
+		self._ensure_initialized()
+
+	def is_available(self) -> bool:
+		"""Return True when the backend has a connected E2B sandbox and has completed initialization."""
+		return self._sandbox is not None and self._initialized
 
 	def _persist_shell_cmd(self) -> str:
 		"""Build persist as single shell command (serialized per thread via flock):

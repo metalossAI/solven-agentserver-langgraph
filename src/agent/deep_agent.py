@@ -168,13 +168,15 @@ async def initialize_sandbox(state: AgentState, runtime: Runtime[AppContext]):
 			else:
 				ctx.workspace_id = thread_id
 		backend = get_backend(runtime)
-		await asyncio.to_thread(backend._ensure_initialized)
+		await asyncio.to_thread(backend.ensure_ready)
+		if not backend.is_available():
+			print("[initialize_sandbox] Sandbox not available after ensure_ready", flush=True)
 	except Exception as e:
 		print(f"[initialize_sandbox] ✗ Error initializing sandbox: {e}", flush=True)
 		import traceback
 		print(f"[initialize_sandbox] Traceback:\n{traceback.format_exc()}", flush=True)
 		# Don't fail the entire agent if sandbox init fails
-		# The agent can still try to work, and _ensure_initialized will be called again later
+		# The agent can still try to work, and ensure_ready will be called again later by tools
 	
 	return state
 

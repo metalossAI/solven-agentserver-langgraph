@@ -20,7 +20,7 @@ from langchain.agents import create_agent
 from deepagents.middleware import FilesystemMiddleware, SubAgentMiddleware, SummarizationMiddleware
 from langchain.agents.middleware import TodoListMiddleware
 
-from src.sandbox_backend import SandboxBackend, get_backend
+from src.sandbox_backend import get_backend
 
  
 from langgraph.runtime import Runtime
@@ -36,7 +36,6 @@ from src.models import AppContext, SolvenState
 from src.agent_catastro.agent import subagent as catastro_subagent
 from src.agent.tools import load_skill
 from src.agent.middleware import create_prompt_middleware
-from src.middleware.tool_call_ids import UniqueToolCallIdsMiddleware
 from src.utils.tickets import get_ticket
 from src.common_tools.files import solicitar_archivo
 
@@ -168,10 +167,8 @@ async def initialize_sandbox(state: AgentState, runtime: Runtime[AppContext]):
 				ctx["workspace_id"] = thread_id
 			else:
 				ctx.workspace_id = thread_id
-		backend = SandboxBackend(runtime)
+		backend = get_backend(runtime)
 		await asyncio.to_thread(backend._ensure_initialized)
-		if getattr(runtime, "context", None) is not None and not isinstance(runtime.context, dict):
-			runtime.context.backend = backend
 	except Exception as e:
 		print(f"[initialize_sandbox] ✗ Error initializing sandbox: {e}", flush=True)
 		import traceback
@@ -278,7 +275,7 @@ oficial_notarial = SubAgent(
     description="asistente para trabajar en escrituras/documentos legales de todo tipo y formato.",
     system_prompt="",
     model=ChatOpenRouter(
-        model="openai/gpt-oss-120b:nitro",
+        model="google/gemini-3-flash-preview",
         api_key=os.getenv("OPENROUTER_API_KEY"),
         model_kwargs={
             "parallel_tool_calls": False,
@@ -334,7 +331,6 @@ graph = create_deep_agent(
 
 # Build general-purpose subagent with default middleware stack
 gp_middleware: list[AgentMiddleware] = [
-    initialize_sandbox,
     OpenRouterContentMiddleware(),
     TodoListMiddleware(),
     FilesystemMiddleware(backend=get_backend),

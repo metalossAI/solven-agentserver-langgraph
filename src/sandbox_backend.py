@@ -5,12 +5,12 @@ Implements the BackendProtocol for filesystem operations in an isolated sandbox 
 ARCHITECTURE:
 =============
 - One E2B sandbox per user; lifecycle: on_timeout=pause, auto_resume=true.
-- /workspaces/{thread_id}/  — workspace root; bound to / in bwrap (no .solven in workspace).
+- /workspaces/{tenant_id}/threads/{thread_id}/  — workspace root; bound to / in bwrap (no .solven in workspace).
 - /opt/solven/skills/  — system-level git clone; bound to /.solven/skills in bwrap (shared by all threads).
 - /opt/solven/user-models/{templates,references}/  — rclone copy from S3; bound into /.solven/skills/escrituras in bwrap.
 - /workspaces/{thread_id}/.venv/, node_modules/ — local (uv sync, bun install); set up once, survive pause.
 - bwrap: workspace/ -> /  |  --dir /.solven  |  /opt/solven/skills -> /.solven/skills  |  user-models sub-binds  |  .venv, node_modules.
-- Persist: rclone sync workspace/ -> S3:threads/{id}/ + rclone copy user-models -> S3:users/{id}/models/.
+- Persist: rclone sync workspace/ -> S3:{tenant_id}/threads/{id}/ + rclone copy user-models -> S3:{tenant_id}/users/{id}/models/.
 - Init is idempotent: hydrate workspace, ensure skills repo, pull user models, install envs; resume re-pulls user models only.
 """
 
@@ -27,15 +27,6 @@ from typing import Optional
 # Process-level cache: one sandbox_id per user_id so we always reuse the same sandbox (avoids duplicates from dev restarts/sync).
 _user_sandbox_cache: dict[str, str] = {}
 
-# Process-level SandboxBackend instance cache keyed by thread_id.
-# Reuses the same initialized instance across all tool calls within a thread so that
-# _ensure_initialized() returns immediately (self._initialized is True) rather than
-# reconnecting to E2B on every call. Never stored in runtime.context; invisible to
-# gRPC checkpoint serialization.
-_BACKEND_INSTANCES: dict[str, "SandboxBackend"] = {}
-_BACKEND_INSTANCE_ORDER: list[str] = []   # insertion order for eviction
-_BACKEND_INSTANCES_MAX = 256              # bound memory: one sandbox per active thread
-
 from e2b import Sandbox, SandboxQuery, SandboxState
 from e2b.sandbox.commands.command_handle import CommandExitException
 
@@ -43,8 +34,6 @@ from deepagents.backends.sandbox import BaseSandbox
 from deepagents.backends.protocol import WriteResult, EditResult, ExecuteResponse, FileDownloadResponse, FileUploadResponse
 from deepagents.backends.utils import FileInfo, GrepMatch
 from langchain.tools import ToolRuntime
-from langgraph.config import get_config
-from langgraph.graph.state import RunnableConfig
 from src.models import AppContext
 from src.backend import _parse_skillmd_frontmatter
 from src.utils.config import get_user
@@ -57,7 +46,7 @@ SOLVEN_LOCKS = "/var/lib/solven/locks"  # Per-thread persist locks (flock)
 OPT_SOLVEN_SKILLS = "/opt/solven/skills"
 OPT_SOLVEN_USER_MODELS = "/opt/solven/user-models"
 OPT_SOLVEN_USER_MODELS_NORMALIZED = "/opt/solven/user-models/templates_normalized"  # Writable; syncs to S3 templates/normalized/
-WORKSPACES = "/workspaces"
+WORKSPACES = ""
 RCLONE_CACHE_BASE = "/tmp/rclone-cache"
 
 # Dirs skipped during in-workspace glob / grep searches (caches, mounts, system).
@@ -72,54 +61,34 @@ _AGENT_HIDDEN_TOPLEVEL = frozenset({
     "mnt", "usr", "etc", "proc", "dev", "sys", "run", "lib", "lib64", "bin", "sbin", "tmp", "cache",
 })
 
-# Extensions that require Modal/Docling conversion (documents, not code). All other files (code, .md, .txt, etc.) are read as UTF-8.
+# Document extensions that require Modal/Docling conversion (documents, not code/text).
+# Images are intentionally excluded so the model can handle them directly.
 _READ_AS_DOCUMENT_EXTENSIONS = frozenset({
-    ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
-    ".odt", ".ods", ".odp", ".rtf",
+    ".pdf", ".docx", ".doc",
+    ".xlsx", ".xls",
+    ".pptx", ".ppt",
+    ".odt", ".ods", ".odp",
+    ".rtf",
+})
+
+# Image extensions: do NOT convert to markdown. Instead embed as a markdown image data-url.
+_READ_AS_IMAGE_EXTENSIONS = frozenset({
     ".jpg", ".jpeg", ".png", ".gif", ".webp", ".tiff", ".tif", ".bmp",
 })
 
+_IMAGE_MIME_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".tiff": "image/tiff",
+    ".tif": "image/tiff",
+    ".bmp": "image/bmp",
+}
+
 # Marker file written inside E2B workspace after full init; any new SandboxBackend instance can skip full setup if it exists.
 _WORKSPACE_READY_MARKER = ".workspace_ready"
-
-
-def get_backend(runtime: ToolRuntime[AppContext]) -> "SandboxBackend":
-	"""Return a SandboxBackend for this runtime.
-
-	Reuses the same instance per thread_id (process-local cache) so that tool calls within a
-	conversation reuse the live E2B connection and _ensure_initialized() returns immediately after
-	the first call. Never stored in runtime.context, so gRPC checkpoint serialization is safe.
-
-	If the cached instance has a stale sandbox (e.g. the E2B process died), the next operation
-	will raise; evict the bad entry by calling invalidate_backend(thread_id) and retry.
-	"""
-	from src.utils.config import get_workspace_id
-	thread_id = get_workspace_id(runtime)
-
-	if thread_id and thread_id in _BACKEND_INSTANCES:
-		return _BACKEND_INSTANCES[thread_id]
-
-	backend = SandboxBackend(runtime)
-
-	if thread_id:
-		# Evict oldest entry when at capacity (simple FIFO)
-		while len(_BACKEND_INSTANCES) >= _BACKEND_INSTANCES_MAX and _BACKEND_INSTANCE_ORDER:
-			oldest = _BACKEND_INSTANCE_ORDER.pop(0)
-			_BACKEND_INSTANCES.pop(oldest, None)
-		_BACKEND_INSTANCES[thread_id] = backend
-		_BACKEND_INSTANCE_ORDER.append(thread_id)
-
-	return backend
-
-
-def invalidate_backend(thread_id: str) -> None:
-	"""Remove a cached SandboxBackend for thread_id. Use when a sandbox connection goes stale
-	so the next get_backend() call creates a fresh instance and reconnects."""
-	_BACKEND_INSTANCES.pop(thread_id, None)
-	try:
-		_BACKEND_INSTANCE_ORDER.remove(thread_id)
-	except ValueError:
-		pass
 
 
 class SandboxBackend(BaseSandbox):
@@ -148,7 +117,7 @@ class SandboxBackend(BaseSandbox):
 			raise RuntimeError("Cannot initialize SandboxBackend: user company_id (tenant) not found in config")
 		self._tenant_id = user.company_id
 
-		self._workspace = f"{WORKSPACES}/{self._thread_id}"
+		self._workspace = f"/{self._tenant_id}/threads/{self._thread_id}"
 		# workspace IS the agent root; /.solven is bwrap-virtual, backed by /opt/solven/skills + user-models
 		self._venv = f"{self._workspace}/.venv"
 		self._node_modules = f"{self._workspace}/node_modules"
@@ -171,16 +140,33 @@ class SandboxBackend(BaseSandbox):
 			out["S3_ACCESS_SECRET"] = secret
 		return out
 
+	# Attachments are always stored under this subfolder in the workspace.
+	ADJUNTOS_DIR = "adjuntos"
+
+	def _normalize_upload_path_to_adjuntos(self, path: str) -> str:
+		"""Ensure upload path is under /adjuntos/ so files never land at workspace root."""
+		if not path or not path.strip():
+			return f"/{self.ADJUNTOS_DIR}/attachment"
+		p = path.strip().replace("\\", "/").lstrip("/")
+		if p.startswith(f"{self.ADJUNTOS_DIR}/") or p == self.ADJUNTOS_DIR:
+			return f"/{p}" if not path.startswith("/") else path
+		# Single segment or path not under adjuntos -> put under adjuntos
+		leaf = p.split("/")[-1] if "/" in p else p
+		return f"/{self.ADJUNTOS_DIR}/{leaf}"
+
 	def _resolve_workspace_path(self, path: str) -> str:
 		"""
 		Resolve agent-visible path to real path. Agent / = workspace root.
 		Normalizes and constrains so '..' cannot escape.
+		Attachment uploads use logical paths like ``/adjuntos/...``; they map under
+		``/workspaces/{thread_id}/adjuntos/...``.
 		"""
 		if not path or path.strip() in ("", "/"):
 			return self._workspace
 		p = path.strip().replace("\\", "/").lstrip("/")
-		resolved = os.path.normpath(f"{self._workspace}/{p}")
-		if not resolved.startswith(self._workspace):
+		ws = self._workspace.rstrip("/")
+		resolved = os.path.normpath(f"{ws}/{p}")
+		if resolved != ws and not resolved.startswith(ws + os.sep):
 			return self._workspace
 		return resolved
 
@@ -528,7 +514,7 @@ class SandboxBackend(BaseSandbox):
 
 	def _persist_shell_cmd(self) -> str:
 		"""Build persist as single shell command (serialized per thread via flock):
-		1. rclone sync workspace/ -> S3:threads/{id}/ (excluding .solven/.venv/node_modules/etc.)
+		1. rclone sync workspace/ -> S3:{tenant_id}/threads/{id}/ (excluding .solven/.venv/node_modules/etc.)
 		2. rclone copy user templates -> S3:users/{id}/models/templates/
 		3. rclone copy user templates_normalized -> S3:users/{id}/models/templates/normalized/
 		4. rclone copy user references -> S3:users/{id}/models/references/
@@ -801,6 +787,7 @@ class SandboxBackend(BaseSandbox):
 
 		for path, content in files:
 			try:
+				path = self._normalize_upload_path_to_adjuntos(path)
 				real_path = self._resolve_workspace_path(path)
 
 				parent = os.path.dirname(real_path)
@@ -829,9 +816,10 @@ class SandboxBackend(BaseSandbox):
 
 	def _convert_to_markdown(self, content: bytes, filename: str) -> str:
 		"""
-		Convert document bytes (PDF, DOCX, images, etc.) to markdown. Used only for document types,
-		not for code or plain text. Prefer Modal GPU (Docling VLM) when configured; fall back to
-		local Docling on failure or when Modal is not configured. Raises on conversion error.
+		Convert document bytes (PDF/DOCX/etc) to markdown.
+
+		Used only for document types (not code/text/images). Prefer Modal GPU (Docling VLM) when
+		configured; fall back to local Docling on failure.
 		"""
 		use_modal = bool((os.getenv("MODAL_TOKEN_ID") or os.getenv("USE_MODAL_DOCLING") or "").strip())
 		if use_modal:
@@ -859,6 +847,66 @@ class SandboxBackend(BaseSandbox):
 				os.unlink(tmp_path)
 			except OSError:
 				pass
+
+	def read(self, file_path: str, offset: int = 0, limit: int = 2000, allow_non_markdown: bool = False) -> str:
+		"""
+		Read file content with line numbers.
+
+		Only document-like formats (PDF/DOCX/XLSX/PPTX/ODT/ODS/ODP/RTF) are converted to markdown.
+		Everything else (plain text/code/images/etc.) must defer to the parent implementation
+		so existing image handling / multimodal tool serialization stays consistent.
+		"""
+		self._ensure_initialized()
+
+		ext = (Path(file_path).suffix or "").lower()
+		# Block access to internal instructions.md files (consistent with parent semantics).
+		if file_path.endswith("/instructions.md") or file_path.endswith("instructions.md"):
+			return "Error: File '{}' not found".format(file_path)
+
+		# Delegate all non-doc formats to deepagents BaseSandbox implementation.
+		# This avoids custom image embedding that can break OpenRouter multimodal schemas.
+		if ext not in _READ_AS_DOCUMENT_EXTENSIONS:
+			return super().read(file_path, offset, limit)
+
+		real_path = self._resolve_workspace_path(file_path)
+		if not self._sandbox.files.exists(real_path):
+			return f"Error: File '{file_path}' not found"
+
+		# Ensure it's not a directory (best-effort).
+		try:
+			info = self._sandbox.files.get_info(real_path)
+			type_val = getattr(info, "type", None)
+			is_dir = getattr(info, "is_dir", False) or (str(type_val).lower().find("dir") >= 0)
+			if is_dir:
+				return f"Error: File '{file_path}' is a directory"
+		except Exception:
+			pass
+
+		download_url = self._sandbox.download_url(real_path)
+		import requests
+
+		response = requests.get(download_url, timeout=30)
+		response.raise_for_status()
+		content = response.content
+
+		basename = os.path.basename(file_path)
+
+		def _format_numbered_lines(text: str) -> str:
+			lines = text.splitlines()
+			start = offset
+			end = min(offset + limit, len(lines))
+			selected_lines = lines[start:end]
+			return "\n".join(
+				f"{i}\t{line}"
+				for i, line in enumerate(selected_lines, start=start + 1)
+			)
+
+		# Documents: convert to markdown (Word/PDF/etc).
+		try:
+			markdown = self._convert_to_markdown(content, file_path)
+		except Exception as e:
+			return f"Error converting '{file_path}' to markdown: {str(e)}"
+		return _format_numbered_lines(markdown)
 
 	def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
 		"""
@@ -917,6 +965,11 @@ class SandboxBackend(BaseSandbox):
 		return await asyncio.to_thread(self.ls_info, path)
 
 	async def aread(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
+		ext = (Path(file_path).suffix or "").lower()
+		if ext not in _READ_AS_DOCUMENT_EXTENSIONS:
+			# Bypass our override and use BaseSandbox's read() behavior
+			# (important for images / multimodal tool serialization).
+			return await asyncio.to_thread(super().read, file_path, offset, limit)
 		return await asyncio.to_thread(self.read, file_path, offset, limit)
 
 	async def awrite(self, file_path: str, content: str) -> WriteResult:

@@ -4,18 +4,14 @@ import os
 
 from deepagents.graph import FilesystemMiddleware, SubAgentMiddleware, TodoListMiddleware
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
-from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
 from dotenv import load_dotenv
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langchain_openrouter.chat_models import ChatOpenRouter
-from langgraph.types import Command
 load_dotenv()
 
-from langchain_openai.chat_models import ChatOpenAI
-from langchain.tools import ToolRuntime
 from langchain.agents.middleware import AgentMiddleware, ModelFallbackMiddleware, ModelRequest, before_model, ModelResponse, wrap_model_call, after_agent, hook_config
 
-from langchain_core.messages import SystemMessage, ToolMessage, AIMessage, HumanMessage
+from langchain_core.messages import SystemMessage, ToolMessage, AIMessage
 from langchain.agents import create_agent
 from deepagents.middleware import FilesystemMiddleware, SubAgentMiddleware, SummarizationMiddleware
 from langchain.agents.middleware import TodoListMiddleware
@@ -29,22 +25,20 @@ from langgraph.config import get_config
 
 from deepagents import MemoryMiddleware, create_deep_agent, SubAgent
 
-from src.llm import LLM as llm, google_gemini
-from src.llm import CODING_LLM as coding_llm
-from src.models import AppContext, SolvenState
+from src.llm import LLM as llm
+from src.models import AppContext
 
 from src.agent_catastro.agent import subagent as catastro_subagent
 from src.agent.tools import load_skill
 from src.agent.middleware import create_prompt_middleware
 from src.utils.tickets import get_ticket
-from src.common_tools.files import solicitar_archivo
 
 from langchain.agents.middleware import before_agent, AgentState
 from langgraph.runtime import Runtime
 from typing import Callable, Awaitable
 
 # Import email tools
-from src.agent_email.gmail_tools import gmail_tools, gmail_send_email
+from src.agent_email.gmail_tools import gmail_tools
 from src.agent_email.outlook_tools import outlook_tools
 from src.agent.middleware import SkillsMiddleware
 from src.utils.openrouter import OpenRouterContentMiddleware

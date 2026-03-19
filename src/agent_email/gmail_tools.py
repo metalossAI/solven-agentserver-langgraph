@@ -1,14 +1,16 @@
 """Gmail tool wrappers using Composio direct execution."""
 
-import asyncio
 import json
-import base64
 import os
 from datetime import datetime
 from typing import Any, Optional, List, Dict
 from pydantic import BaseModel, Field
-from src.sandbox_backend import SandboxBackend
-from src.s3_client import S3Client
+from src.utils.backend import get_backend
+from src.agent_email.attachment_upload import (
+    parse_composio_attachment_response,
+    upload_attachment_to_backend,
+)
+from src.utils.config import get_workspace_id
 from langchain_core.tools import tool
 from langchain.tools import ToolRuntime
 from langgraph.types import interrupt
@@ -127,10 +129,9 @@ async def gmail_send_email(
     temp_file_path = None
     
     if attachment_path:
-        backend = SandboxBackend(runtime)
-        
+        backend = get_backend(runtime)
         try:
-            # Download file from sandbox
+            # Download file from backend (sandbox or S3)
             download_responses = await backend.adownload_files([attachment_path])
             download_response = download_responses[0] if download_responses else None
             
@@ -303,8 +304,7 @@ async def gmail_reply_to_thread(
     composio_attachment = None
     
     if attachment_path:
-        backend = SandboxBackend(runtime)
-        
+        backend = get_backend(runtime)
         try:
             download_responses = await backend.adownload_files([attachment_path])
             download_response = download_responses[0] if download_responses else None
@@ -665,7 +665,7 @@ async def _download_one_attachment(
     runtime: ToolRuntime[AppContext],
     spec: GmailAttachmentSpec,
 ) -> Dict[str, Any]:
-    """Download a single attachment via Composio and upload to S3. Returns a result dict."""
+    """Download a single attachment via Composio and upload via backend (sandbox or S3). Returns a result dict."""
     message_id = spec.message_id
     attachment_id = spec.attachment_id
     file_name = spec.file_name
@@ -677,114 +677,34 @@ async def _download_one_attachment(
         "user_id": user_id,
     }
     result = await execute_composio_tool(GMAIL.tools.GET_ATTACHMENT, arguments, runtime)
-    # Composio client may return plain error strings (not JSON)
-    if isinstance(result, str) and result.strip().startswith("Error"):
+    attachment_bytes, parse_error = parse_composio_attachment_response(result)
+    if parse_error is not None:
         return {
             "success": False,
             "file_name": file_name,
             "message_id": message_id,
             "attachment_id": attachment_id,
-            "message": result.strip(),
+            "message": parse_error,
         }
-    try:
-        result_data = json.loads(result)
-        attachment_bytes = None
-        if isinstance(result_data, str):
-            # Composio sometimes returns raw base64 as JSON string (e.g. "base64...")
-            try:
-                attachment_bytes = base64.b64decode(result_data)
-            except Exception:
-                attachment_bytes = None
-        elif isinstance(result_data, dict):
-            # Try common keys for base64 payload (Composio / Gmail API shapes)
-            raw = result_data.get("data") or result_data.get("body") or result_data.get("content")
-            if isinstance(raw, dict):
-                raw = raw.get("data") or raw.get("dataBase64")
-            if isinstance(raw, str):
-                try:
-                    attachment_bytes = base64.b64decode(raw)
-                except Exception:
-                    attachment_bytes = None
-            if attachment_bytes is None:
-                raw = result_data.get("file") or result_data.get("filePath")
-                if isinstance(raw, str) and os.path.exists(raw):
-                    with open(raw, "rb") as f:
-                        attachment_bytes = f.read()
-                elif isinstance(raw, str):
-                    return {
-                        "success": False,
-                        "file_name": file_name,
-                        "message_id": message_id,
-                        "attachment_id": attachment_id,
-                        "message": f"Local file not found: {raw}",
-                    }
-        if attachment_bytes:
-            from src.utils.config import get_user, get_workspace_id
-            user = get_user()
-            workspace_id = get_workspace_id(runtime)
-            s3_prefix = f"{user.company_id}/threads/{workspace_id}" if user.company_id else f"threads/{workspace_id}"
-            s3_client = S3Client(prefix=s3_prefix)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            # Normalize: strip leading/trailing slashes so "/Acta.docx" -> "Acta.docx"
-            name_for_path = (file_name or "").strip().lstrip("/")
-            safe_filename = name_for_path.replace(" ", "_").replace("/", "_") or "attachment"
-            file_path = f"adjuntos/{timestamp}_{safe_filename}"
-            upload_result = await asyncio.to_thread(
-                s3_client.upload_file,
-                file_path=file_path,
-                content=attachment_bytes,
-                metadata={
-                    "message_id": message_id,
-                    "attachment_id": attachment_id,
-                    "source": "gmail",
-                    "thread_id": workspace_id,
-                    "original_filename": file_name,
-                    "uploaded_at": datetime.now().isoformat(),
-                },
-            )
-            if upload_result["success"]:
-                workspace_path = f"/home/user/{file_path}"
-                return {
-                    "success": True,
-                    "path": workspace_path,
-                    "file_name": file_name,
-                    "message_id": message_id,
-                    "attachment_id": attachment_id,
-                    "size_bytes": len(attachment_bytes),
-                    "message": f"File saved to: {workspace_path}",
-                }
-            return {
-                "success": False,
-                "file_name": file_name,
-                "message_id": message_id,
-                "attachment_id": attachment_id,
-                "message": f"S3 upload failed: {upload_result.get('error')}",
-                "upload_error": upload_result.get("error"),
-            }
+    if not attachment_bytes:
         return {
             "success": False,
             "file_name": file_name,
             "message_id": message_id,
             "attachment_id": attachment_id,
-            "message": "Attachment data not found in response (expected 'data' or 'file' field)",
+            "message": "Attachment data not found in response",
         }
-    except json.JSONDecodeError as e:
-        preview = (result or "")[:200].replace("\n", " ")
-        return {
-            "success": False,
-            "file_name": file_name,
-            "message_id": message_id,
-            "attachment_id": attachment_id,
-            "message": f"Failed to parse attachment response as JSON: {e}. Preview: {preview!r}",
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "file_name": file_name,
-            "message_id": message_id,
-            "attachment_id": attachment_id,
-            "message": str(e),
-        }
+    workspace_id = get_workspace_id(runtime)
+    metadata = {
+        "message_id": message_id,
+        "attachment_id": attachment_id,
+        "source": "gmail",
+        "thread_id": workspace_id,
+        "original_filename": file_name,
+        "uploaded_at": datetime.now().isoformat(),
+    }
+    backend = get_backend(runtime)
+    return await upload_attachment_to_backend(backend, file_name, attachment_bytes, metadata)
 
 
 @tool(

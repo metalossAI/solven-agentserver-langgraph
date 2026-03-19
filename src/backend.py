@@ -3,6 +3,7 @@ S3-compatible backend for DeepAgents using MinIO or AWS S3.
 Implements the BackendProtocol for virtual filesystem operations.
 """
 import os
+import base64
 import re
 from langchain.tools import ToolRuntime
 import yaml
@@ -50,6 +51,32 @@ def _parse_skillmd_frontmatter(skillmd: str) -> str:
     
     # Return the frontmatter content (group 1 is the content between the --- delimiters)
     return match.group(1)
+
+
+# Document extensions that require Docling/Modal conversion to markdown.
+_READ_AS_DOCUMENT_EXTENSIONS = frozenset({
+    ".pdf", ".docx", ".doc",
+    ".xlsx", ".xls",
+    ".pptx", ".ppt",
+    ".odt", ".ods", ".odp",
+    ".rtf",
+})
+
+# Image extensions: do NOT convert to markdown. Instead embed as a markdown image data-url.
+_READ_AS_IMAGE_EXTENSIONS = frozenset({
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".tiff", ".tif", ".bmp",
+})
+
+_IMAGE_MIME_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".tiff": "image/tiff",
+    ".tif": "image/tiff",
+    ".bmp": "image/bmp",
+}
 
 
 class _BaseS3Backend(BackendProtocol):
@@ -190,6 +217,18 @@ class _BaseS3Backend(BackendProtocol):
             return f"{self.prefix}/{clean_path}"
         return clean_path
     
+    ADJUNTOS_DIR = "adjuntos"
+
+    def _normalize_upload_path_to_adjuntos(self, path: str) -> str:
+        """Ensure upload path is under /adjuntos/ so attachments never land at workspace root."""
+        if not path or not path.strip():
+            return f"/{self.ADJUNTOS_DIR}/attachment"
+        p = path.strip().replace("\\", "/").lstrip("/")
+        if p.startswith(f"{self.ADJUNTOS_DIR}/") or p == self.ADJUNTOS_DIR:
+            return f"/{p}" if not path.startswith("/") else path
+        leaf = p.split("/")[-1] if "/" in p else p
+        return f"/{self.ADJUNTOS_DIR}/{leaf}"
+
     def _key(self, path: str) -> str:
         """Map virtual path to actual S3 key respecting mounts."""
         resolved = self._resolve_path(path)
@@ -274,6 +313,42 @@ class _BaseS3Backend(BackendProtocol):
         elif dir_path == '/':
             return f"/{base_name}"
         return base_name
+
+    def _convert_to_markdown(self, content: bytes, filename: str) -> str:
+        """
+        Convert document bytes (PDF/DOCX/etc.) to markdown.
+
+        Prefer Modal GPU (Docling VLM) when configured; fall back to local Docling.
+        """
+        use_modal = bool((os.getenv("MODAL_TOKEN_ID") or os.getenv("USE_MODAL_DOCLING") or "").strip())
+        if use_modal:
+            try:
+                import modal
+                fn = modal.Function.from_name("solven-docling-converter", "convert_to_markdown")
+                return fn.remote(content, filename)
+            except Exception:
+                pass
+
+        # Fallback: local Docling (CPU, no VLM)
+        import tempfile
+
+        ext = (os.path.splitext(filename)[1] or "").lower()
+        suffix = ext or ".bin"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(content)
+            tmp.flush()
+            tmp_path = tmp.name
+        try:
+            from docling.document_converter import DocumentConverter
+
+            converter = DocumentConverter()
+            result = converter.convert(tmp_path)
+            return result.document.export_to_markdown()
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
     
     def _get_original_filename(self, md_file_path: str, available_originals: dict = None) -> str:
         """
@@ -481,59 +556,85 @@ class _BaseS3Backend(BackendProtocol):
     def read(self, file_path: str, offset: int = 0, limit: int = 2000, allow_non_markdown: bool = False) -> str:
         """
         Read file content with line numbers.
-        Returns numbered content or error string.
-        
-        Args:
-            file_path: Path to the file (virtual path with mount support)
-            offset: Line offset to start reading from
-            limit: Maximum number of lines to read
-            allow_non_markdown: If True, allows reading non-markdown files (e.g., from /skills)
+
+        Behavior:
+        - If a precomputed markdown version exists (same base name, `.md` extension), read it.
+        - Otherwise, fetch the original file and convert:
+          - PDF/DOCX/XLSX/PPTX/ODT/ODS/ODP/RTF -> markdown via Docling/Modal.
+          - Images -> not readable as text (deepagents should handle images via download_files).
+          - Other files -> try UTF-8 decode.
         """
         self._ensure_bucket_exists()
-        
-        # Map original filename to .md version for read operations
-        # This allows agents to reference "document.docx" but read "document.md"
-        file_path = self._map_to_md_file(file_path)
-        
-        # Block access to instructions.md files (internal configuration)
-        if file_path.endswith('/instructions.md') or file_path.endswith('instructions.md'):
-            return f"Error: File '{file_path}' not found"
-        
-        # Validate markdown file (skip validation if explicitly allowed)
-        if not allow_non_markdown:
-            error = self._ensure_markdown_file(file_path)
-            if error:
-                return error
-        
-        try:
-            key = self._key(file_path)
-            response = self.s3_client.get_object(Bucket=self.bucket, Key=key)
-            
-            # Try to decode as UTF-8, handle binary files
-            try:
-                content = response['Body'].read().decode('utf-8')
-            except UnicodeDecodeError:
-                return f"Error: File '{file_path}' is a binary file and cannot be read as text. Binary files (PDFs, images) are not directly readable by the agent."
-            
-            # Split into lines and apply offset/limit
-            lines = content.split('\n')
-            
-            # Apply offset and limit
+
+        def _format_numbered_lines(text: str) -> str:
+            lines = text.splitlines()
             start = offset
             end = min(offset + limit, len(lines))
             selected_lines = lines[start:end]
-            
-            # Add line numbers (1-indexed)
-            numbered_lines = []
-            for i, line in enumerate(selected_lines, start=start + 1):
-                numbered_lines.append(f"{i}\t{line}")
-            
-            return '\n'.join(numbered_lines)
-            
+            return "\n".join(
+                f"{i}\t{line}"
+                for i, line in enumerate(selected_lines, start=start + 1)
+            )
+
+        requested_path = file_path
+        ext = os.path.splitext(requested_path)[1].lower()
+
+        # Images: do not embed images as markdown/data-URLs in read().
+        # deepagents filesystem middleware creates proper multimodal blocks for supported
+        # image extensions by calling backend.download_files().
+        if ext in _READ_AS_IMAGE_EXTENSIONS:
+            return f"Error: File '{requested_path}' is an image and cannot be read as text."
+
+        md_file_path = self._map_to_md_file(file_path)
+
+        # Block access to internal instructions.md files
+        if md_file_path.endswith("/instructions.md") or md_file_path.endswith("instructions.md"):
+            return f"Error: File '{requested_path}' not found"
+
+        # 1) Try reading the precomputed markdown first.
+        try:
+            md_key = self._key(md_file_path)
+            response = self.s3_client.get_object(Bucket=self.bucket, Key=md_key)
+            content = response["Body"].read()
+            try:
+                text = content.decode("utf-8")
+            except UnicodeDecodeError:
+                return f"Error: File '{requested_path}' exists but its markdown content is not UTF-8."
+            return _format_numbered_lines(text)
         except ClientError as e:
-            if e.response['Error']['Code'] == 'NoSuchKey':
-                return f"Error: File '{file_path}' not found"
-            return f"Error reading file '{file_path}': {str(e)}"
+            if e.response.get("Error", {}).get("Code") != "NoSuchKey":
+                return f"Error reading file '{requested_path}': {str(e)}"
+
+        # 2) Fallback: fetch original file and convert/parse based on extension.
+        ext = os.path.splitext(requested_path)[1].lower()
+        try:
+            original_key = self._key(requested_path)
+            original_response = self.s3_client.get_object(Bucket=self.bucket, Key=original_key)
+            original_bytes = original_response["Body"].read()
+
+            # Documents -> convert to markdown.
+            if ext in _READ_AS_DOCUMENT_EXTENSIONS:
+                markdown = self._convert_to_markdown(original_bytes, requested_path)
+                return _format_numbered_lines(markdown)
+
+            # Images -> embed as markdown image.
+            if ext in _READ_AS_IMAGE_EXTENSIONS:
+                return _format_image_bytes_as_markdown_image(original_bytes, requested_path)
+
+            # Plain text / code -> decode as UTF-8.
+            try:
+                text = original_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                return (
+                    f"Error: File '{requested_path}' is a binary file and cannot be read as text. "
+                    "If this is a document, ensure it's a supported type (PDF/DOCX/etc.)."
+                )
+            return _format_numbered_lines(text)
+
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "NoSuchKey":
+                return f"Error: File '{requested_path}' not found"
+            return f"Error reading file '{requested_path}': {str(e)}"
     
     def grep_raw(
         self,
@@ -1337,6 +1438,7 @@ class SolvenS3Backend(_BaseS3Backend):
         responses = []
         for path, content in files:
             try:
+                path = self._normalize_upload_path_to_adjuntos(path)
                 key = self._key(path)
                 content_type = "application/octet-stream"
                 if path.endswith(".md") or path.endswith(".txt"):

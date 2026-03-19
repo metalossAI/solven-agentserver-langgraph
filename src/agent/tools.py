@@ -3,7 +3,7 @@ from langchain_core.tools import tool, InjectedToolArg
 from langchain_core.messages import ToolMessage
 from langchain.tools import ToolRuntime
 from src.models import AppContext
-from src.sandbox_backend import get_backend
+from src.utils.backend import get_backend
 from typing import Dict, Any, Optional, Annotated
 
 @tool

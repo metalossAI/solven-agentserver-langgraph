@@ -41,11 +41,6 @@ class AppContext(BaseModel):
         description="Current workspace/ticket path key for backends and file tools. When set (e.g. by seleccionar_ticket), all S3 and file operations use company_id/threads/{workspace_id}.",
     )
 
-    @model_serializer(mode="plain")
-    def _serialize_for_checkpoint(self) -> Dict[str, Any]:
-        """Serialize to JSON-safe dict so checkpoint/tool serialization does not trigger PydanticSerializationUnexpectedValue (Expected none)."""
-        return self.model_dump(mode="json")
-
 # Store Models to ensure orderd long term memory
 class Event(BaseModel):
     id : str

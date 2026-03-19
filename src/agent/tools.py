@@ -2,19 +2,11 @@ from deepagents.backends.protocol import FileDownloadResponse
 from langchain_core.tools import tool, InjectedToolArg
 from langchain_core.messages import ToolMessage
 from langchain.tools import ToolRuntime
-from pydantic import BaseModel, Field
 from src.models import AppContext
 from src.sandbox_backend import get_backend
-from typing import Annotated
+from typing import Dict, Any, Optional, Annotated
 
-
-class LoadSkillArgs(BaseModel):
-    """Schema for load_skill tool args. Only 'path' is in the schema; 'runtime' is injected and must not appear in JSON schema."""
-
-    path: str = Field(description="La ruta del skill a cargar")
-
-
-@tool(args_schema=LoadSkillArgs)
+@tool
 async def load_skill(
     path: Annotated[str, "La ruta del skill a cargar"],
     runtime: Annotated[ToolRuntime[AppContext], InjectedToolArg] = None
@@ -37,5 +29,4 @@ async def load_skill(
 	else:
 		reason = "archivo vacío o no se pudo leer" if responses else "archivo no encontrado"
 		return ToolMessage(name="load_skill", content=f"Error: No se pudo cargar la habilidad ({reason}): {path}", status="error", tool_call_id=runtime.tool_call_id)
-
 

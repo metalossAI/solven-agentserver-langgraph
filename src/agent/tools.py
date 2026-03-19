@@ -2,11 +2,19 @@ from deepagents.backends.protocol import FileDownloadResponse
 from langchain_core.tools import tool, InjectedToolArg
 from langchain_core.messages import ToolMessage
 from langchain.tools import ToolRuntime
+from pydantic import BaseModel, Field
 from src.models import AppContext
 from src.sandbox_backend import get_backend
-from typing import Dict, Any, Optional, Annotated
+from typing import Annotated
 
-@tool
+
+class LoadSkillArgs(BaseModel):
+    """Schema for load_skill tool args. Only 'path' is in the schema; 'runtime' is injected and must not appear in JSON schema."""
+
+    path: str = Field(description="La ruta del skill a cargar")
+
+
+@tool(args_schema=LoadSkillArgs)
 async def load_skill(
     path: Annotated[str, "La ruta del skill a cargar"],
     runtime: Annotated[ToolRuntime[AppContext], InjectedToolArg] = None

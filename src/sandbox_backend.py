@@ -37,7 +37,6 @@ SOLVEN_LOCKS = "/var/lib/solven/locks"  # Per-thread persist locks (flock)
 OPT_SOLVEN_SKILLS = "/opt/solven/skills"
 OPT_SOLVEN_USER_MODELS = "/opt/solven/user-models"
 OPT_SOLVEN_USER_MODELS_NORMALIZED = "/opt/solven/user-models/templates_normalized"  # Writable; syncs to S3 templates/normalized/
-WORKSPACES = ""
 RCLONE_CACHE_BASE = "/tmp/rclone-cache"
 
 # Dirs skipped during in-workspace glob / grep searches (caches, mounts, system).
@@ -80,6 +79,9 @@ _IMAGE_MIME_TYPES = {
 
 # Marker file written inside E2B workspace after full init; any new SandboxBackend instance can skip full setup if it exists.
 _WORKSPACE_READY_MARKER = ".workspace_ready"
+
+# Min seconds between S3→local rclone syncs on the fast init path (avoid hammering on every tool call).
+_HYDRATE_FROM_S3_THROTTLE_SEC = 45.0
 
 
 class SandboxBackend(BaseSandbox):
@@ -145,13 +147,45 @@ class SandboxBackend(BaseSandbox):
 		leaf = p.split("/")[-1] if "/" in p else p
 		return f"/{self.ADJUNTOS_DIR}/{leaf}"
 
+	def _normalize_agent_path(self, path: str) -> str:
+		"""
+		Map paths that mirror S3/host layout or legacy /workspaces to bwrap root paths.
+
+		Inside bwrap the thread workspace is mounted at /. Agent paths must be like ``/foo``.
+		If callers pass ``/{tenant_id}/threads/{thread_id}/foo`` (S3 key shape) or
+		``/workspaces/...`` (old layout), ``ls_info``/``scandir`` would look for nested dirs
+		that do not exist and return empty. This strips those prefixes.
+		"""
+		if not path or not path.strip():
+			return "/"
+		p = path.strip().replace("\\", "/")
+		if p in (".", "./"):
+			return "/"
+		if not p.startswith("/"):
+			p = "/" + p
+		p = p.rstrip("/") or "/"
+		prefix = f"/{self._tenant_id}/threads/{self._thread_id}"
+		if p == prefix or p.startswith(prefix + "/"):
+			rest = p[len(prefix) :].lstrip("/")
+			return f"/{rest}" if rest else "/"
+		# Legacy: /workspaces[/thread_id][/...]
+		if p == "/workspaces" or p.startswith("/workspaces/"):
+			rest = p[len("/workspaces") :].lstrip("/")
+			if rest.startswith(self._thread_id + "/"):
+				rest = rest[len(self._thread_id) + 1 :]
+			elif rest == self._thread_id:
+				rest = ""
+			return f"/{rest}" if rest else "/"
+		return p
+
 	def _resolve_workspace_path(self, path: str) -> str:
 		"""
-		Resolve agent-visible path to real path. Agent / = workspace root.
-		Normalizes and constrains so '..' cannot escape.
-		Attachment uploads use logical paths like ``/adjuntos/...``; they map under
-		``/workspaces/{thread_id}/adjuntos/...``.
+		Resolve an agent path to the real E2B filesystem path.
+
+		Agent `/` = ``self._workspace`` = ``/{tenant_id}/threads/{thread_id}`` on disk.
+		Always call ``_normalize_agent_path`` first so S3-mirror-shaped paths are stripped.
 		"""
+		path = self._normalize_agent_path(path)
 		if not path or path.strip() in ("", "/"):
 			return self._workspace
 		p = path.strip().replace("\\", "/").lstrip("/")
@@ -282,6 +316,20 @@ class SandboxBackend(BaseSandbox):
 		except Exception as e:
 			logging.warning("_hydrate_from_s3: %s", e)
 
+	def _maybe_hydrate_from_s3_throttled(self) -> None:
+		"""On repeated tool runs, periodically pull S3 so uploads from the app (cold storage) appear in the sandbox."""
+		if not self._sandbox or not getattr(self, "_workspace_ready", False):
+			return
+		now = _time.monotonic()
+		last = getattr(self, "_last_hydrate_from_s3_monotonic", 0.0)
+		if now - last < _HYDRATE_FROM_S3_THROTTLE_SEC:
+			return
+		self._last_hydrate_from_s3_monotonic = now
+		try:
+			self._hydrate_from_s3()
+		except Exception as e:
+			logging.warning("_maybe_hydrate_from_s3_throttled: %s", e)
+
 	def _ensure_skills_mount_dirs(self) -> None:
 		"""Ensure bwrap mount-point dirs exist inside /opt/solven/skills (for user-models sub-binds)."""
 		try:
@@ -335,7 +383,10 @@ class SandboxBackend(BaseSandbox):
 			f"rm -rf {shlex.quote(OPT_SOLVEN_SKILLS)}",
 			timeout=15, user="root",
 		)
-		self._sandbox.commands.run(f"mkdir -p {shlex.quote(os.path.dirname(OPT_SOLVEN_SKILLS))}", timeout=5, user="root")
+		self._sandbox.commands.run(
+			f"mkdir -p {shlex.quote(OPT_SOLVEN_SKILLS)} {shlex.quote(os.path.dirname(OPT_SOLVEN_SKILLS))}",
+			timeout=5, user="root",
+		)
 		try:
 			self._sandbox.git.clone(
 				SKILLS_REPO_URL,
@@ -348,7 +399,9 @@ class SandboxBackend(BaseSandbox):
 			)
 		except Exception as e:
 			msg = getattr(e, "stderr", None) or getattr(e, "stdout", None) or str(e)
-			raise RuntimeError(f"Failed to clone skills repo into {OPT_SOLVEN_SKILLS}: {msg}") from e
+			# Don't raise: keep the empty dir so bwrap can still bind /.solven/skills.
+			logging.warning("_ensure_skills_repo clone failed (skills unavailable): %s", msg)
+			return
 		self._ensure_skills_mount_dirs()
 
 	def _pull_user_models(self) -> None:
@@ -425,12 +478,16 @@ class SandboxBackend(BaseSandbox):
 			logging.warning("_ensure_thread_env bun install: %s", e)
 
 	def _ensure_workspace_ready(self) -> None:
-		"""Lightweight health check when already initialized (same run). Only verifies skills repo exists; user models were already pulled at init."""
+		"""Health check called on every tool invocation when already initialized.
+		Repairs skills dir if it disappeared (e.g. sandbox resumed from stale snapshot).
+		"""
 		if not self._sandbox or not getattr(self, "_workspace_ready", False):
 			return
 		try:
 			if not self._sandbox.files.exists(f"{OPT_SOLVEN_SKILLS}/.git/HEAD"):
-				logging.warning("_ensure_workspace_ready: skills repo missing")
+				logging.warning("_ensure_workspace_ready: skills dir missing, repairing")
+				self._ensure_boot_dirs()
+				self._ensure_skills_repo()
 		except Exception as e:
 			logging.warning("_ensure_workspace_ready: %s", e)
 
@@ -453,6 +510,7 @@ class SandboxBackend(BaseSandbox):
 				self._workspace_ready = False
 				self._sandbox = None
 			else:
+				self._maybe_hydrate_from_s3_throttled()
 				return
 
 		# Connect or resume the per-user E2B sandbox (fast: ~1s API call)
@@ -465,6 +523,7 @@ class SandboxBackend(BaseSandbox):
 				self._pull_user_models()
 				self._workspace_ready = True
 				self._initialized = True
+				self._maybe_hydrate_from_s3_throttled()
 				return
 		except Exception:
 			pass
@@ -715,7 +774,7 @@ class SandboxBackend(BaseSandbox):
 		workspace) scandir sees the correct dir. E.g. /.solven/skills/ -> list under thread workspace.
 		"""
 		self._ensure_initialized()
-		# Base runs execute() in bwrap with thread workspace bound to /; use agent path as-is
+		path = self._normalize_agent_path(path)
 		result = super().ls_info(path)
 		out = [p for p in result if self._is_workspace_path(p["path"])]
 		return out
@@ -723,6 +782,7 @@ class SandboxBackend(BaseSandbox):
 	def glob_info(self, pattern: str, path: str = "/") -> list["FileInfo"]:
 		"""List files matching pattern via find -iname (case-insensitive) so e.g. **/acta* matches ACTA JUNTA UNIVERSAL."""
 		self._ensure_initialized()
+		path = self._normalize_agent_path(path)
 		search_path = path.rstrip("/") or "/"
 		# Basename part for -iname: **/acta* -> acta*, **/*.pdf -> *.pdf
 		basename_pattern = pattern.split("/")[-1] if "/" in pattern else pattern
@@ -750,7 +810,8 @@ class SandboxBackend(BaseSandbox):
 	) -> "list[GrepMatch] | str":
 		"""Same as base (grep -rHnF via execute) but with --exclude-dir so root search is fast."""
 		self._ensure_initialized()
-		search_path = shlex.quote((path or ".").rstrip("/") or "/")
+		norm = self._normalize_agent_path(path or "/")
+		search_path = shlex.quote(norm.rstrip("/") or "/")
 		skip_dirs = set(_WORKSPACE_SEARCH_SKIP_DIRS)
 		exclude_dirs = " ".join(f"--exclude-dir={d}" for d in skip_dirs)
 		glob_pattern = f"--include={shlex.quote(glob)}" if glob else ""
@@ -848,6 +909,7 @@ class SandboxBackend(BaseSandbox):
 		so existing image handling / multimodal tool serialization stays consistent.
 		"""
 		self._ensure_initialized()
+		file_path = self._normalize_agent_path(file_path)
 
 		ext = (Path(file_path).suffix or "").lower()
 		# Block access to internal instructions.md files (consistent with parent semantics).
@@ -899,10 +961,29 @@ class SandboxBackend(BaseSandbox):
 			return f"Error converting '{file_path}' to markdown: {str(e)}"
 		return _format_numbered_lines(markdown)
 
+	def write(self, file_path: str, content: str) -> WriteResult:
+		self._ensure_initialized()
+		return super().write(self._normalize_agent_path(file_path), content)
+
+	def edit(
+		self,
+		file_path: str,
+		old_string: str,
+		new_string: str,
+		replace_all: bool = False,
+	) -> EditResult:
+		self._ensure_initialized()
+		return super().edit(
+			self._normalize_agent_path(file_path),
+			old_string,
+			new_string,
+			replace_all=replace_all,
+		)
+
 	def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
 		"""
 		Download files from the sandbox. Paths are agent-visible (e.g. /file.docx or /.solven/skills/...);
-		resolved to real sandbox paths under /workspaces/{thread_id} via _resolve_workspace_path.
+		resolved to real sandbox paths under {tenant_id}/threads/{thread_id} via _resolve_workspace_path.
 		"""
 		self._ensure_initialized()
 		responses = []
@@ -956,11 +1037,11 @@ class SandboxBackend(BaseSandbox):
 		return await asyncio.to_thread(self.ls_info, path)
 
 	async def aread(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
-		ext = (Path(file_path).suffix or "").lower()
+		norm = self._normalize_agent_path(file_path)
+		ext = (Path(norm).suffix or "").lower()
 		if ext not in _READ_AS_DOCUMENT_EXTENSIONS:
-			# Bypass our override and use BaseSandbox's read() behavior
-			# (important for images / multimodal tool serialization).
-			return await asyncio.to_thread(super().read, file_path, offset, limit)
+			# Bypass our document override; use BaseSandbox read (images / multimodal).
+			return await asyncio.to_thread(super().read, norm, offset, limit)
 		return await asyncio.to_thread(self.read, file_path, offset, limit)
 
 	async def awrite(self, file_path: str, content: str) -> WriteResult:

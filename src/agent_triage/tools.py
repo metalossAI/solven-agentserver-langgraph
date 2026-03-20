@@ -37,7 +37,8 @@ async def buscar_tickets(query: str, runtime: ToolRuntime[AppContext]) -> ToolMe
             return ToolMessage(
                 content="Error: Usuario sin compañía asignada",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="buscar_tickets",
             )
 
         from src.utils.vector_store import search
@@ -121,7 +122,8 @@ async def leer_ticket(ticket_id: str, runtime: ToolRuntime[AppContext]) -> ToolM
             return ToolMessage(
                 content="Error: Usuario sin compañía asignada",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="leer_ticket",
             )
 
         supabase_async = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -133,7 +135,8 @@ async def leer_ticket(ticket_id: str, runtime: ToolRuntime[AppContext]) -> ToolM
             return ToolMessage(
                 content=f"Error: No se encontró el ticket {ticket_id} o no pertenece a tu compañía",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="leer_ticket",
             )
         
         ticket = ticket_response.data[0]
@@ -164,7 +167,8 @@ async def leer_ticket(ticket_id: str, runtime: ToolRuntime[AppContext]) -> ToolM
             return ToolMessage(
                 content=f"Error: El ticket {ticket_id} no tiene contenido asociado",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="leer_ticket",
             )
         
         supabase = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -176,7 +180,8 @@ async def leer_ticket(ticket_id: str, runtime: ToolRuntime[AppContext]) -> ToolM
             return ToolMessage(
                 content=f"Error: No se pudo recuperar el contenido del ticket {ticket_id}",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="leer_ticket",
             )
         
         document = doc_response.data[0]
@@ -189,7 +194,8 @@ async def leer_ticket(ticket_id: str, runtime: ToolRuntime[AppContext]) -> ToolM
             return ToolMessage(
                 content=f"Error: El documento del ticket {ticket_id} no pertenece a tu compañía",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="leer_ticket",
             )
         
         # Fetch actions for this ticket
@@ -265,7 +271,8 @@ async def crear_ticket(
             return ToolMessage(
                 content="Error: Usuario sin compañía asignada",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="crear_ticket",
             )
 
         # Validate priority
@@ -365,7 +372,8 @@ async def crear_ticket(
             return ToolMessage(
                 content=f"Error al crear el documento con embeddings: {str(e)}",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="crear_ticket",
             )
         
         # Now create ticket with document_id
@@ -393,7 +401,8 @@ async def crear_ticket(
             return ToolMessage(
                 content="Error al crear ticket en la base de datos",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="crear_ticket",
             )
         
         # Create actions if provided
@@ -517,7 +526,8 @@ async def patch_ticket(
             return ToolMessage(
                 content="Error al actualizar ticket",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="patch_ticket",
             )
         
         # Update document content if descripcion is provided
@@ -673,7 +683,8 @@ async def descartar_evento(
                         ToolMessage(
                             content="Evento descartado completamente",
                             status="success",
-                            tool_call_id=runtime.tool_call_id
+                            tool_call_id=runtime.tool_call_id,
+                            name="descartar_evento",
                         )
                     ]
                 }
@@ -743,7 +754,8 @@ async def descartar_evento(
                         ToolMessage(
                             content=f"Error al crear el documento con embeddings: {str(e)}",
                             status="error",
-                            tool_call_id=runtime.tool_call_id
+                            tool_call_id=runtime.tool_call_id,
+                            name="descartar_evento",
                         )
                     ]
                 }
@@ -784,7 +796,8 @@ async def descartar_evento(
                         ToolMessage(
                             content="Error al crear ticket descartado en la base de datos",
                             status="error",
-                            tool_call_id=runtime.tool_call_id
+                            tool_call_id=runtime.tool_call_id,
+                            name="descartar_evento",
                         )
                     ]
                 }
@@ -799,7 +812,8 @@ async def descartar_evento(
                 "messages": [
                     ToolMessage(
                         content=f"Evento descartado y guardado como ticket {ticket_id}. Razón: {razon_descarte}. El ticket puede ser recuperado desde el frontend si es necesario.",
-                        tool_call_id=runtime.tool_call_id
+                        tool_call_id=runtime.tool_call_id,
+                        name="descartar_evento",
                     )
                 ]
             }
@@ -816,7 +830,8 @@ async def descartar_evento(
                     ToolMessage(
                         content=f"Error al descartar evento: {str(e)}",
                         status="error",
-                        tool_call_id=runtime.tool_call_id
+                        tool_call_id=runtime.tool_call_id,
+                        name="descartar_evento",
                     )
                 ]
             }
@@ -843,7 +858,8 @@ async def merge_tickets(ticket_ids: list[str], runtime: ToolRuntime[AppContext] 
             return ToolMessage(
                 content="Error: Se requieren al menos 2 tickets para fusionar",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="merge_tickets",
             )
         
         user = get_user()
@@ -853,7 +869,8 @@ async def merge_tickets(ticket_ids: list[str], runtime: ToolRuntime[AppContext] 
             return ToolMessage(
                 content="Error: Usuario sin compañía asignada",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="merge_tickets",
             )
 
         
@@ -870,7 +887,8 @@ async def merge_tickets(ticket_ids: list[str], runtime: ToolRuntime[AppContext] 
             return ToolMessage(
                 content=f"Error: No se encontraron todos los tickets o no pertenecen a tu compañía",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="merge_tickets",
             )
         
         tickets = tickets_response.data
@@ -882,7 +900,8 @@ async def merge_tickets(ticket_ids: list[str], runtime: ToolRuntime[AppContext] 
             return ToolMessage(
                 content="Error: No se encontraron todos los documentos asociados a los tickets",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="merge_tickets",
             )
         
         # Verify all documents belong to the company
@@ -896,7 +915,8 @@ async def merge_tickets(ticket_ids: list[str], runtime: ToolRuntime[AppContext] 
                 return ToolMessage(
                     content=f"Error: El documento {doc_id} no pertenece a tu compañía",
                     status="error",
-                    tool_call_id=runtime.tool_call_id
+                    tool_call_id=runtime.tool_call_id,
+                    name="merge_tickets",
                 )
             
             documents[doc_id] = doc
@@ -1005,7 +1025,8 @@ async def merge_tickets(ticket_ids: list[str], runtime: ToolRuntime[AppContext] 
             return ToolMessage(
                 content=f"Error al crear documento fusionado con embeddings: {str(e)}",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="merge_tickets",
             )
         
         # Create new merged ticket
@@ -1034,7 +1055,8 @@ async def merge_tickets(ticket_ids: list[str], runtime: ToolRuntime[AppContext] 
             return ToolMessage(
                 content="Error al crear ticket fusionado",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="merge_tickets",
             )
         
         # Delete original tickets and documents
@@ -1058,7 +1080,8 @@ async def merge_tickets(ticket_ids: list[str], runtime: ToolRuntime[AppContext] 
         print(f"[DEBUG] Merge completed successfully", flush=True)
         return ToolMessage(
             content=response_msg,
-            tool_call_id=runtime.tool_call_id
+            tool_call_id=runtime.tool_call_id,
+            name="merge_tickets",
         )
         
     except Exception as e:
@@ -1068,7 +1091,8 @@ async def merge_tickets(ticket_ids: list[str], runtime: ToolRuntime[AppContext] 
         return ToolMessage(
             content=f"Error al fusionar tickets: {str(e)}",
             status="error",
-            tool_call_id=runtime.tool_call_id
+            tool_call_id=runtime.tool_call_id,
+            name="merge_tickets",
         )
 
 @tool
@@ -1086,7 +1110,8 @@ async def leer_acciones(ticket_id: str, runtime: ToolRuntime[AppContext]) -> Too
             return ToolMessage(
                 content="Error: Usuario sin compañía asignada",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="leer_acciones",
             )
 
         supabase_async = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -1098,7 +1123,8 @@ async def leer_acciones(ticket_id: str, runtime: ToolRuntime[AppContext]) -> Too
             return ToolMessage(
                 content=f"Error: Ticket {ticket_id} no encontrado o no pertenece a tu compañía",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="leer_acciones",
             )
         
         ticket = ticket_check.data[0]
@@ -1128,7 +1154,8 @@ async def leer_acciones(ticket_id: str, runtime: ToolRuntime[AppContext]) -> Too
         
         return ToolMessage(
             content=response.strip(),
-            tool_call_id=runtime.tool_call_id
+            tool_call_id=runtime.tool_call_id,
+            name="leer_acciones",
         )
     except Exception as e:
         print(f"[ERROR] leer_acciones failed: {type(e).__name__}: {str(e)}", flush=True)
@@ -1137,7 +1164,8 @@ async def leer_acciones(ticket_id: str, runtime: ToolRuntime[AppContext]) -> Too
         return ToolMessage(
             content=f"Error al leer acciones: {str(e)}",
             status="error",
-            tool_call_id=runtime.tool_call_id
+            tool_call_id=runtime.tool_call_id,
+            name="leer_acciones",
         )
 
 @tool(args_schema=GestionarAccionesInput)
@@ -1161,7 +1189,8 @@ async def gestionar_acciones(
             return ToolMessage(
                 content="Error: Usuario sin compañía asignada",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="gestionar_acciones",
             )
 
         created_by = user.id
@@ -1175,7 +1204,8 @@ async def gestionar_acciones(
             return ToolMessage(
                 content=f"Error: Ticket {ticket_id} no encontrado o no pertenece a tu compañía",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="gestionar_acciones",
             )
         
         # IMPORTANT: First read existing actions to avoid duplicates
@@ -1198,7 +1228,8 @@ async def gestionar_acciones(
             return ToolMessage(
                 content="Error: Se requiere al menos una acción",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="gestionar_acciones",
             )
         
         actions_to_insert = []
@@ -1229,12 +1260,14 @@ async def gestionar_acciones(
                 return ToolMessage(
                     content=f"Todas las acciones propuestas ya existen en el ticket {ticket_id}. Acciones duplicadas: {', '.join(skipped_duplicates)}. Usa 'leer_acciones' para ver las acciones existentes.",
                     status="error",
-                    tool_call_id=runtime.tool_call_id
+                    tool_call_id=runtime.tool_call_id,
+                    name="gestionar_acciones",
                 )
             return ToolMessage(
                 content="Error: No se pudo procesar ninguna acción válida",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="gestionar_acciones",
             )
         
         # Insert actions
@@ -1256,7 +1289,8 @@ async def gestionar_acciones(
 
             return ToolMessage(
                 content=response_msg,
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="gestionar_acciones",
             )
         except Exception as e:
             print(f"[ERROR] Failed to insert actions: {str(e)}", flush=True)
@@ -1265,7 +1299,8 @@ async def gestionar_acciones(
             return ToolMessage(
                 content=f"Error al insertar acciones: {str(e)}",
                 status="error",
-                tool_call_id=runtime.tool_call_id
+                tool_call_id=runtime.tool_call_id,
+                name="gestionar_acciones",
             )
         
     except Exception as e:
@@ -1275,7 +1310,8 @@ async def gestionar_acciones(
         return ToolMessage(
             content=f"Error al gestionar acciones: {str(e)}",
             status="error",
-            tool_call_id=runtime.tool_call_id
+            tool_call_id=runtime.tool_call_id,
+            name="gestionar_acciones",
         )
 
 

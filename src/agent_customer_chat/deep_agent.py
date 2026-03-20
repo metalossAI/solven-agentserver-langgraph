@@ -8,7 +8,6 @@ from langchain.agents.middleware import ModelRequest, dynamic_prompt, AgentState
 from deepagents import create_deep_agent
 
 from src.llm import LLM as llm
-from src.middleware.tool_call_ids import UniqueToolCallIdsMiddleware
 from src.models import AppContext
 from src.agent_customer_chat.tools import (
     listar_solicitudes_cliente,
@@ -43,7 +42,7 @@ graph = create_deep_agent(
         actualizar_solicitud,
         #solicitar_archivo,
     ],
-    middleware=[build_prompt, UniqueToolCallIdsMiddleware()],
+    middleware=[build_prompt],
     system_prompt="",
     context_schema=AppContext,
 )

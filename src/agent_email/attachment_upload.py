@@ -81,7 +81,8 @@ async def upload_attachment_to_backend(
             "message_id": message_id,
             "attachment_id": attachment_id,
             "size_bytes": len(content),
-            "message": f"File saved to: {upload_path}",
+            # Keep user-facing output free of local/absolute filesystem locations.
+            "message": "Attachment downloaded successfully",
         }
     upload_error = resp.error if resp else "no response"
     return {

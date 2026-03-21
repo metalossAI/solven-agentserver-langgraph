@@ -33,7 +33,7 @@ from src.utils.config import get_user
 SANDBOX_TEMPLATE = "solven-sandbox-v1"
 SKILLS_REPO_URL = "https://github.com/metalossAI/solven-skills.git"
 
-SOLVEN_LOCKS = "/var/lib/solven/locks"  # Per-thread persist locks (flock)
+SOLVEN_LOCKS = "/var/lib/solven/locks"  # Reserved for sandbox-local coordination
 OPT_SOLVEN_SKILLS = "/opt/solven/skills"
 OPT_SOLVEN_USER_MODELS = "/opt/solven/user-models"
 OPT_SOLVEN_USER_MODELS_NORMALIZED = "/opt/solven/user-models/templates_normalized"  # Writable; syncs to S3 templates/normalized/
@@ -118,7 +118,6 @@ class SandboxBackend(BaseSandbox):
 		self._workspace_ready = False
 		self._initialized = False
 		self._bwrap_available: Optional[bool] = None
-		self._dirty = False
 		self.runtime = runtime
 
 	def _s3_envs(self) -> dict[str, str]:
@@ -180,10 +179,11 @@ class SandboxBackend(BaseSandbox):
 
 	def _resolve_workspace_path(self, path: str) -> str:
 		"""
-		Resolve an agent path to the real E2B filesystem path.
+		Resolve an agent path to the real E2B path for ``sandbox.files`` (uploads under workspace).
 
-		Agent `/` = ``self._workspace`` = ``/{tenant_id}/threads/{thread_id}`` on disk.
-		Always call ``_normalize_agent_path`` first so S3-mirror-shaped paths are stripped.
+		Agent `/` = ``self._workspace`` = ``/{tenant_id}/threads/{thread_id}``. Does not apply to
+		``/.solven/skills`` (bind mounts only exist inside bwrap); reads/downloads use
+		``_read_file_bytes_via_bwrap`` instead.
 		"""
 		path = self._normalize_agent_path(path)
 		if not path or path.strip() in ("", "/"):
@@ -300,13 +300,23 @@ class SandboxBackend(BaseSandbox):
 			timeout=10, user="root",
 		)
 
-	def _hydrate_from_s3(self) -> None:
-		"""Pull latest thread workspace from S3 into workspace/. Idempotent rclone sync. Excludes .solven, .venv, node_modules (local-only; populated separately)."""
+	def _hydrate_from_s3(self, copy_only: bool = False) -> None:
+		"""Pull latest thread workspace from S3 into workspace/.
+
+		When ``copy_only=True`` (used for periodic mid-run refreshes), ``rclone copy`` is used so
+		S3 files are added/updated locally but **locally-created files are never deleted**.  This
+		prevents the throttled hydration from stomping on files the agent just wrote before the
+		background persist to S3 completed.
+
+		When ``copy_only=False`` (initial full hydration on a fresh sandbox), ``rclone sync`` is
+		used to guarantee the workspace exactly mirrors S3.
+		"""
 		bucket = (os.getenv("S3_BUCKET_NAME") or "solven-testing").strip()
 		remote = f"s3remote:{bucket}/{self._tenant_id}/threads/{self._thread_id}"
 		excludes = "--exclude '.solven/**' --exclude '.venv/**' --exclude 'node_modules/**' --exclude '.bun/**' --exclude '.git/**'"
+		rclone_op = "copy" if copy_only else "sync"
 		cmd = (
-			f"rclone sync {shlex.quote(remote)}/ {shlex.quote(self._workspace)}/ "
+			f"rclone {rclone_op} {shlex.quote(remote)}/ {shlex.quote(self._workspace)}/ "
 			f"--config /root/.config/rclone/rclone.conf "
 			f"--fast-list --transfers 4 --no-update-modtime {excludes} "
 			f"2>/dev/null || true"
@@ -317,7 +327,11 @@ class SandboxBackend(BaseSandbox):
 			logging.warning("_hydrate_from_s3: %s", e)
 
 	def _maybe_hydrate_from_s3_throttled(self) -> None:
-		"""On repeated tool runs, periodically pull S3 so uploads from the app (cold storage) appear in the sandbox."""
+		"""On repeated tool runs, periodically pull S3 so uploads from the app (cold storage) appear in the sandbox.
+
+		Uses ``rclone copy`` (copy_only=True) so files that the agent created locally but has not
+		yet synced to S3 are never deleted by the incoming hydration.
+		"""
 		if not self._sandbox or not getattr(self, "_workspace_ready", False):
 			return
 		now = _time.monotonic()
@@ -326,7 +340,7 @@ class SandboxBackend(BaseSandbox):
 			return
 		self._last_hydrate_from_s3_monotonic = now
 		try:
-			self._hydrate_from_s3()
+			self._hydrate_from_s3(copy_only=True)
 		except Exception as e:
 			logging.warning("_maybe_hydrate_from_s3_throttled: %s", e)
 
@@ -562,58 +576,42 @@ class SandboxBackend(BaseSandbox):
 		"""Return True when the backend has a connected E2B sandbox and has completed initialization."""
 		return self._sandbox is not None and self._initialized
 
-	def _persist_shell_cmd(self) -> str:
-		"""Build persist as single shell command (serialized per thread via flock):
-		1. rclone sync workspace/ -> S3:{tenant_id}/threads/{id}/ (excluding .solven/.venv/node_modules/etc.)
-		2. rclone copy user templates -> S3:users/{id}/models/templates/
-		3. rclone copy user templates_normalized -> S3:users/{id}/models/templates/normalized/
-		4. rclone copy user references -> S3:users/{id}/models/references/
-		"""
-		persist_lock = f"{SOLVEN_LOCKS}/{self._thread_id}.persist.lock"
+	def _thread_workspace_rclone_sync_cmd(self) -> str:
+		"""Shell command: sync thread workspace dir to S3 (same flags as hydrate/persist)."""
 		bucket = (os.getenv("S3_BUCKET_NAME") or "solven-testing").strip()
-		threads_remote = f"s3remote:{bucket}/{self._tenant_id}/threads/{self._thread_id}"
-		s3_user_base = f"s3remote:{bucket}/{self._tenant_id}/users/{self._user_id}/models"
+		remote = f"s3remote:{bucket}/{self._tenant_id}/threads/{self._thread_id}"
 		excludes = "--exclude '.solven/**' --exclude '.venv/**' --exclude 'node_modules/**' --exclude '.bun/**' --exclude '.git/**'"
 		cfg = "--config /root/.config/rclone/rclone.conf --fast-list --transfers 4 --no-update-modtime"
+		return (
+			f"rclone sync {cfg} {excludes} {shlex.quote(self._workspace)}/ {shlex.quote(remote)}/ 2>/dev/null || true"
+		)
 
-		templates_src = f"{OPT_SOLVEN_USER_MODELS}/templates"
-		references_src = f"{OPT_SOLVEN_USER_MODELS}/references"
-
-		sync_project = f"rclone sync {cfg} {excludes} {shlex.quote(self._workspace)}/ {shlex.quote(threads_remote)}/ 2>/dev/null || true"
-		copy_templates = f"rclone copy {cfg} {shlex.quote(templates_src)}/ {shlex.quote(s3_user_base + '/templates')}/ 2>/dev/null || true"
-		copy_normalized = f"rclone copy {cfg} {shlex.quote(OPT_SOLVEN_USER_MODELS_NORMALIZED)}/ {shlex.quote(s3_user_base + '/templates/normalized')}/ 2>/dev/null || true"
-		copy_references = f"rclone copy {cfg} {shlex.quote(references_src)}/ {shlex.quote(s3_user_base + '/references')}/ 2>/dev/null || true"
-
-		inner = f"{sync_project} && {copy_templates} && {copy_normalized} && {copy_references}"
-		return f"flock -n {shlex.quote(persist_lock)} -c {shlex.quote(inner)}"
-
-	def persist_workspace(self, background: bool = True) -> None:
-		"""Persist local project/ to S3 (rclone sync). User models auto-sync via rclone VFS mount. Skips when not dirty."""
+	def _schedule_workspace_sync_to_s3(self) -> None:
+		"""Non-blocking upload of workspace → S3 (cold backup). Safe to call after every mutation."""
 		if not self._sandbox or not self._workspace_ready:
-			return
-		if not self._dirty:
-			return
-		if background:
-			try:
-				self._sandbox.commands.run(
-					self._persist_shell_cmd(),
-					timeout=300,
-					user="root",
-					envs=self._s3_envs(),
-					background=True,
-				)
-				self._dirty = False
-			except Exception as e:
-				logging.warning("persist_workspace background run: %s", e)
 			return
 		try:
 			self._sandbox.commands.run(
-				self._persist_shell_cmd(),
+				self._thread_workspace_rclone_sync_cmd(),
+				timeout=0,
+				background=True,
+				user="root",
+				envs=self._s3_envs(),
+			)
+		except Exception as e:
+			logging.warning("_schedule_workspace_sync_to_s3: %s", e)
+
+	def persist_workspace(self) -> None:
+		"""Blocking one-shot sync of thread workspace to S3. For explicit on-demand guarantees."""
+		if not self._sandbox or not self._workspace_ready:
+			return
+		try:
+			self._sandbox.commands.run(
+				self._thread_workspace_rclone_sync_cmd(),
 				timeout=300,
 				user="root",
 				envs=self._s3_envs(),
 			)
-			self._dirty = False
 		except Exception as e:
 			logging.warning("persist_workspace: %s", e)
 
@@ -720,6 +718,86 @@ class SandboxBackend(BaseSandbox):
 		]
 		return " ".join(shlex.quote(str(a)) for a in args)
 
+	def _run_bwrap_readonly(self, command: str) -> ExecuteResponse:
+		"""Run a trusted shell command in the same bwrap as ``execute`` without filter, dirty flag, or persist."""
+		self._ensure_initialized()
+		if not self._workspace_ready:
+			return ExecuteResponse(
+				output="Error: workspace not ready (sandbox init did not complete).",
+				exit_code=1,
+				truncated=False,
+			)
+		if self._bwrap_available is False:
+			return ExecuteResponse(
+				output="Error: bwrap not available (required for command execution). Ensure bubblewrap is installed in the E2B template.",
+				exit_code=1,
+				truncated=False,
+			)
+		full_cmd = self._build_bwrap_command(command)
+		try:
+			result = self._sandbox.commands.run(
+				full_cmd,
+				timeout=1200,
+				user="root",
+			)
+		except CommandExitException as e:
+			# Non-zero exit: E2B raises instead of returning; preserve code and stdout for readers.
+			return ExecuteResponse(
+				output=e.stdout or "",
+				exit_code=e.exit_code,
+				truncated=False,
+			)
+		except Exception as e:
+			return ExecuteResponse(
+				output=f"Error executing command: {str(e)}",
+				exit_code=1,
+				truncated=False,
+			)
+		# Use stdout only so stderr (e.g. Python warnings) cannot corrupt binary payloads.
+		return ExecuteResponse(
+			output=result.stdout or "",
+			exit_code=result.exit_code,
+			truncated=False,
+		)
+
+	def _read_file_bytes_via_bwrap(self, agent_path: str) -> tuple[bytes | None, str | None]:
+		"""
+		Read a file as bytes using agent-visible paths inside bwrap (same view as ``ls_info`` / ``execute``).
+
+		Avoids duplicating bind-mount logic in ``_resolve_workspace_path``: skills live at
+		``/.solven/skills/...`` in the sandbox namespace, not under ``{workspace}/.solven/``.
+		Returns (content, None) on success, or (None, error_code) where error_code is
+		``file_not_found``, ``is_directory``, or a short error string.
+		"""
+		norm = self._normalize_agent_path(agent_path)
+		pb = base64.b64encode(norm.encode("utf-8")).decode("ascii")
+		script = f"""import base64,os,sys
+p=base64.b64decode({repr(pb)}).decode("utf-8")
+if not os.path.lexists(p):
+    sys.exit(2)
+if os.path.isdir(p):
+    sys.exit(3)
+if not os.path.isfile(p):
+    sys.exit(4)
+with open(p,"rb") as f:
+    sys.stdout.buffer.write(base64.b64encode(f.read()))
+"""
+		cmd = "python3 -c " + shlex.quote(script)
+		res = self._run_bwrap_readonly(cmd)
+		if res.exit_code == 2:
+			return None, "file_not_found"
+		if res.exit_code == 3:
+			return None, "is_directory"
+		if res.exit_code == 4:
+			return None, "file_not_found"
+		if res.exit_code != 0:
+			msg = (res.output or "").strip() or "nonzero exit"
+			return None, f"download_error: {msg[:300]}"
+		try:
+			return base64.b64decode(res.output.strip()), None
+		except Exception as e:
+			return None, f"download_error: {e!s}"
+
 	def execute(self, command: str) -> ExecuteResponse:
 		"""Execute a shell command inside bwrap (workspace bound as /). No path rewriting; run command as-is."""
 		self._ensure_initialized()
@@ -746,18 +824,23 @@ class SandboxBackend(BaseSandbox):
 				timeout=1200,
 				user="root",
 			)
+		except CommandExitException as e:
+			result_stdout = e.stdout or ""
+			result_stderr = e.stderr or ""
+			self._schedule_workspace_sync_to_s3()
+			return ExecuteResponse(
+				output=result_stdout + result_stderr,
+				exit_code=e.exit_code,
+				truncated=False,
+			)
 		except Exception as e:
 			return ExecuteResponse(
 				output=f"Error executing command: {str(e)}",
 				exit_code=1,
 				truncated=False,
 			)
-		self._dirty = True
-		try:
-			self.persist_workspace(background=True)
-		except Exception:
-			pass
 
+		self._schedule_workspace_sync_to_s3()
 		return ExecuteResponse(
 			output=(result.stdout or "") + (result.stderr or ""),
 			exit_code=result.exit_code,
@@ -770,8 +853,8 @@ class SandboxBackend(BaseSandbox):
 
 	def ls_info(self, path: str) -> list[FileInfo]:
 		"""
-		List files under path. Pass agent path to base so that inside bwrap (where / = thread
-		workspace) scandir sees the correct dir. E.g. /.solven/skills/ -> list under thread workspace.
+		List files under path. Base uses ``execute`` → bwrap; ``/.solven/skills`` is bound to
+		``/opt/solven/skills`` (not under ``{tenant}/threads/{id}/.solven/`` on disk).
 		"""
 		self._ensure_initialized()
 		path = self._normalize_agent_path(path)
@@ -858,11 +941,8 @@ class SandboxBackend(BaseSandbox):
 			except Exception:
 				responses.append(FileUploadResponse(path=path, error="permission_denied"))
 
-		self._dirty = True
-		try:
-			self.persist_workspace(background=True)
-		except Exception:
-			pass
+		if any(r.error is None for r in responses):
+			self._schedule_workspace_sync_to_s3()
 
 		return responses
 
@@ -921,28 +1001,13 @@ class SandboxBackend(BaseSandbox):
 		if ext not in _READ_AS_DOCUMENT_EXTENSIONS:
 			return super().read(file_path, offset, limit)
 
-		real_path = self._resolve_workspace_path(file_path)
-		if not self._sandbox.files.exists(real_path):
+		content, err = self._read_file_bytes_via_bwrap(file_path)
+		if err == "file_not_found" or content is None:
 			return f"Error: File '{file_path}' not found"
-
-		# Ensure it's not a directory (best-effort).
-		try:
-			info = self._sandbox.files.get_info(real_path)
-			type_val = getattr(info, "type", None)
-			is_dir = getattr(info, "is_dir", False) or (str(type_val).lower().find("dir") >= 0)
-			if is_dir:
-				return f"Error: File '{file_path}' is a directory"
-		except Exception:
-			pass
-
-		download_url = self._sandbox.download_url(real_path)
-		import requests
-
-		response = requests.get(download_url, timeout=30)
-		response.raise_for_status()
-		content = response.content
-
-		basename = os.path.basename(file_path)
+		if err == "is_directory":
+			return f"Error: File '{file_path}' is a directory"
+		if err:
+			return f"Error reading '{file_path}': {err}"
 
 		def _format_numbered_lines(text: str) -> str:
 			lines = text.splitlines()
@@ -963,7 +1028,9 @@ class SandboxBackend(BaseSandbox):
 
 	def write(self, file_path: str, content: str) -> WriteResult:
 		self._ensure_initialized()
-		return super().write(self._normalize_agent_path(file_path), content)
+		out = super().write(self._normalize_agent_path(file_path), content)
+		self._schedule_workspace_sync_to_s3()
+		return out
 
 	def edit(
 		self,
@@ -973,51 +1040,33 @@ class SandboxBackend(BaseSandbox):
 		replace_all: bool = False,
 	) -> EditResult:
 		self._ensure_initialized()
-		return super().edit(
+		out = super().edit(
 			self._normalize_agent_path(file_path),
 			old_string,
 			new_string,
 			replace_all=replace_all,
 		)
+		self._schedule_workspace_sync_to_s3()
+		return out
 
 	def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
 		"""
-		Download files from the sandbox. Paths are agent-visible (e.g. /file.docx or /.solven/skills/...);
-		resolved to real sandbox paths under {tenant_id}/threads/{thread_id} via _resolve_workspace_path.
+		Download files using the same bwrap view as ``execute`` / ``ls_info`` (agent paths;
+		``/.solven/skills`` resolves via bind mounts, not ``_resolve_workspace_path``).
 		"""
 		self._ensure_initialized()
 		responses = []
 		for path in paths:
 			try:
-				real_path = self._resolve_workspace_path(path)
-
-				if not self._sandbox.files.exists(real_path):
-					responses.append(
-						FileDownloadResponse(path=path, content=None, error="file_not_found")
-					)
-					continue
-				# E2B download_url is for files only; skip directories
-				try:
-					info = self._sandbox.files.get_info(real_path)
-					type_val = getattr(info, "type", None)
-					is_dir = getattr(info, "is_dir", False) or (str(type_val).lower().find("dir") >= 0)
-					if is_dir:
-						responses.append(
-							FileDownloadResponse(path=path, content=None, error="is_directory")
-						)
-						continue
-				except Exception:
-					pass
-
-				download_url = self._sandbox.download_url(real_path)
-				import requests
-				response = requests.get(download_url, timeout=30)
-				response.raise_for_status()
-
-				responses.append(
-					FileDownloadResponse(path=path, content=response.content, error=None)
-				)
-
+				content, err = self._read_file_bytes_via_bwrap(path)
+				if err == "file_not_found":
+					responses.append(FileDownloadResponse(path=path, content=None, error="file_not_found"))
+				elif err == "is_directory":
+					responses.append(FileDownloadResponse(path=path, content=None, error="is_directory"))
+				elif err:
+					responses.append(FileDownloadResponse(path=path, content=None, error=err))
+				else:
+					responses.append(FileDownloadResponse(path=path, content=content, error=None))
 			except Exception as e:
 				responses.append(
 					FileDownloadResponse(path=path, content=None, error=f"download_error: {str(e)}")

@@ -297,6 +297,9 @@ graph = create_deep_agent(
     model=ChatOpenRouter(
         model="google/gemini-3-flash-preview",
         api_key=os.getenv("OPENROUTER_API_KEY"),
+        model_kwargs={
+            "parallel_tool_calls": False,
+        }
     ),
     system_prompt="",
     tools=[load_skill],

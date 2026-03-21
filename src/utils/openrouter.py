@@ -6,6 +6,9 @@ data:image/...;base64,...). Tool messages (e.g. from read tool) can contain
 type "image" with base64, which causes ValidationError. This module normalizes
 content so all messages sent to ChatOpenRouter use the expected schema.
 
+Also drops invalid ToolMessages (empty tool_call_id and empty name) before
+the model call — e.g. parallel tool cancellation stubs that trigger Gemini 400.
+
 See: https://openrouter.ai/docs/guides/overview/multimodal/images
 """
 
@@ -28,6 +31,32 @@ from langchain_core.messages.block_translators.openai import (
 )
 
 _DEFAULT_IMAGE_MIME = "image/png"
+
+
+def _nonempty_str(val: Any) -> bool:
+    if val is None:
+        return False
+    if isinstance(val, str):
+        return bool(val.strip())
+    return True
+
+
+def sanitize_invalid_tool_messages(messages: list) -> list[BaseMessage]:
+    """Remove ToolMessages that lack both tool_call_id and name (after strip).
+
+    Google AI Studio via OpenRouter returns 400 if a tool role message has
+    neither field. Parallel runs + cancellation can append stubs like
+    content='{"cancelled":true}' with empty tool_call_id and name.
+    """
+    out: list[BaseMessage] = []
+    for msg in messages:
+        if isinstance(msg, ToolMessage):
+            tid = getattr(msg, "tool_call_id", None)
+            name = getattr(msg, "name", None)
+            if not _nonempty_str(tid) and not _nonempty_str(name):
+                continue
+        out.append(msg)
+    return out
 
 
 def _normalize_content_block(block: Any) -> Any:
@@ -139,13 +168,14 @@ def normalize_messages_for_openrouter(messages: list) -> list[BaseMessage]:
 
 
 class OpenRouterContentMiddleware(AgentMiddleware):
-    """Middleware that normalizes message content blocks for OpenRouter before the model call."""
+    """Middleware: strip invalid tool messages, then normalize content for OpenRouter."""
 
     async def awrap_model_call(self, request, handler):
         if not request or not getattr(request, "messages", None):
             return await handler(request)
-        messages = getattr(request, "messages", [])
-        normalized = normalize_messages_for_openrouter(list(messages))
+        messages = list(getattr(request, "messages", []))
+        sanitized = sanitize_invalid_tool_messages(messages)
+        normalized = normalize_messages_for_openrouter(sanitized)
         if normalized != messages:
             modified = request.override(messages=normalized)
             return await handler(modified)

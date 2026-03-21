@@ -366,13 +366,11 @@ agent = create_agent(
         initialize_sandbox,
         main_prompt,
         OpenRouterContentMiddleware(),
-        ToolEnforcementMiddleware(),
         FilesystemMiddleware(
             backend=get_backend,
         ),
         ModelFallbackMiddleware(
-            ChatOpenRouter(model="x-ai/grok-4.1-fast",api_key=os.getenv("OPENROUTER_API_KEY")),
-
+            ChatOpenRouter(model="x-ai/grok-4.1-fast",api_key=os.getenv("OPENROUTER_API_KEY"))
         ),
         SubAgentMiddleware(
             backend=get_backend,

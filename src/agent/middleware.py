@@ -7,11 +7,17 @@ from langsmith.utils import LangSmithError
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, dynamic_prompt
 from langchain_core.messages import SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnableConfig
+from langgraph.runtime import Runtime
 
 from deepagents.middleware.skills import (
     SkillsMiddleware as BaseSkillsMiddleware,
     SkillMetadata,
+    SkillsState,
+    SkillsStateUpdate,
+    _alist_skills,
     _format_skill_annotations,
+    _list_skills,
 )
 
 # Fallback when LangSmith returns 403 or is unreachable (e.g. wrong key or private prompt).
@@ -146,4 +152,35 @@ class SkillsMiddleware(BaseSkillsMiddleware):
             )
 
         return "\n".join(lines)
+
+    def before_agent(
+        self,
+        state: SkillsState,
+        runtime: Runtime,
+        config: RunnableConfig,
+    ) -> SkillsStateUpdate | None:
+        """Like base SkillsMiddleware, but do not skip reload when skills_metadata is []."""
+        if state.get("skills_metadata"):
+            return None
+        backend = self._get_backend(state, runtime, config)
+        all_skills: dict[str, SkillMetadata] = {}
+        for source_path in self.sources:
+            for skill in _list_skills(backend, source_path):
+                all_skills[skill["name"]] = skill
+        return SkillsStateUpdate(skills_metadata=list(all_skills.values()))
+
+    async def abefore_agent(
+        self,
+        state: SkillsState,
+        runtime: Runtime,
+        config: RunnableConfig,
+    ) -> SkillsStateUpdate | None:
+        if state.get("skills_metadata"):
+            return None
+        backend = self._get_backend(state, runtime, config)
+        all_skills: dict[str, SkillMetadata] = {}
+        for source_path in self.sources:
+            for skill in await _alist_skills(backend, source_path):
+                all_skills[skill["name"]] = skill
+        return SkillsStateUpdate(skills_metadata=list(all_skills.values()))
 

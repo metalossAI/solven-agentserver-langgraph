@@ -551,14 +551,27 @@ class SandboxBackend(BaseSandbox):
 	def _ensure_workspace_ready(self) -> None:
 		"""Health check called on every tool invocation when already initialized.
 		Repairs skills dir if it disappeared (e.g. sandbox resumed from stale snapshot).
+		Also repairs partial trees: .git present but expected SKILL.md files missing.
 		"""
 		if not self._sandbox or not getattr(self, "_workspace_ready", False):
 			return
 		try:
-			if not self._sandbox.files.exists(f"{OPT_SOLVEN_SKILLS}/.git/HEAD"):
+			git_ok = self._sandbox.files.exists(f"{OPT_SOLVEN_SKILLS}/.git/HEAD")
+			docx_ok = self._sandbox.files.exists(f"{OPT_SOLVEN_SKILLS}/docx/SKILL.md")
+			esc_ok = self._sandbox.files.exists(f"{OPT_SOLVEN_SKILLS}/escrituras/SKILL.md")
+			if not git_ok:
 				logging.warning(
 					"_ensure_workspace_ready: %s/.git/HEAD missing — re-running skills clone",
 					OPT_SOLVEN_SKILLS,
+				)
+				self._ensure_boot_dirs()
+				self._ensure_skills_repo()
+			elif not docx_ok or not esc_ok:
+				logging.warning(
+					"_ensure_workspace_ready: expected skills missing under %s (docx=%s escrituras=%s) — re-running skills clone",
+					OPT_SOLVEN_SKILLS,
+					docx_ok,
+					esc_ok,
 				)
 				self._ensure_boot_dirs()
 				self._ensure_skills_repo()
@@ -597,6 +610,7 @@ class SandboxBackend(BaseSandbox):
 				self._pull_user_models()
 				self._workspace_ready = True
 				self._initialized = True
+				self._ensure_workspace_ready()
 				self._log_skills_filesystem_state("init_fast_path_marker_exists")
 				self._maybe_hydrate_from_s3_throttled()
 				return

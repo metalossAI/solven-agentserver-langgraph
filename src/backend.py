@@ -24,6 +24,7 @@ from deepagents.backends.protocol import (
 from deepagents.backends.utils import FileInfo, GrepMatch
 
 from src.models import AppContext
+from src.utils.document_conversion import convert_bytes_to_markdown
 
 
 def _parse_skillmd_frontmatter(skillmd: str) -> str:
@@ -315,40 +316,8 @@ class _BaseS3Backend(BackendProtocol):
         return base_name
 
     def _convert_to_markdown(self, content: bytes, filename: str) -> str:
-        """
-        Convert document bytes (PDF/DOCX/etc.) to markdown.
-
-        Prefer Modal GPU (Docling VLM) when configured; fall back to local Docling.
-        """
-        use_modal = bool((os.getenv("MODAL_TOKEN_ID") or os.getenv("USE_MODAL_DOCLING") or "").strip())
-        if use_modal:
-            try:
-                import modal
-                fn = modal.Function.from_name("solven-docling-converter", "convert_to_markdown")
-                return fn.remote(content, filename)
-            except Exception:
-                pass
-
-        # Fallback: local Docling (CPU, no VLM)
-        import tempfile
-
-        ext = (os.path.splitext(filename)[1] or "").lower()
-        suffix = ext or ".bin"
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp.write(content)
-            tmp.flush()
-            tmp_path = tmp.name
-        try:
-            from docling.document_converter import DocumentConverter
-
-            converter = DocumentConverter()
-            result = converter.convert(tmp_path)
-            return result.document.export_to_markdown()
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+        """Convert document bytes to markdown (Modal Docling, then local Docling)."""
+        return convert_bytes_to_markdown(content, filename)
     
     def _get_original_filename(self, md_file_path: str, available_originals: dict = None) -> str:
         """
@@ -612,14 +581,13 @@ class _BaseS3Backend(BackendProtocol):
             original_response = self.s3_client.get_object(Bucket=self.bucket, Key=original_key)
             original_bytes = original_response["Body"].read()
 
-            # Documents -> convert to markdown.
+            # Documents -> convert to markdown (Modal/Docling; see document_conversion.py).
             if ext in _READ_AS_DOCUMENT_EXTENSIONS:
-                markdown = self._convert_to_markdown(original_bytes, requested_path)
+                try:
+                    markdown = self._convert_to_markdown(original_bytes, requested_path)
+                except Exception as e:
+                    return f"Error converting '{requested_path}' to markdown: {str(e)}"
                 return _format_numbered_lines(markdown)
-
-            # Images -> embed as markdown image.
-            if ext in _READ_AS_IMAGE_EXTENSIONS:
-                return _format_image_bytes_as_markdown_image(original_bytes, requested_path)
 
             # Plain text / code -> decode as UTF-8.
             try:

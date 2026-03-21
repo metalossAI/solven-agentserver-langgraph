@@ -28,6 +28,7 @@ from langchain.tools import ToolRuntime
 from src.models import AppContext
 from src.backend import _parse_skillmd_frontmatter
 from src.utils.config import get_user
+from src.utils.document_conversion import convert_bytes_to_markdown
 # Workspace and user models (S3 mount at /mnt/user) via rclone in-sandbox; no s3_utils for tar/manifest.
 
 SANDBOX_TEMPLATE = "solven-sandbox-v1"
@@ -1023,38 +1024,8 @@ with open(p,"rb") as f:
 		return responses
 
 	def _convert_to_markdown(self, content: bytes, filename: str) -> str:
-		"""
-		Convert document bytes (PDF/DOCX/etc) to markdown.
-
-		Used only for document types (not code/text/images). Prefer Modal GPU (Docling VLM) when
-		configured; fall back to local Docling on failure.
-		"""
-		use_modal = bool((os.getenv("MODAL_TOKEN_ID") or os.getenv("USE_MODAL_DOCLING") or "").strip())
-		if use_modal:
-			try:
-				import modal
-				fn = modal.Function.from_name("solven-docling-converter", "convert_to_markdown")
-				return fn.remote(content, filename)
-			except Exception:
-				pass
-		# Fallback: local Docling (CPU, no VLM)
-		import tempfile
-		ext = (Path(filename).suffix or "").lower()
-		suffix = ext or ".bin"
-		with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-			tmp.write(content)
-			tmp.flush()
-			tmp_path = tmp.name
-		try:
-			from docling.document_converter import DocumentConverter
-			converter = DocumentConverter()
-			result = converter.convert(tmp_path)
-			return result.document.export_to_markdown()
-		finally:
-			try:
-				os.unlink(tmp_path)
-			except OSError:
-				pass
+		"""Convert document bytes to markdown (shared Modal/Docling path with S3 backend)."""
+		return convert_bytes_to_markdown(content, filename)
 
 	def read(self, file_path: str, offset: int = 0, limit: int = 2000, allow_non_markdown: bool = False) -> str:
 		"""

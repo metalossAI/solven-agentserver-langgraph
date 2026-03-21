@@ -132,6 +132,9 @@ ticket_triage_subagent = SubAgent(
 	tools=[buscar_tickets, leer_ticket, leer_acciones, crear_ticket, patch_ticket, merge_tickets, descartar_evento, gestionar_acciones, seleccionar_ticket],
 )
 
+# Filesystem tools (read_file, ls, …) use SolvenS3Backend: thread workspace at
+# {company_id}/threads/{workspace_id}. PDF/DOCX/etc. are converted via Modal/Docling
+# (see src/utils/document_conversion.py and _BaseS3Backend.read).
 graph = create_deep_agent(
 	model=ChatOpenRouter(
 		model="x-ai/grok-4.1-fast",

@@ -355,68 +355,125 @@ class SandboxBackend(BaseSandbox):
 		except Exception as e:
 			logging.warning("_ensure_skills_mount_dirs: %s", e)
 
+	def _log_skills_filesystem_state(self, phase: str) -> None:
+		"""Diagnostics for E2B dashboard confusion: git clone targets ``/opt/solven/skills``, not ``{workspace}/.solven/skills``."""
+		if not self._sandbox:
+			return
+		ws_dot_solven_skills = f"{self._workspace}/.solven/skills"
+		try:
+			ws_skills_exists = self._sandbox.files.exists(ws_dot_solven_skills)
+			opt_git = self._sandbox.files.exists(f"{OPT_SOLVEN_SKILLS}/.git/HEAD")
+			opt_docx = self._sandbox.files.exists(f"{OPT_SOLVEN_SKILLS}/docx/SKILL.md")
+			opt_esc = self._sandbox.files.exists(f"{OPT_SOLVEN_SKILLS}/escrituras/SKILL.md")
+			logging.info(
+				"[skills_fs] %s | workspace=%s | %s exists=%s (expected empty/absent; not git clone) | "
+				"/opt/solven/skills: .git=%s docx/SKILL.md=%s escrituras/SKILL.md=%s",
+				phase,
+				self._workspace,
+				ws_dot_solven_skills,
+				ws_skills_exists,
+				opt_git,
+				opt_docx,
+				opt_esc,
+			)
+			if not opt_git:
+				r = self._sandbox.commands.run(
+					f"ls -la {shlex.quote(OPT_SOLVEN_SKILLS)} 2>&1 | head -40",
+					timeout=10,
+					user="root",
+				)
+				snip = ((r.stdout or "") + (r.stderr or "")).strip()[:2500]
+				logging.warning(
+					"[skills_fs] %s: no %s/.git — clone failed or never ran. ls /opt/solven/skills:\n%s",
+					phase,
+					OPT_SOLVEN_SKILLS,
+					snip or "(empty)",
+				)
+		except Exception as e:
+			logging.warning("[skills_fs] %s probe failed: %s", phase, e)
+
 	def _ensure_skills_repo(self) -> None:
 		"""Ensure /opt/solven/skills has the skills git clone. Update in-place (pull or fetch+reset) when repo exists. Fresh clone directly into path (no temp dir)."""
-		self._sandbox.commands.run(
-			f"git config --global --add safe.directory {shlex.quote(OPT_SOLVEN_SKILLS)} 2>/dev/null || true",
-			timeout=5, user="root",
-		)
-		if self._sandbox.files.exists(f"{OPT_SOLVEN_SKILLS}/.git/HEAD"):
-			# Repo exists. Try to update in-place.
+		try:
+			self._sandbox.commands.run(
+				f"git config --global --add safe.directory {shlex.quote(OPT_SOLVEN_SKILLS)} 2>/dev/null || true",
+				timeout=5, user="root",
+			)
+			has_git = self._sandbox.files.exists(f"{OPT_SOLVEN_SKILLS}/.git/HEAD")
+			logging.info(
+				"[skills_repo] start has_.git=%s repo_url=%s git_token_set=%s",
+				has_git,
+				SKILLS_REPO_URL,
+				bool((os.getenv("GIT_TOKEN") or "").strip()),
+			)
+			if has_git:
+				# Repo exists. Try to update in-place.
+				try:
+					self._sandbox.git.pull(
+						path=OPT_SOLVEN_SKILLS,
+						username=os.getenv("GIT_USERNAME"),
+						password=os.getenv("GIT_TOKEN"),
+						user="root",
+						timeout=60,
+					)
+					logging.info("[skills_repo] git pull completed for %s", OPT_SOLVEN_SKILLS)
+					self._ensure_skills_mount_dirs()
+					return
+				except Exception as e:
+					logging.warning("_ensure_skills_repo git pull: %s", e)
+				try:
+					token = os.getenv("GIT_TOKEN") or ""
+					username_git = os.getenv("GIT_USERNAME") or ""
+					auth_url = SKILLS_REPO_URL.replace("https://", f"https://{username_git}:{token}@") if token else SKILLS_REPO_URL
+					r = self._sandbox.commands.run(
+						f"git -C {shlex.quote(OPT_SOLVEN_SKILLS)} remote set-url origin {shlex.quote(auth_url)} && "
+						f"git -C {shlex.quote(OPT_SOLVEN_SKILLS)} fetch --depth=1 origin main && "
+						f"git -C {shlex.quote(OPT_SOLVEN_SKILLS)} reset --hard origin/main",
+						timeout=60, user="root",
+					)
+					if r.exit_code == 0:
+						logging.info("[skills_repo] fetch+reset ok for %s", OPT_SOLVEN_SKILLS)
+						self._ensure_skills_mount_dirs()
+						return
+					logging.warning(
+						"[skills_repo] fetch+reset exit=%s stdout=%s stderr=%s",
+						r.exit_code,
+						(r.stdout or "")[:800],
+						(r.stderr or "")[:800],
+					)
+				except Exception as e:
+					logging.warning("_ensure_skills_repo fetch+reset: %s", e)
+				return
+
+			# No repo: remove existing dir and clone directly into OPT_SOLVEN_SKILLS (no temp dir).
+			logging.info("[skills_repo] no .git at %s — cloning", OPT_SOLVEN_SKILLS)
+			self._sandbox.commands.run(
+				f"rm -rf {shlex.quote(OPT_SOLVEN_SKILLS)}",
+				timeout=15, user="root",
+			)
+			self._sandbox.commands.run(
+				f"mkdir -p {shlex.quote(OPT_SOLVEN_SKILLS)} {shlex.quote(os.path.dirname(OPT_SOLVEN_SKILLS))}",
+				timeout=5, user="root",
+			)
 			try:
-				self._sandbox.git.pull(
+				self._sandbox.git.clone(
+					SKILLS_REPO_URL,
 					path=OPT_SOLVEN_SKILLS,
 					username=os.getenv("GIT_USERNAME"),
 					password=os.getenv("GIT_TOKEN"),
+					depth=1,
 					user="root",
-					timeout=60,
+					timeout=120,
 				)
-				self._ensure_skills_mount_dirs()
+				logging.info("[skills_repo] git clone completed into %s", OPT_SOLVEN_SKILLS)
+			except Exception as e:
+				msg = getattr(e, "stderr", None) or getattr(e, "stdout", None) or str(e)
+				# Don't raise: keep the empty dir so bwrap can still bind /.solven/skills.
+				logging.warning("_ensure_skills_repo clone failed (skills unavailable): %s", msg)
 				return
-			except Exception as e:
-				logging.warning("_ensure_skills_repo git pull: %s", e)
-			try:
-				token = os.getenv("GIT_TOKEN") or ""
-				username_git = os.getenv("GIT_USERNAME") or ""
-				auth_url = SKILLS_REPO_URL.replace("https://", f"https://{username_git}:{token}@") if token else SKILLS_REPO_URL
-				r = self._sandbox.commands.run(
-					f"git -C {shlex.quote(OPT_SOLVEN_SKILLS)} remote set-url origin {shlex.quote(auth_url)} && "
-					f"git -C {shlex.quote(OPT_SOLVEN_SKILLS)} fetch --depth=1 origin main && "
-					f"git -C {shlex.quote(OPT_SOLVEN_SKILLS)} reset --hard origin/main",
-					timeout=60, user="root",
-				)
-				if r.exit_code == 0:
-					self._ensure_skills_mount_dirs()
-					return
-			except Exception as e:
-				logging.warning("_ensure_skills_repo fetch+reset: %s", e)
-			return
-
-		# No repo: remove existing dir and clone directly into OPT_SOLVEN_SKILLS (no temp dir).
-		self._sandbox.commands.run(
-			f"rm -rf {shlex.quote(OPT_SOLVEN_SKILLS)}",
-			timeout=15, user="root",
-		)
-		self._sandbox.commands.run(
-			f"mkdir -p {shlex.quote(OPT_SOLVEN_SKILLS)} {shlex.quote(os.path.dirname(OPT_SOLVEN_SKILLS))}",
-			timeout=5, user="root",
-		)
-		try:
-			self._sandbox.git.clone(
-				SKILLS_REPO_URL,
-				path=OPT_SOLVEN_SKILLS,
-				username=os.getenv("GIT_USERNAME"),
-				password=os.getenv("GIT_TOKEN"),
-				depth=1,
-				user="root",
-				timeout=120,
-			)
-		except Exception as e:
-			msg = getattr(e, "stderr", None) or getattr(e, "stdout", None) or str(e)
-			# Don't raise: keep the empty dir so bwrap can still bind /.solven/skills.
-			logging.warning("_ensure_skills_repo clone failed (skills unavailable): %s", msg)
-			return
-		self._ensure_skills_mount_dirs()
+			self._ensure_skills_mount_dirs()
+		finally:
+			self._log_skills_filesystem_state("_ensure_skills_repo")
 
 	def _pull_user_models(self) -> None:
 		"""Copy user-specific templates, templates/normalized, and references from S3:users/{id}/models/ into /opt/solven/user-models. Fast; idempotent."""
@@ -499,7 +556,10 @@ class SandboxBackend(BaseSandbox):
 			return
 		try:
 			if not self._sandbox.files.exists(f"{OPT_SOLVEN_SKILLS}/.git/HEAD"):
-				logging.warning("_ensure_workspace_ready: skills dir missing, repairing")
+				logging.warning(
+					"_ensure_workspace_ready: %s/.git/HEAD missing — re-running skills clone",
+					OPT_SOLVEN_SKILLS,
+				)
 				self._ensure_boot_dirs()
 				self._ensure_skills_repo()
 		except Exception as e:
@@ -537,6 +597,7 @@ class SandboxBackend(BaseSandbox):
 				self._pull_user_models()
 				self._workspace_ready = True
 				self._initialized = True
+				self._log_skills_filesystem_state("init_fast_path_marker_exists")
 				self._maybe_hydrate_from_s3_throttled()
 				return
 		except Exception:
@@ -559,6 +620,7 @@ class SandboxBackend(BaseSandbox):
 				logging.warning("%s/escrituras/SKILL.md not found after init — skills may be unavailable", OPT_SOLVEN_SKILLS)
 		except Exception as e:
 			logging.warning("skills marker check after init: %s", e)
+		self._log_skills_filesystem_state("after_full_init")
 		self._workspace_ready = True
 		self._ensure_bwrap()
 		self._initialized = True

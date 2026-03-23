@@ -1,14 +1,24 @@
 from __future__ import annotations
 import logging
-import os
-from typing import Callable, Awaitable
+from typing import Any, Awaitable, Callable
+
 from langsmith import AsyncClient
 from langsmith.utils import LangSmithError
-from langchain.agents.middleware import AgentMiddleware, ModelRequest, dynamic_prompt
-from langchain_core.messages import SystemMessage
+from langchain.agents.middleware import (
+    AgentMiddleware,
+    AgentState,
+    ModelRequest,
+    ModelResponse,
+    dynamic_prompt,
+)
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableConfig
 from langgraph.runtime import Runtime
+from langgraph.types import Command
+from langchain.tools.tool_node import ToolCallRequest
+
+from src.models import DeepAgentState
 
 from deepagents.middleware.skills import (
     SkillsMiddleware as BaseSkillsMiddleware,
@@ -16,7 +26,6 @@ from deepagents.middleware.skills import (
     SkillsState,
     SkillsStateUpdate,
     _alist_skills,
-    _format_skill_annotations,
     _list_skills,
 )
 
@@ -52,19 +61,123 @@ def create_prompt_middleware(
     Returns a @dynamic_prompt middleware that builds the system message for the given prompt_id.
     The returned function can be passed at runtime (e.g. to create_agent(middleware=[...])).
     get_variables(request) is called to obtain the format variables; the formatted template
-    is prepended to the request's system_message content_blocks.
+    is prepended before the existing ``request.system_message`` content_blocks so earlier
+    middleware additions are preserved.
     """
     @dynamic_prompt
     async def middleware(request: ModelRequest) -> SystemMessage:
         variables = await get_variables(request)
         initial_prompt = await build_prompt_template(prompt_id, variables)
         system_prompt = request.system_message
+        prior_blocks = list(system_prompt.content_blocks) if system_prompt is not None else []
         new_content = [
             {"type": "text", "text": f"{initial_prompt}\n\n"},
-            *system_prompt.content_blocks,
+            *prior_blocks,
         ]
         return SystemMessage(content=new_content)
     return middleware
+
+
+# Marks SystemMessages from this middleware (UI may hide via additional_kwargs.type).
+AUTO_EVALUATION_CHECKPOINT_TYPE = "auto_evaluation_checkpoint"
+
+DEFAULT_PERIODIC_AUTO_EVALUATION_PROMPT = (
+    "Pausa de autoevaluación: revisa el hilo reciente (últimas herramientas y sus resultados). "
+    "Comprueba si la dirección general es correcta, si los resultados son coherentes con la petición "
+    "del usuario y si conviene corregir el plan o repetir alguna herramienta con otros parámetros. "
+    "Si todo es correcto, continúa con más herramientas o con tu respuesta final; si no, ajusta el curso."
+)
+
+
+class ReflectionMiddleware(AgentMiddleware):
+    """Post-tool reflection: set ``reflection_pending`` after tools, inject prompt before model, clear after final AI."""
+
+    state_schema = DeepAgentState
+
+    def __init__(self, *, reflection_prompt: str | None = None) -> None:
+        super().__init__()
+        self._prompt = reflection_prompt or DEFAULT_PERIODIC_AUTO_EVALUATION_PROMPT
+
+    def _should_inject_reflection(self, request: ModelRequest) -> bool:
+        st = request.state
+        if st.get("reflection_pending"):
+            return True
+        msgs = st.get("messages") or []
+        return bool(msgs) and isinstance(msgs[-1], ToolMessage)
+
+    def _with_reflection_system(self, request: ModelRequest) -> ModelRequest:
+        sm = request.system_message
+        prior_blocks = list(sm.content_blocks) if sm is not None else []
+        new_content = prior_blocks + [{"type": "text", "text": self._prompt}]
+        return request.override(system_message=SystemMessage(content=new_content))
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        try:
+            if self._should_inject_reflection(request):
+                request = self._with_reflection_system(request)
+        except Exception:
+            logging.exception("ReflectionMiddleware.wrap_model_call failed; continuing without injection.")
+        return handler(request)
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse:
+        try:
+            if self._should_inject_reflection(request):
+                request = self._with_reflection_system(request)
+        except Exception:
+            logging.exception("ReflectionMiddleware.awrap_model_call failed; continuing without injection.")
+        return await handler(request)
+
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Any],
+    ) -> Any:
+        result = handler(request)
+        try:
+            if isinstance(result, ToolMessage):
+                return Command(update={"reflection_pending": True, "messages": [result]})
+        except Exception:
+            logging.exception("ReflectionMiddleware.wrap_tool_call failed; returning raw tool result.")
+        return result
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[Any]],
+    ) -> Any:
+        result = await handler(request)
+        try:
+            if isinstance(result, ToolMessage):
+                return Command(update={"reflection_pending": True, "messages": [result]})
+        except Exception:
+            logging.exception("ReflectionMiddleware.awrap_tool_call failed; returning raw tool result.")
+        return result
+
+    def after_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+        _ = runtime
+        try:
+            messages = list(state.get("messages") or [])
+            if not messages:
+                return None
+            last = messages[-1]
+            if isinstance(last, AIMessage) and not getattr(last, "tool_calls", None):
+                return {"reflection_pending": False}
+            return None
+        except Exception:
+            logging.exception("ReflectionMiddleware.after_model failed; skipping.")
+            return None
+
+    async def aafter_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+        return self.after_model(state, runtime)
+
 
 def _skill_name_from_path(path: str) -> str | None:
     """Derive skill folder name from path, e.g. '/.solven/skills/docx/SKILL.md' -> 'docx'."""
@@ -81,11 +194,8 @@ def _skill_name_from_path(path: str) -> str | None:
 
 class SkillsMiddleware(BaseSkillsMiddleware):
     """
-    Custom SkillsMiddleware for Solven.
-    Same behavior as deepagents.middleware.skills.SkillsMiddleware, but the
-    system prompt explicitly instructs the model to use the `load_skill` tool
-    to read full skill instructions instead of reading the files directly.
-    Supports exclude_skills to filter out skills by name or path (e.g. ["docx"]).
+    SkillsMiddleware for Solven: extends the default deepagents skills list formatting
+    with optional exclude_skills (filter by name or path, e.g. ["docx"]).
     """
 
     def __init__(
@@ -116,42 +226,8 @@ class SkillsMiddleware(BaseSkillsMiddleware):
         return out
 
     def _format_skills_list(self, skills: list[SkillMetadata]) -> str:
-        """Format skills metadata for display in system prompt.
-
-        Overridden to nudge the model towards using the `load_skill` tool.
-        Excluded skills (exclude_skills) are filtered out before formatting.
-        """
-        skills = self._filtered_skills(skills)
-        if not skills:
-            paths = [f"{source_path}" for source_path in self.sources]
-            return (
-                f"(No skills available yet. You can create skills in "
-                f"{' or '.join(paths)})"
-            )
-
-        lines: list[str] = []
-        for skill in skills:
-            annotations = _format_skill_annotations(skill)
-            desc_line = f"- **{skill.get('name', '')}**: {skill.get('description', '')}"
-            if annotations:
-                desc_line += f" ({annotations})"
-            lines.append(desc_line)
-
-            allowed = skill.get("allowed_tools") or []
-            if allowed:
-                lines.append(
-                    f"  -> Allowed tools: {', '.join(allowed)}"
-                )
-
-            # Key change from the base middleware: instead of telling the model
-            # to read the file path directly, we direct it to use the load_skill
-            # tool with the path as input.
-            lines.append(
-                "  -> To read this skill, call the `load_skill` tool with "
-                f"the path `{skill.get('path', '')}`."
-            )
-
-        return "\n".join(lines)
+        """Format skills for the system prompt; applies exclude_skills then delegates to base."""
+        return super()._format_skills_list(self._filtered_skills(skills))
 
     def before_agent(
         self,
@@ -183,4 +259,3 @@ class SkillsMiddleware(BaseSkillsMiddleware):
             for skill in await _alist_skills(backend, source_path):
                 all_skills[skill["name"]] = skill
         return SkillsStateUpdate(skills_metadata=list(all_skills.values()))
-

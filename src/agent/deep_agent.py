@@ -8,12 +8,12 @@ from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
 from dotenv import load_dotenv
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langchain_openrouter.chat_models import ChatOpenRouter
-from langgraph.types import Command
+
+from src.common.tools import ask
+from src.agent_email.agent import email_coordinator
 load_dotenv()
 
-from langchain_openai.chat_models import ChatOpenAI
-from langchain.tools import ToolRuntime
-from langchain.agents.middleware import AgentMiddleware, ModelFallbackMiddleware, ModelRequest, before_model, ModelResponse, wrap_model_call, after_agent, hook_config
+from langchain.agents.middleware import AgentMiddleware, ModelFallbackMiddleware, ModelRequest, ModelResponse, wrap_model_call, after_agent, hook_config
 
 from langchain_core.messages import SystemMessage, ToolMessage, AIMessage, HumanMessage
 from langchain.agents import create_agent
@@ -27,15 +27,14 @@ from langgraph.runtime import Runtime
 
 from langgraph.config import get_config
 
-from deepagents import MemoryMiddleware, create_deep_agent, SubAgent
+from deepagents import CompiledSubAgent, MemoryMiddleware, create_deep_agent, SubAgent
 
 from src.llm import LLM as llm, google_gemini
 from src.llm import CODING_LLM as coding_llm
-from src.models import AppContext, SolvenState
+from src.models import AppContext, DeepAgentState, SolvenState
 
 from src.agent_catastro.agent import subagent as catastro_subagent
-from src.agent.tools import load_skill
-from src.agent.middleware import create_prompt_middleware
+from src.agent.middleware import ReflectionMiddleware, create_prompt_middleware
 from src.utils.tickets import get_ticket
 from src.common_tools.files import solicitar_archivo
 
@@ -44,7 +43,7 @@ from langgraph.runtime import Runtime
 from typing import Callable, Awaitable
 
 # Import email tools
-from src.agent_email.gmail_tools import gmail_tools, gmail_send_email
+from src.agent_email.gmail_tools import gmail_tools
 from src.agent_email.outlook_tools import outlook_tools
 from src.agent.middleware import SkillsMiddleware
 from src.utils.openrouter import OpenRouterContentMiddleware
@@ -88,63 +87,6 @@ EVALUATION_PROMPT = (
 
 # Metadata key used to mark our evaluation SystemMessages (avoids content-based detection)
 EVALUATION_MSG_TYPE = "evaluation"
-
-
-@after_agent
-@hook_config(can_jump_to=["model"])
-def continuation_evaluation_middleware(state: AgentState, runtime: Runtime[AppContext]) -> dict | None:
-	"""
-	Middleware so the model always evaluates tool results before ending.
-
-	- After tools run, we inject a single evaluation request and jump back to the model.
-	- The model then reads all tool results and either calls more tools or ends with a final reply.
-	- We only inject when there are tool results that have not yet been "answered" by a model turn
-	  (so we never re-send evaluation after the model has already replied).
-	- Capped by MAX_EVALUATION_CYCLES to avoid infinite loops.
-	"""
-	messages = state.get("messages", [])
-
-	# 1) If the last message is an AIMessage with tool_calls, tools have not run yet — do nothing.
-	if messages:
-		last = messages[-1]
-		if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
-			return None
-
-	def is_evaluation_msg(msg) -> bool:
-		if not isinstance(msg, SystemMessage):
-			return False
-		meta = getattr(msg, "additional_kwargs", None) or {}
-		return meta.get("type") == EVALUATION_MSG_TYPE
-
-	# 2) Count existing evaluation prompts so we can cap cycles.
-	evaluation_count = sum(1 for m in messages if is_evaluation_msg(m))
-	if evaluation_count >= MAX_EVALUATION_CYCLES:
-		return None
-
-	# 3) Find the last evaluation message (if any).
-	last_eval_i = -1
-	for i in range(len(messages) - 1, -1, -1):
-		if is_evaluation_msg(messages[i]):
-			last_eval_i = i
-			break
-
-	# 4) "Unanswered" tool results = ToolMessages after the last evaluation.
-	#    If the model already replied after that evaluation, the last message is AIMessage (no tool_calls),
-	#    and there are no ToolMessages after the evaluation — so we won't inject again.
-	after_last_eval = messages[last_eval_i + 1:] if last_eval_i >= 0 else messages
-	has_unanswered_tool_results = any(isinstance(m, ToolMessage) for m in after_last_eval)
-
-	if not has_unanswered_tool_results:
-		return None
-
-	evaluation_message = SystemMessage(
-		content=EVALUATION_PROMPT,
-		additional_kwargs={"type": EVALUATION_MSG_TYPE},
-	)
-	return {
-		"messages": [evaluation_message],
-		"jump_to": "model",
-	}
 
 
 @before_agent
@@ -209,9 +151,73 @@ async def _get_official_notarial_variables(request: ModelRequest) -> dict:
         "language": "español",
     }
 
+def _composio_toolkit_active(entry: dict | None) -> bool:
+    if not entry or not isinstance(entry, dict):
+        return False
+    return str(entry.get("status") or "").upper() == "ACTIVE"
+
+
+async def _get_email_variables(request: ModelRequest) -> dict:
+    """Build format variables for the email prompt from request/context."""
+    from src.utils.config import (
+        get_user,
+        get_composio_email_connections,
+        get_email_preferences,
+    )
+
+    try:
+        user = get_user()
+        name = user.name or "Usuario"
+        user_email = user.email or ""
+    except RuntimeError:
+        name = "Usuario"
+        user_email = ""
+
+    conn = get_composio_email_connections()
+    gmail = conn.get("gmail") if isinstance(conn.get("gmail"), dict) else {}
+    outlook = conn.get("outlook") if isinstance(conn.get("outlook"), dict) else {}
+    gmail_connected = _composio_toolkit_active(gmail)
+    outlook_connected = _composio_toolkit_active(outlook)
+
+    def _line(label: str, entry: dict, active: bool) -> str:
+        if not entry:
+            return f"{label}: sin datos de conexión en esta sesión (pide al usuario conectar la cuenta)."
+        st = entry.get("status", "?")
+        hint = entry.get("name") or entry.get("connectedAccountId") or ""
+        extra = f" — {hint}" if hint else ""
+        state = "conectado (ACTIVE)" if active else f"no disponible (estado: {st})"
+        return f"{label}: {state}{extra}"
+
+    connected_accounts_summary = "\n".join(
+        [
+            _line("Gmail", gmail, gmail_connected),
+            _line("Outlook", outlook, outlook_connected),
+        ]
+    )
+
+    prefs = get_email_preferences()
+    email_signature = str(prefs.get("signature") or "")
+    email_sign_off = str(prefs.get("sign_off") or "")
+    reply_language = str(prefs.get("default_reply_language") or "").strip() or "español"
+    language = reply_language
+
+    return {
+        "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "name": name,
+        "language": language,
+        "user_email": user_email,
+        "gmail_connected": "sí" if gmail_connected else "no",
+        "outlook_connected": "sí" if outlook_connected else "no",
+        "connected_accounts_summary": connected_accounts_summary,
+        "email_signature": email_signature,
+        "email_sign_off": email_sign_off,
+        "reply_language": reply_language,
+    }
+
 # Middleware created by factory; pass at runtime to create_agent / create_deep_agent
 main_prompt = create_prompt_middleware("solven-main", _get_solven_main_variables)
 official_notarial_prompt = create_prompt_middleware("solven-subagent-oficial", _get_official_notarial_variables)
+email_prompt = create_prompt_middleware("solven-subagent-email", _get_email_variables)
 
 @wrap_model_call
 async def dynamic_model_router(request: ModelRequest, handler):
@@ -251,26 +257,27 @@ async def dynamic_model_router(request: ModelRequest, handler):
     except Exception:
         return await handler(request)
 
-gmail_subagent = SubAgent(
-                    name="asistente_gmail",
-                    description="agente para gestionar correo de gmail - listar, leer y enviar correos electrónicos",
-                    system_prompt="",
-                    model=llm,
-                    tools=gmail_tools,
-                    #interrupt_on={"GMAIL_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]}}
-                )
-
-outlook_subagent = SubAgent(
-    name="asistente_outlook",
-    description="agente para gestionar correo de outlook - listar, leer y enviar correos electrónicos",
-    system_prompt="",
-    model=llm,
-    tools=outlook_tools,
-    #interrupt_on={"OUTLOOK_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]}}
-)
-
 # Unified skills directory: user skills + Anthropic skills installed via npx (bind mount at /workspace/.solven/skills)
 USER_SKILLS_PATH = "/.solven/skills/"
+
+# Default middleware stack for nested subagents (documents + email coordinator)
+gp_middleware: list[AgentMiddleware] = [
+    TodoListMiddleware(),
+    FilesystemMiddleware(backend=get_backend),
+    SummarizationMiddleware(
+            model=ChatOpenRouter(
+                model="x-ai/grok-4.1-fast",
+                api_key=os.getenv("OPENROUTER_API_KEY"),
+            ),
+            backend=get_backend,
+            trigger=("fraction", 0.85),
+            trim_tokens_to_summarize=None,
+            truncate_args_settings=None,
+    ),
+    AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
+    PatchToolCallsMiddleware(),
+    OpenRouterContentMiddleware(),
+]
 
 oficial_notarial = SubAgent(
     name="oficial_notarial",
@@ -293,27 +300,28 @@ oficial_notarial = SubAgent(
     ],
 )
 
+
+
 graph = create_deep_agent(
     model=ChatOpenRouter(
         model="google/gemini-3-flash-preview",
         api_key=os.getenv("OPENROUTER_API_KEY"),
-        model_kwargs={
-            "parallel_tool_calls": False,
-        }
     ),
     system_prompt="",
-    tools=[load_skill],
+    tools=[ask],
     backend=get_backend,
     subagents=[
-        oficial_notarial,
-        gmail_subagent,
-        outlook_subagent,
+        CompiledSubAgent(
+            name="asistente_correo",
+            description="",
+            runnable=email_coordinator,
+        ),
         catastro_subagent,
     ],
     middleware=[
-        initialize_sandbox,
-        main_prompt,
-        ModelFallbackMiddleware(
+       initialize_sandbox,
+       main_prompt,
+       ModelFallbackMiddleware(
             ChatOpenRouter(
                 model="x-ai/grok-4.1-fast",
                 api_key=os.getenv("OPENROUTER_API_KEY")
@@ -334,121 +342,99 @@ graph = create_deep_agent(
     context_schema=AppContext,
 )
 
-# Build general-purpose subagent with default middleware stack
-gp_middleware: list[AgentMiddleware] = [
-    OpenRouterContentMiddleware(),
-    TodoListMiddleware(),
-    FilesystemMiddleware(backend=get_backend),
-    SummarizationMiddleware(
-            model=ChatOpenRouter(
-                model="x-ai/grok-4.1-fast",
-                api_key=os.getenv("OPENROUTER_API_KEY"),
-            ),
-            backend=get_backend,
-            trigger=("fraction", 0.85),
-            trim_tokens_to_summarize=None,
-            truncate_args_settings=None,
-    ),
-    AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
-    PatchToolCallsMiddleware(),
-]
-
-agent = create_agent(
-    model=ChatOpenRouter(
-        model="google/gemini-3-flash-preview",
-        api_key=os.getenv("OPENROUTER_API_KEY"),
-        model_kwargs={
-            "parallel_tool_calls": False,
-        }
-    ),
-    system_prompt="",
-    middleware=[
-        initialize_sandbox,
-        main_prompt,
-        OpenRouterContentMiddleware(),
-        FilesystemMiddleware(
-            backend=get_backend,
-        ),
-        ModelFallbackMiddleware(
-            ChatOpenRouter(model="x-ai/grok-4.1-fast",api_key=os.getenv("OPENROUTER_API_KEY"))
-        ),
-        SubAgentMiddleware(
-            backend=get_backend,
-            subagents=[
-                SubAgent(
-                    name="document_editor",
-                    description="asistente para editar documentos de todo tipo y formato.",
-                    system_prompt="google/gemini-3-flash-preview",
-                    model=ChatOpenRouter(
-                        model="google/gemini-3-flash-preview",
-                        api_key=os.getenv("OPENROUTER_API_KEY"),
-                        model_kwargs={
-                            "parallel_tool_calls": False,
-                        }
-                    ),
-                    tools=[load_skill],
-                    middleware=[
-                        official_notarial_prompt,
-                        *gp_middleware,
-                        SkillsMiddleware(
-                            backend=get_backend,
-                            sources=[USER_SKILLS_PATH],
-                            exclude_skills=["escrituras"],
-                        ),
-                    ],
-                ),
-                SubAgent(
-                    name="oficial_notarial",
-                    description="asistente para trabajar en escrituras notariales",
-                    system_prompt="",
-                    model=ChatOpenRouter(
-                        model="google/gemini-3-flash-preview",
-                        api_key=os.getenv("OPENROUTER_API_KEY"),
-                        model_kwargs={
-                            "parallel_tool_calls": False,
-                        }
-                    ),
-                    tools=[load_skill],
-                    middleware=[
-                        official_notarial_prompt,
-                        *gp_middleware,
-                        SkillsMiddleware(
-                            backend=get_backend,
-                            sources=[USER_SKILLS_PATH],
-                            exclude_skills=["docx"],
-                        ),
-                    ],
-                ),
-                SubAgent(
-                    name="asistente_gmail",
-                    description="agente para gestionar correo de gmail - listar, leer y enviar correos electrónicos",
-                    system_prompt="",
-                    model=llm,
-                    tools=gmail_tools,
-                    #interrupt_on={"GMAIL_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]}}
-                ),
-                SubAgent(
-                    name="asistente_outlook",
-                    description="agente para gestionar correo de outlook - listar, leer y enviar correos electrónicos",
-                    system_prompt="",
-                    model=llm,
-                    tools=outlook_tools,
-                    #interrupt_on={"OUTLOOK_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]}}
-                ),
-                catastro_subagent,
-            ],
-        ),
-        SummarizationMiddleware(
-            model=ChatOpenRouter(
-                model="x-ai/grok-4.1-fast",
-                api_key=os.getenv("OPENROUTER_API_KEY"),
-            ),
-            backend=get_backend,
-            trigger=("fraction", 0.85),
-            trim_tokens_to_summarize=None,
-            truncate_args_settings=None,
-        ),
-        PatchToolCallsMiddleware(),
-    ],
-    context_schema=AppContext,
-).with_config({"recursion_limit": 1000})
+#agent = create_agent(
+#    model=ChatOpenRouter(
+#        model="google/gemini-3-flash-preview",
+#        api_key=os.getenv("OPENROUTER_API_KEY"),
+#        model_kwargs={
+#            "parallel_tool_calls": False,
+#        }
+#    ),
+#    tools=[ask],
+#    system_prompt="",
+#    middleware=[
+#        initialize_sandbox,
+#        main_prompt,
+#        ReflectionMiddleware(
+#            reflection_prompt=(
+#                "evalua acciones previas y decide si continuar con las siguientes acciones "
+#                "o si es necesario solicitar más información al usuario."
+#            ),
+#        ),
+#        FilesystemMiddleware(
+#            backend=get_backend,
+#        ),
+#        SkillsMiddleware(
+#            backend=get_backend,
+#            sources=[USER_SKILLS_PATH],
+#        ),
+#        ModelFallbackMiddleware(
+#            ChatOpenRouter(model="x-ai/grok-4.1-fast",api_key=os.getenv("OPENROUTER_API_KEY"))
+#        ),
+#        SubAgentMiddleware(
+#            backend=get_backend,
+#            subagents=[
+#                SubAgent(
+#                    name="asistente_correo",
+#                    description=(
+#                        "Coordinador de correo electrónico: usa las cuentas Gmail y Outlook conectadas, "
+#                        "trabaja en todas las bandejas de correo del usuario."
+#                    ),
+#                    system_prompt="",
+#                    model=ChatOpenRouter(
+#                        model="google/gemini-3-flash-preview",
+#                        api_key=os.getenv("OPENROUTER_API_KEY"),
+#                        model_kwargs={
+#                            "parallel_tool_calls": False,
+#                        }
+#                    ),
+#                    tools=[],
+#                    interrupt_on={
+#                        "GMAIL_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]},
+#                        "OUTLOOK_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]}
+#                    },
+#                    middleware=[
+#                        email_prompt,
+#                        *gp_middleware,
+#                        SubAgentMiddleware(
+#                            backend=get_backend,
+#                            subagents=[
+#                                SubAgent(
+#                                    name="asistente_gmail",
+#                                    description="agente para gestionar correo de gmail - listar, leer y enviar correos electrónicos",
+#                                    system_prompt="",
+#                                    model=llm,
+#                                    tools=gmail_tools,
+#                                    interrupt_on={"GMAIL_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]}}
+#                                ),
+#                                SubAgent(
+#                                    name="asistente_outlook",
+#                                    description="agente para gestionar correo de outlook - listar, leer y enviar correos electrónicos",
+#                                    system_prompt="",
+#                                    model=llm,
+#                                    tools=outlook_tools,
+#                                    interrupt_on={"OUTLOOK_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]}}
+#                                ),
+#                            ],
+#                        ),
+#                    ],
+#                ),
+#                catastro_subagent,
+#            ],
+#        ),
+#        SummarizationMiddleware(
+#            model=ChatOpenRouter(
+#                model="x-ai/grok-4.1-fast",
+#                api_key=os.getenv("OPENROUTER_API_KEY"),
+#            ),
+#            backend=get_backend,
+#            trigger=("fraction", 0.85),
+#            trim_tokens_to_summarize=None,
+#            truncate_args_settings=None,
+#        ),
+#        OpenRouterContentMiddleware(),
+#        PatchToolCallsMiddleware(),
+#    ],
+#    context_schema=AppContext,
+#    state_schema=DeepAgentState,
+#).with_config({"recursion_limit": 1000})

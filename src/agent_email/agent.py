@@ -2,8 +2,12 @@ import os
 import json
 import asyncio
 from datetime import datetime
+from deepagents import create_deep_agent
 from dotenv import load_dotenv
+from langchain_openrouter.chat_models import ChatOpenRouter
 from numpy import tri
+
+from src.common.tools import ask
 load_dotenv()
  
 from langgraph.checkpoint.memory import MemorySaver
@@ -25,95 +29,40 @@ from langchain.agents.middleware.context_editing import ContextEditingMiddleware
 from langchain.agents.middleware.summarization import SummarizationMiddleware
 from langchain.agents.middleware import InterruptOnConfig, TodoListMiddleware
 
-from deepagents.middleware import FilesystemMiddleware
-from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
-from deepagents.middleware.subagents import SubAgent, SubAgentMiddleware
+
+from deepagents.middleware.subagents import SubAgent
 
 from src.llm import LLM as llm
-from src.backend import get_user_s3_backend
-from src.models import SolvenState, AppContext
-from src.agent_email.prompt import generate_email_prompt_template
-from src.agent_email.tools import get_composio_gmail_tools, get_composio_outlook_tools
+from src.agent_email.gmail_tools import gmail_tools
+from src.agent_email.outlook_tools import outlook_tools
+from src.utils.backend import get_backend
 
-def create_outlook_subagent(runtime: Runtime[AppContext]) -> SubAgent:
-	"""Sync factory function that creates Outlook subagent with runtime context"""
-	from src.utils.config import get_user_id_from_config, get_thread_id_from_config
-	# Load tools synchronously using asyncio.run for the async function
-	# This is acceptable in factory functions called during setup
-	import asyncio
-	user_id = get_user_id_from_config()
-	thread_id = get_thread_id_from_config()
-	try:
-		loop = asyncio.get_event_loop()
-		if loop.is_running():
-			# We're in an async context, can't use asyncio.run
-			# Create a temporary event loop in a thread
-			import concurrent.futures
-			with concurrent.futures.ThreadPoolExecutor() as executor:
-				outlook_tools = executor.submit(
-					lambda: asyncio.run(asyncio.to_thread(
-						get_composio_outlook_tools,
-						user_id,
-						thread_id
-					))
-				).result()
-		else:
-			outlook_tools = asyncio.run(asyncio.to_thread(
-				get_composio_outlook_tools,
-				user_id,
-				thread_id
-			))
-	except Exception as e:
-		print(f"[Outlook Subagent] Error loading tools: {e}")
-		outlook_tools = []
-	
-	outlook_subagent = SubAgent(
-		name="asistente_outlook",
-		description="agente para gestionar correo de outlook - listar, leer y enviar correos electrónicos",
-		system_prompt="",
-		model=llm,
-		tools=outlook_tools,
-		state_schema=SolvenState,
-	)
-	return outlook_subagent
+gmail_subagent = SubAgent(
+    name="asistente_gmail",
+    description="agente para gestionar correo de gmail - listar, leer y enviar correos electrónicos",
+    system_prompt="",
+    model=llm,
+    tools=gmail_tools,
+    interrupt_on={"GMAIL_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]}}
+)
 
-def create_gmail_subagent(runtime: Runtime[AppContext]) -> SubAgent:
-	"""Sync factory function that creates Gmail subagent with runtime context"""
-	from src.utils.config import get_user_id_from_config, get_thread_id_from_config
-	import asyncio
-	user_id = get_user_id_from_config()
-	thread_id = get_thread_id_from_config()
-	try:
-		loop = asyncio.get_event_loop()
-		if loop.is_running():
-			# We're in an async context, can't use asyncio.run
-			# Create a temporary event loop in a thread
-			import concurrent.futures
-			with concurrent.futures.ThreadPoolExecutor() as executor:
-				gmail_tools = executor.submit(
-					lambda: asyncio.run(asyncio.to_thread(
-						get_composio_gmail_tools, 
-						user_id, 
-						thread_id
-					))
-				).result()
-		else:
-			gmail_tools = asyncio.run(asyncio.to_thread(
-				get_composio_gmail_tools, 
-				user_id, 
-				thread_id
-			))
-	except Exception as e:
-		print(f"[Gmail Subagent] Error loading tools: {e}")
-		gmail_tools = []
+outlook_subagent = SubAgent(
+    name="asistente_outlook",
+    description="agente para gestionar correo de outlook - listar, leer y enviar correos electrónicos",
+    system_prompt="",
+    model=llm,
+    tools=outlook_tools,
+    interrupt_on={"OUTLOOK_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]}}
+)
 
-	gmail_agent = SubAgent(
-		name="asistente_gmail",
-		description="agente para gestionar correo de gmail - listar, leer y enviar correos electrónicos",
-		system_prompt="",
-		model=llm,
-		tools=gmail_tools,
-		state_schema=SolvenState,
-	)
-	
-	return gmail_agent
+email_coordinator = create_deep_agent(
+    name="asistente_correo",
+    system_prompt="",
+    tools=[ask],
+    model=ChatOpenRouter(
+        model="x-ai/grok-4.1-fast",
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+    ),
+    backend=get_backend,
+    subagents=[gmail_subagent, outlook_subagent],
+)

@@ -5,7 +5,21 @@ from langgraph.graph.ui import AnyUIMessage, ui_message_reducer
 from datetime import datetime
 from typing import Literal
 
+from typing_extensions import NotRequired
+
+from langchain.agents.middleware import AgentState
+
 from deepagents import SubAgent
+
+
+class DeepAgentState(AgentState):
+    """State for create_agent in deep_agent: reflection flag for post-tool evaluation middleware.
+
+    New optional keys may affect deserialization of older checkpoints; acceptable for dev threads.
+    """
+
+    reflection_pending: NotRequired[bool]
+
 
 class SolvenState(MessagesState):
     """

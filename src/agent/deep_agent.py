@@ -257,29 +257,6 @@ async def dynamic_model_router(request: ModelRequest, handler):
 # Unified skills directory: user skills + Anthropic skills installed via npx (bind mount at /workspace/.solven/skills)
 USER_SKILLS_PATH = "/.solven/skills/"
 
-oficial_notarial = SubAgent(
-    name="oficial_notarial",
-    description="asistente para trabajar en escrituras/documentos legales de todo tipo y formato.",
-    system_prompt="",
-    model=ChatOpenRouter(
-        model="google/gemini-3-flash-preview",
-        api_key=os.getenv("OPENROUTER_API_KEY"),
-        model_kwargs={
-            "parallel_tool_calls": False,
-        }
-    ),
-    middleware=[
-        official_notarial_prompt,
-        SkillsMiddleware(
-            backend=get_backend,
-            sources=[USER_SKILLS_PATH],
-            exclude_skills=["docx"],
-        ),
-    ],
-)
-
-
-
 # Main model (same instance for root summarization as in deepagents create_deep_agent)
 _MAIN_MODEL = ChatOpenRouter(
     model="google/gemini-3-flash-preview",
@@ -303,23 +280,48 @@ graph = create_agent(
             subagents=[
                 {
                     **GENERAL_PURPOSE_SUBAGENT,
-                    **oficial_notarial,
+                    "model": _MAIN_MODEL,
                     "tools": [ask],
                     "middleware": [
+                        TodoListMiddleware(),
+                        FilesystemMiddleware(backend=get_backend),
+                        create_summarization_middleware(_MAIN_MODEL, get_backend),
+                        AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
+                        PatchToolCallsMiddleware(),
+                        SkillsMiddleware(
+                            backend=get_backend,
+                            sources=[USER_SKILLS_PATH],
+                        ),
+                        OpenRouterContentMiddleware(),
+                    ],
+                },
+                SubAgent(
+                    name="oficial_notarial",
+                    description="Asistente para trabajar en escrituras/documentos legales de todo tipo y formato.",
+                    system_prompt="",
+                    model=ChatOpenRouter(
+                        model="google/gemini-3-flash-preview",
+                        api_key=os.getenv("OPENROUTER_API_KEY"),
+                        model_kwargs={
+                            "parallel_tool_calls": False,
+                        }
+                    ),
+                    tools=[ask],
+                    middleware=[
                         official_notarial_prompt,
                         TodoListMiddleware(),
                         FilesystemMiddleware(backend=get_backend),
-                        create_summarization_middleware(oficial_notarial["model"], get_backend),
+                        create_summarization_middleware(_MAIN_MODEL, get_backend),
                         AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
                         PatchToolCallsMiddleware(),
-                        OpenRouterContentMiddleware(),
                         SkillsMiddleware(
                             backend=get_backend,
                             sources=[USER_SKILLS_PATH],
                             exclude_skills=["docx"],
                         ),
+                        OpenRouterContentMiddleware(),
                     ],
-                },
+                ),
                 CompiledSubAgent(
                     name="asistente_correo",
                     description="",

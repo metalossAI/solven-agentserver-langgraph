@@ -6,34 +6,27 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_openrouter.chat_models import ChatOpenRouter
 from langsmith import AsyncClient
 
-from src.agent_email.gmail_tools import gmail_get_attachment
-from src.agent_email.outlook_tools import outlook_add_event_attachment, outlook_download_attachment
+from src.agent_email.gmail_tools import gmail_tools
+from src.agent_email.outlook_tools import outlook_tools
+from src.utils.backend import get_backend
+
 load_dotenv()
  
-from langchain.agents.middleware import ModelRequest, dynamic_prompt, AgentMiddleware, before_agent, AgentState
+from langchain.agents.middleware import ModelRequest, dynamic_prompt, AgentMiddleware
 from langchain.agents.middleware.types import ModelResponse
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
-from typing import Callable, Awaitable, Any, Optional, List, TypedDict
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import Command, interrupt
-from langgraph.graph import MessagesState
-from langgraph.graph import StateGraph
-from langgraph.runtime import Runtime
-from langgraph.store.base import BaseStore
-from langgraph.graph.ui import push_ui_message
+from langchain_core.messages import SystemMessage, ToolMessage
+from typing import Callable, Awaitable
 
-from langgraph.graph.state import RunnableConfig
-from langgraph.config import get_config
 
-from collections.abc import Sequence
-
-from deepagents import create_deep_agent, SubAgent
+from deepagents import SubAgentMiddleware, create_deep_agent, SubAgent
 from langchain.agents.middleware.tool_call_limit import ToolCallLimitMiddleware
 
 from src.llm import LLM as llm
 
-from src.agent_triage.models import InputTriageState, OutputTriageState, TriageState, TriageContext
+from src.agent_triage.models import TriageContext
 from src.agent_triage.tools import (
+    gmail_tools_triage,
+    outlook_tools_triage,
     seleccionar_ticket,
     crear_ticket,
     patch_ticket,
@@ -43,11 +36,9 @@ from src.agent_triage.tools import (
     merge_tickets,
     descartar_evento,
     gestionar_acciones,
-    gmail_tools_triage,
-    outlook_tools_triage,
 )
+
 from src.utils.vector_store import search
-from src.utils.tickets import get_ticket
 from src.backend import SolvenS3Backend
 
 
@@ -81,7 +72,7 @@ class ForceToolCallMiddleware(AgentMiddleware):
 		return await handler(request)
 
 @dynamic_prompt
-async def build_prompt(request: ModelRequest):
+async def build_prompt(request: ModelRequest) -> SystemMessage:
 	from src.utils.config import get_user, get_event_message_from_config
 
 	event_message = get_event_message_from_config() or ""
@@ -103,39 +94,25 @@ async def build_prompt(request: ModelRequest):
 	main_prompt: ChatPromptTemplate = await client.pull_prompt("solven-triage-solicitudes")
 	
 	# Format prompt with similar_tickets parameter
-	prompt = main_prompt.format(
+	triage_prompt = main_prompt.format(
 		similar_tickets=similar_tickets,
 	)
-	return prompt
-
-gmail_subagent = SubAgent(
-	name="asistente_gmail",
-	description="agente para leer emails, descargar adjuntos y gestionar informacion de emails de gmail",
-	system_prompt="",
-	model=llm,
-	tools=gmail_tools_triage,
-)
-
-outlook_subagent = SubAgent(
-	name="asistente_outlook",
-	description="agente para leer emails, descargar adjuntos y gestionar informacion de emails de outlook",
-	system_prompt="",
-	model=llm,
-	tools=outlook_tools_triage,
-)
+	# Prepend triage instructions; keep content already merged into system_message by other middleware.
+	system_prompt = request.system_message
+	prior_blocks = list(system_prompt.content_blocks) if system_prompt is not None else []
+	new_content = [
+		{"type": "text", "text": f"{triage_prompt}\n\n"},
+		*prior_blocks,
+	]
+	return SystemMessage(content=new_content)
 
 ticket_triage_subagent = SubAgent(
 	name="asistente_ticket",
-	description="Agente para gestión de tickets. Puede buscar, leer, crear y actualizar tickets.",
+	description=(
+		"Gestión de tickets de soporte: buscar, leer, crear, actualizar, fusionar tickets, "
+		"gestionar acciones, descartar eventos y fijar el workspace del ticket (seleccionar_ticket)."
+	),
 	system_prompt="",
-	model=llm,
-	tools=[buscar_tickets, leer_ticket, leer_acciones, crear_ticket, patch_ticket, merge_tickets, descartar_evento, gestionar_acciones, seleccionar_ticket],
-)
-
-# Filesystem tools (read_file, ls, …) use SolvenS3Backend: thread workspace at
-# {company_id}/threads/{workspace_id}. PDF/DOCX/etc. are converted via Modal/Docling
-# (see src/utils/document_conversion.py and _BaseS3Backend.read).
-graph = create_deep_agent(
 	model=ChatOpenRouter(
 		model="x-ai/grok-4.1-fast",
 		api_key=os.getenv("OPENROUTER_API_KEY"),
@@ -150,19 +127,67 @@ graph = create_deep_agent(
 		merge_tickets,
 		descartar_evento,
 		gestionar_acciones,
-		gmail_get_attachment,
-		outlook_download_attachment
 	],
-	backend=lambda rt: SolvenS3Backend(rt),
+)
+
+email_coordinator_subagent = SubAgent(
+    name="asistente_correo",
+    description=(
+        "Coordinador de correo electrónico: usa las cuentas Gmail y Outlook conectadas, "
+        "trabaja en todas las bandejas de correo del usuario."
+    ),
+    system_prompt="",
+    model=ChatOpenRouter(
+        model="google/gemini-3-flash-preview",
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+        model_kwargs={
+            "parallel_tool_calls": False,
+        }
+    ),
+    middleware=[
+        SubAgentMiddleware(
+            backend=get_backend,
+            subagents=[
+                SubAgent(
+                    name="asistente_gmail",
+                    description="agente para gestionar correo de gmail - listar, buscar, leer, descargar adjuntos, etc. de correos electrónicos",
+                    system_prompt="",
+                    model=llm,
+                    tools=gmail_tools_triage,
+                ),
+                SubAgent(
+                    name="asistente_outlook",
+                    description="agente para gestionar correo de outlook - listar, buscar, leer, descargar adjuntos, etc. de correos electrónicos",
+                    system_prompt="",
+                    model=llm,
+                    tools=outlook_tools_triage,
+                ),
+            ],
+        ),
+    ],
+)
+
+# Filesystem tools (read_file, ls, …) use SolvenS3Backend: thread workspace at
+# {company_id}/threads/{workspace_id}. PDF/DOCX/etc. are converted via Modal/Docling
+# (see src/utils/document_conversion.py and _BaseS3Backend.read).
+graph = create_deep_agent(
+	model=ChatOpenRouter(
+		model="x-ai/grok-4.1-fast",
+		api_key=os.getenv("OPENROUTER_API_KEY"),
+	),
+	backend=SolvenS3Backend,
+	tools=[
+		descartar_evento,
+	],
 	subagents=[
-		gmail_subagent,
-		outlook_subagent,
+		email_coordinator_subagent,
+		ticket_triage_subagent,
 	],
 	middleware=[
+		build_prompt,
 		ToolCallLimitMiddleware(run_limit=15, exit_behavior="end"),
 		ForceToolCallMiddleware(),  # Forces tool calls but respects Command returns
-		build_prompt,
 	],
-	system_prompt="",  # Prompt is built dynamically via @dynamic_prompt middleware
+	system_prompt="",
 	context_schema=TriageContext,
 )

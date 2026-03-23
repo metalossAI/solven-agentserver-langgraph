@@ -12,7 +12,6 @@ import re
 import shlex
 import asyncio
 import time as _time
-from pathlib import Path
 from typing import Optional
 
 # Process-level cache: one sandbox_id per user_id so we always reuse the same sandbox (avoids duplicates from dev restarts/sync).
@@ -28,7 +27,6 @@ from langchain.tools import ToolRuntime
 from src.models import AppContext
 from src.backend import _parse_skillmd_frontmatter
 from src.utils.config import get_user
-from src.utils.document_conversion import convert_bytes_to_markdown
 # Workspace and user models (S3 mount at /mnt/user) via rclone in-sandbox; no s3_utils for tar/manifest.
 
 SANDBOX_TEMPLATE = "solven-sandbox-v1"
@@ -51,32 +49,6 @@ _WORKSPACE_SEARCH_SKIP_DIRS = frozenset({
 _AGENT_HIDDEN_TOPLEVEL = frozenset({
     "mnt", "usr", "etc", "proc", "dev", "sys", "run", "lib", "lib64", "bin", "sbin", "tmp", "cache",
 })
-
-# Document extensions that require Modal/Docling conversion (documents, not code/text).
-# Images are intentionally excluded so the model can handle them directly.
-_READ_AS_DOCUMENT_EXTENSIONS = frozenset({
-    ".pdf", ".docx", ".doc",
-    ".xlsx", ".xls",
-    ".pptx", ".ppt",
-    ".odt", ".ods", ".odp",
-    ".rtf",
-})
-
-# Image extensions: do NOT convert to markdown. Instead embed as a markdown image data-url.
-_READ_AS_IMAGE_EXTENSIONS = frozenset({
-    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".tiff", ".tif", ".bmp",
-})
-
-_IMAGE_MIME_TYPES = {
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".png": "image/png",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-    ".tiff": "image/tiff",
-    ".tif": "image/tiff",
-    ".bmp": "image/bmp",
-}
 
 # Marker file written inside E2B workspace after full init; any new SandboxBackend instance can skip full setup if it exists.
 _WORKSPACE_READY_MARKER = ".workspace_ready"
@@ -1023,56 +995,6 @@ with open(p,"rb") as f:
 
 		return responses
 
-	def _convert_to_markdown(self, content: bytes, filename: str) -> str:
-		"""Convert document bytes to markdown (shared Modal/Docling path with S3 backend)."""
-		return convert_bytes_to_markdown(content, filename)
-
-	def read(self, file_path: str, offset: int = 0, limit: int = 2000, allow_non_markdown: bool = False) -> str:
-		"""
-		Read file content with line numbers.
-
-		Only document-like formats (PDF/DOCX/XLSX/PPTX/ODT/ODS/ODP/RTF) are converted to markdown.
-		Everything else (plain text/code/images/etc.) must defer to the parent implementation
-		so existing image handling / multimodal tool serialization stays consistent.
-		"""
-		self._ensure_initialized()
-		file_path = self._normalize_agent_path(file_path)
-
-		ext = (Path(file_path).suffix or "").lower()
-		# Block access to internal instructions.md files (consistent with parent semantics).
-		if file_path.endswith("/instructions.md") or file_path.endswith("instructions.md"):
-			return "Error: File '{}' not found".format(file_path)
-
-		# Delegate all non-doc formats to deepagents BaseSandbox implementation.
-		# This avoids custom image embedding that can break OpenRouter multimodal schemas.
-		if ext not in _READ_AS_DOCUMENT_EXTENSIONS:
-			return super().read(file_path, offset, limit)
-
-		content, err = self._read_file_bytes_via_bwrap(file_path)
-		if err == "file_not_found" or content is None:
-			return f"Error: File '{file_path}' not found"
-		if err == "is_directory":
-			return f"Error: File '{file_path}' is a directory"
-		if err:
-			return f"Error reading '{file_path}': {err}"
-
-		def _format_numbered_lines(text: str) -> str:
-			lines = text.splitlines()
-			start = offset
-			end = min(offset + limit, len(lines))
-			selected_lines = lines[start:end]
-			return "\n".join(
-				f"{i}\t{line}"
-				for i, line in enumerate(selected_lines, start=start + 1)
-			)
-
-		# Documents: convert to markdown (Word/PDF/etc).
-		try:
-			markdown = self._convert_to_markdown(content, file_path)
-		except Exception as e:
-			return f"Error converting '{file_path}' to markdown: {str(e)}"
-		return _format_numbered_lines(markdown)
-
 	def write(self, file_path: str, content: str) -> WriteResult:
 		self._ensure_initialized()
 		out = super().write(self._normalize_agent_path(file_path), content)
@@ -1131,14 +1053,6 @@ with open(p,"rb") as f:
 
 	async def als_info(self, path: str) -> list[FileInfo]:
 		return await asyncio.to_thread(self.ls_info, path)
-
-	async def aread(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
-		norm = self._normalize_agent_path(file_path)
-		ext = (Path(norm).suffix or "").lower()
-		if ext not in _READ_AS_DOCUMENT_EXTENSIONS:
-			# Bypass our document override; use BaseSandbox read (images / multimodal).
-			return await asyncio.to_thread(super().read, norm, offset, limit)
-		return await asyncio.to_thread(self.read, file_path, offset, limit)
 
 	async def awrite(self, file_path: str, content: str) -> WriteResult:
 		return await asyncio.to_thread(self.write, file_path, content)

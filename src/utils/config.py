@@ -14,6 +14,17 @@ The frontend passes the authenticated user as a single object under
             "isActive": True,
             "isCreator": True,
         },
+        # Optional: Composio Gmail/Outlook status from the app (see /api/composio/connections).
+        "composio_email_connections": {
+            "gmail": {"status": "ACTIVE", "connectedAccountId": "...", "name": "...", ...},
+            "outlook": {...},
+        },
+        # Optional: how the user wants outbound email to read (signature, sign-off, language).
+        "email_preferences": {
+            "signature": "...",
+            "sign_off": "...",
+            "default_reply_language": "español",
+        },
     }
 
 Old fallback: individual header-derived keys (x-user-id, x-company-id, …)
@@ -21,9 +32,11 @@ are still supported so legacy runs keep working.
 
 Public API
 ----------
-get_user()          -> UserContext   (raises RuntimeError if user not found)
-get_thread_id()     -> str | None
-get_event_message() -> str | None
+get_user()                      -> UserContext   (raises RuntimeError if user not found)
+get_thread_id()                 -> str | None
+get_event_message()             -> str | None
+get_composio_email_connections()-> dict  (gmail/outlook entries from configurable, may be empty)
+get_email_preferences()         -> dict  (signature/sign_off/default_reply_language, may be empty)
 get_user_info_by_id(user_id, company_id) -> dict  (Supabase enrichment)
 """
 
@@ -115,6 +128,34 @@ def get_event_message() -> Optional[str]:
         return value if value else None
     except Exception:
         return None
+
+
+def get_composio_email_connections() -> dict[str, Any]:
+    """Return ``configurable.composio_email_connections`` (Gmail/Outlook toolkit rows).
+
+    Expected keys: ``gmail``, ``outlook`` — each a dict with at least ``status``,
+    optionally ``connectedAccountId``, ``name``, ``logo``, ``authConfigId``.
+    """
+    try:
+        config: RunnableConfig = get_config()
+        raw = (config.get("configurable") or {}).get("composio_email_connections")
+        if isinstance(raw, dict):
+            return raw
+    except Exception:
+        pass
+    return {}
+
+
+def get_email_preferences() -> dict[str, Any]:
+    """Return ``configurable.email_preferences`` for outbound email copy (optional)."""
+    try:
+        config: RunnableConfig = get_config()
+        raw = (config.get("configurable") or {}).get("email_preferences")
+        if isinstance(raw, dict):
+            return raw
+    except Exception:
+        pass
+    return {}
 
 
 def get_workspace_id(runtime: Optional[Any] = None) -> Optional[str]:

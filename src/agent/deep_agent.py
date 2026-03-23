@@ -2,23 +2,28 @@ import datetime
 import asyncio
 import os
 
-from deepagents.graph import FilesystemMiddleware, SubAgentMiddleware, TodoListMiddleware
+from deepagents.graph import (
+    BASE_AGENT_PROMPT,
+    FilesystemMiddleware,
+    SubAgentMiddleware,
+    TodoListMiddleware,
+)
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
+from deepagents.middleware.summarization import create_summarization_middleware
 from dotenv import load_dotenv
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langchain_openrouter.chat_models import ChatOpenRouter
 
+from src.agent_catastro.tools import buscar_inmueble_localizacion, buscar_inmueble_rc, obtener_municipios, obtener_provincias, obtener_numeros_via, obtener_vias
 from src.common.tools import ask
 from src.agent_email.agent import email_coordinator
 load_dotenv()
 
-from langchain.agents.middleware import AgentMiddleware, ModelFallbackMiddleware, ModelRequest, ModelResponse, wrap_model_call, after_agent, hook_config
+from langchain.agents.middleware import AgentMiddleware, ModelFallbackMiddleware, ModelRequest, ModelResponse, wrap_model_call
 
-from langchain_core.messages import SystemMessage, ToolMessage, AIMessage, HumanMessage
+from langchain_core.messages import ToolMessage
 from langchain.agents import create_agent
-from deepagents.middleware import FilesystemMiddleware, SubAgentMiddleware, SummarizationMiddleware
-from langchain.agents.middleware import TodoListMiddleware
 
 from src.utils.backend import get_backend
 
@@ -27,24 +32,17 @@ from langgraph.runtime import Runtime
 
 from langgraph.config import get_config
 
-from deepagents import CompiledSubAgent, MemoryMiddleware, create_deep_agent, SubAgent
+from deepagents import CompiledSubAgent, MemoryMiddleware, SubAgent
 
-from src.llm import LLM as llm, google_gemini
-from src.llm import CODING_LLM as coding_llm
-from src.models import AppContext, DeepAgentState, SolvenState
+from src.models import AppContext, DeepAgentState
 
 from src.agent_catastro.agent import subagent as catastro_subagent
-from src.agent.middleware import ReflectionMiddleware, create_prompt_middleware
+from src.agent.middleware import create_prompt_middleware
 from src.utils.tickets import get_ticket
-from src.common_tools.files import solicitar_archivo
 
 from langchain.agents.middleware import before_agent, AgentState
-from langgraph.runtime import Runtime
 from typing import Callable, Awaitable
 
-# Import email tools
-from src.agent_email.gmail_tools import gmail_tools
-from src.agent_email.outlook_tools import outlook_tools
 from src.agent.middleware import SkillsMiddleware
 from src.utils.openrouter import OpenRouterContentMiddleware
 
@@ -217,7 +215,6 @@ async def _get_email_variables(request: ModelRequest) -> dict:
 # Middleware created by factory; pass at runtime to create_agent / create_deep_agent
 main_prompt = create_prompt_middleware("solven-main", _get_solven_main_variables)
 official_notarial_prompt = create_prompt_middleware("solven-subagent-oficial", _get_official_notarial_variables)
-email_prompt = create_prompt_middleware("solven-subagent-email", _get_email_variables)
 
 @wrap_model_call
 async def dynamic_model_router(request: ModelRequest, handler):
@@ -260,25 +257,6 @@ async def dynamic_model_router(request: ModelRequest, handler):
 # Unified skills directory: user skills + Anthropic skills installed via npx (bind mount at /workspace/.solven/skills)
 USER_SKILLS_PATH = "/.solven/skills/"
 
-# Default middleware stack for nested subagents (documents + email coordinator)
-gp_middleware: list[AgentMiddleware] = [
-    TodoListMiddleware(),
-    FilesystemMiddleware(backend=get_backend),
-    SummarizationMiddleware(
-            model=ChatOpenRouter(
-                model="x-ai/grok-4.1-fast",
-                api_key=os.getenv("OPENROUTER_API_KEY"),
-            ),
-            backend=get_backend,
-            trigger=("fraction", 0.85),
-            trim_tokens_to_summarize=None,
-            truncate_args_settings=None,
-    ),
-    AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
-    PatchToolCallsMiddleware(),
-    OpenRouterContentMiddleware(),
-]
-
 oficial_notarial = SubAgent(
     name="oficial_notarial",
     description="asistente para trabajar en escrituras/documentos legales de todo tipo y formato.",
@@ -302,29 +280,75 @@ oficial_notarial = SubAgent(
 
 
 
-graph = create_deep_agent(
-    model=ChatOpenRouter(
-        model="google/gemini-3-flash-preview",
-        api_key=os.getenv("OPENROUTER_API_KEY"),
-    ),
-    system_prompt="",
+# Main model (same instance for root summarization as in deepagents create_deep_agent)
+_MAIN_MODEL = ChatOpenRouter(
+    model="google/gemini-3-flash-preview",
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+    model_kwargs={"parallel_tool_calls": False},
+)
+
+# Mirrors deepagents.graph.create_deep_agent: TodoList, Filesystem, SubAgentMiddleware, summarization,
+# Anthropic cache, Patch, then user middleware; BASE_AGENT_PROMPT on system message.
+graph = create_agent(
+    _MAIN_MODEL,
     tools=[ask],
-    backend=get_backend,
-    subagents=[
-        CompiledSubAgent(
-            name="asistente_correo",
-            description="",
-            runnable=email_coordinator,
-        ),
-        catastro_subagent,
-    ],
+    system_prompt="\n\n" + BASE_AGENT_PROMPT,
     middleware=[
-       initialize_sandbox,
-       main_prompt,
-       ModelFallbackMiddleware(
+        initialize_sandbox,
+        main_prompt,
+        TodoListMiddleware(),
+        FilesystemMiddleware(backend=get_backend),
+        SubAgentMiddleware(
+            backend=get_backend,
+            subagents=[
+                {
+                    **GENERAL_PURPOSE_SUBAGENT,
+                    **oficial_notarial,
+                    "tools": [ask],
+                    "middleware": [
+                        official_notarial_prompt,
+                        TodoListMiddleware(),
+                        FilesystemMiddleware(backend=get_backend),
+                        create_summarization_middleware(oficial_notarial["model"], get_backend),
+                        AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
+                        PatchToolCallsMiddleware(),
+                        OpenRouterContentMiddleware(),
+                        SkillsMiddleware(
+                            backend=get_backend,
+                            sources=[USER_SKILLS_PATH],
+                            exclude_skills=["docx"],
+                        ),
+                    ],
+                },
+                CompiledSubAgent(
+                    name="asistente_correo",
+                    description="",
+                    runnable=email_coordinator,
+                ),
+                SubAgent(
+                    name="asistente_busqueda_catastro",
+                    description="agente para gestionar busquedas en el catastro",
+                    system_prompt="Eres un asistente de busqueda de datos del catastro de España.",
+                    model=_MAIN_MODEL,
+                    tools=[
+                        ask,
+                        buscar_inmueble_localizacion,   
+                        buscar_inmueble_rc,
+                        obtener_municipios,
+                        obtener_provincias,
+                        obtener_numeros_via,
+                        obtener_vias
+                    ],
+                )
+            ],
+        ),
+        create_summarization_middleware(_MAIN_MODEL, get_backend),
+        AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
+        PatchToolCallsMiddleware(),
+        ModelFallbackMiddleware(
             ChatOpenRouter(
                 model="x-ai/grok-4.1-fast",
-                api_key=os.getenv("OPENROUTER_API_KEY")
+                api_key=os.getenv("OPENROUTER_API_KEY"),
             ),
         ),
         SkillsMiddleware(
@@ -333,108 +357,10 @@ graph = create_deep_agent(
         ),
         MemoryMiddleware(
             backend=get_backend,
-            sources=[
-                "/.solven/AGENTS.md"
-            ],
+            sources=["/.solven/AGENTS.md"],
         ),
         OpenRouterContentMiddleware(),
     ],
     context_schema=AppContext,
-)
-
-#agent = create_agent(
-#    model=ChatOpenRouter(
-#        model="google/gemini-3-flash-preview",
-#        api_key=os.getenv("OPENROUTER_API_KEY"),
-#        model_kwargs={
-#            "parallel_tool_calls": False,
-#        }
-#    ),
-#    tools=[ask],
-#    system_prompt="",
-#    middleware=[
-#        initialize_sandbox,
-#        main_prompt,
-#        ReflectionMiddleware(
-#            reflection_prompt=(
-#                "evalua acciones previas y decide si continuar con las siguientes acciones "
-#                "o si es necesario solicitar más información al usuario."
-#            ),
-#        ),
-#        FilesystemMiddleware(
-#            backend=get_backend,
-#        ),
-#        SkillsMiddleware(
-#            backend=get_backend,
-#            sources=[USER_SKILLS_PATH],
-#        ),
-#        ModelFallbackMiddleware(
-#            ChatOpenRouter(model="x-ai/grok-4.1-fast",api_key=os.getenv("OPENROUTER_API_KEY"))
-#        ),
-#        SubAgentMiddleware(
-#            backend=get_backend,
-#            subagents=[
-#                SubAgent(
-#                    name="asistente_correo",
-#                    description=(
-#                        "Coordinador de correo electrónico: usa las cuentas Gmail y Outlook conectadas, "
-#                        "trabaja en todas las bandejas de correo del usuario."
-#                    ),
-#                    system_prompt="",
-#                    model=ChatOpenRouter(
-#                        model="google/gemini-3-flash-preview",
-#                        api_key=os.getenv("OPENROUTER_API_KEY"),
-#                        model_kwargs={
-#                            "parallel_tool_calls": False,
-#                        }
-#                    ),
-#                    tools=[],
-#                    interrupt_on={
-#                        "GMAIL_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]},
-#                        "OUTLOOK_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]}
-#                    },
-#                    middleware=[
-#                        email_prompt,
-#                        *gp_middleware,
-#                        SubAgentMiddleware(
-#                            backend=get_backend,
-#                            subagents=[
-#                                SubAgent(
-#                                    name="asistente_gmail",
-#                                    description="agente para gestionar correo de gmail - listar, leer y enviar correos electrónicos",
-#                                    system_prompt="",
-#                                    model=llm,
-#                                    tools=gmail_tools,
-#                                    interrupt_on={"GMAIL_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]}}
-#                                ),
-#                                SubAgent(
-#                                    name="asistente_outlook",
-#                                    description="agente para gestionar correo de outlook - listar, leer y enviar correos electrónicos",
-#                                    system_prompt="",
-#                                    model=llm,
-#                                    tools=outlook_tools,
-#                                    interrupt_on={"OUTLOOK_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]}}
-#                                ),
-#                            ],
-#                        ),
-#                    ],
-#                ),
-#                catastro_subagent,
-#            ],
-#        ),
-#        SummarizationMiddleware(
-#            model=ChatOpenRouter(
-#                model="x-ai/grok-4.1-fast",
-#                api_key=os.getenv("OPENROUTER_API_KEY"),
-#            ),
-#            backend=get_backend,
-#            trigger=("fraction", 0.85),
-#            trim_tokens_to_summarize=None,
-#            truncate_args_settings=None,
-#        ),
-#        OpenRouterContentMiddleware(),
-#        PatchToolCallsMiddleware(),
-#    ],
-#    context_schema=AppContext,
-#    state_schema=DeepAgentState,
-#).with_config({"recursion_limit": 1000})
+    state_schema=DeepAgentState,
+).with_config({"recursion_limit": 1000})

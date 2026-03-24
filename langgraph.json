@@ -3,7 +3,7 @@
   "dependencies": ["."],
   "graphs": {
     "solven": "./src/agent/deep_agent.py:graph",
-    "ticket_triage": "./src/agent_triage/agent.py:graph",
+    "ticket_triage": "./src/agent_triage/graph.py:graph",
     "customer_chat": "./src/agent_customer_chat/deep_agent.py:graph",
     "test_agent": "./src/test_agent/test_agent.py:agent"
   },

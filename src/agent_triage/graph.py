@@ -108,6 +108,34 @@ def _state_get(state: DeterministicTriageState | dict[str, Any], key: str, defau
     return getattr(state, key, default)
 
 
+def _config_with_workspace(workspace_id: str) -> dict[str, Any]:
+    """Merge current LangGraph config so nested agents resolve SolvenS3Backend to the ticket prefix."""
+    cfg = get_config()
+    if not isinstance(cfg, dict):
+        return {"configurable": {"workspace_id": workspace_id}}
+    merged = {k: v for k, v in cfg.items() if k != "configurable"}
+    merged["configurable"] = {**(cfg.get("configurable") or {}), "workspace_id": workspace_id}
+    return merged
+
+
+def _workspace_updates_from_triage(
+    triage: TriageDecision, runtime: Runtime[TriageContext]
+) -> dict[str, Any]:
+    """For non-discard actions, bind workspace_id to triage.ticket.id when it is a valid UUID (patch)."""
+    if triage.action == "discard":
+        return {}
+    raw = (triage.ticket.id or "").strip()
+    if not raw:
+        return {}
+    try:
+        uuid.UUID(raw)
+    except ValueError:
+        return {}
+    if getattr(runtime, "context", None) is not None:
+        runtime.context.workspace_id = raw
+    return {"workspace_id": raw}
+
+
 # ---------------------------------------------------------------------------
 # Node 1: research_event
 # Deep agent with email + ticket tools → produces TriageDecision
@@ -146,12 +174,18 @@ async def research_event_node(
         context_schema=TriageContext,
     )
 
+    prior_workspace = _state_get(state, "workspace_id")
+    research_config = _config_with_workspace(prior_workspace) if prior_workspace else None
+
     result = await research_agent.ainvoke(
-        {"messages": [HumanMessage(content=input_message)]}
+        {"messages": [HumanMessage(content=input_message)]},
+        config=research_config,
     )
 
     triage: TriageDecision = result["structured_response"]
-    return {"triage": triage}
+    out: dict[str, Any] = {"triage": triage}
+    out.update(_workspace_updates_from_triage(triage, runtime))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -489,9 +523,11 @@ async def download_attachments_node(
         context_schema=TriageContext,
     )
 
+    download_config = _config_with_workspace(workspace_id)
     try:
         result = await download_agent.ainvoke(
-            {"messages": [HumanMessage(content=input_message)]}
+            {"messages": [HumanMessage(content=input_message)]},
+            config=download_config,
         )
         structured = result.get("structured_response")
         if isinstance(structured, AttachmentDownloadResults):

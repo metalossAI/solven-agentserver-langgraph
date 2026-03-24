@@ -161,15 +161,35 @@ def get_email_preferences() -> dict[str, Any]:
 def get_workspace_id(runtime: Optional[Any] = None) -> Optional[str]:
     """Return the current workspace/ticket path key for backends and file tools.
 
-    If runtime has .context with workspace_id set (e.g. after seleccionar_ticket),
-    returns that. Otherwise returns get_thread_id() so default behavior is unchanged.
+    Resolution order:
+    1. ``runtime.context.workspace_id`` when set (e.g. after persist_ticket or seleccionar_ticket).
+    2. ``configurable.workspace_id`` from LangGraph config (e.g. nested triage ``ainvoke``).
+    3. ``configurable.ticket_id`` when ``workspace_id`` is absent (API / UI ticket context).
+    4. ``get_thread_id()`` — LangGraph conversation id (fallback only).
+
+    ``configurable.workspace_id`` overrides thread id so ticket storage paths are not confused
+    with assistant thread paths.
     """
     if runtime is not None:
         ctx = getattr(runtime, "context", None)
         if ctx is not None:
-            wid = getattr(ctx, "workspace_id", None)
+            if isinstance(ctx, dict):
+                wid = ctx.get("workspace_id")
+            else:
+                wid = getattr(ctx, "workspace_id", None)
             if wid:
-                return wid
+                return str(wid)
+    try:
+        config: RunnableConfig = get_config()
+        configurable = config.get("configurable") or {}
+        cw = configurable.get("workspace_id")
+        if cw:
+            return str(cw)
+        ct = configurable.get("ticket_id")
+        if ct:
+            return str(ct)
+    except Exception:
+        pass
     return get_thread_id()
 
 

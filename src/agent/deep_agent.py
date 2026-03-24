@@ -15,6 +15,8 @@ from dotenv import load_dotenv
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langchain_openrouter.chat_models import ChatOpenRouter
 
+from src.agent_email.outlook_tools import outlook_tools
+from src.agent_email.gmail_tools import gmail_tools
 from src.agent_catastro.tools import buscar_inmueble_localizacion, buscar_inmueble_rc, obtener_municipios, obtener_provincias, obtener_numeros_via, obtener_vias
 from src.common.tools import ask
 from src.agent_email.agent import email_coordinator
@@ -32,12 +34,12 @@ from langgraph.runtime import Runtime
 
 from langgraph.config import get_config
 
-from deepagents import CompiledSubAgent, MemoryMiddleware, SubAgent
+from deepagents import CompiledSubAgent, MemoryMiddleware, SubAgent, create_deep_agent
 
 from src.models import AppContext, DeepAgentState
 
 from src.agent_catastro.agent import subagent as catastro_subagent
-from src.agent.middleware import create_prompt_middleware
+from src.common.prompt import create_prompt_middleware
 from src.utils.tickets import get_ticket
 
 from langchain.agents.middleware import before_agent, AgentState
@@ -215,6 +217,7 @@ async def _get_email_variables(request: ModelRequest) -> dict:
 # Middleware created by factory; pass at runtime to create_agent / create_deep_agent
 main_prompt = create_prompt_middleware("solven-main", _get_solven_main_variables)
 official_notarial_prompt = create_prompt_middleware("solven-subagent-oficial", _get_official_notarial_variables)
+email_prompt = create_prompt_middleware("solven-subagent-email", _get_email_variables)
 
 @wrap_model_call
 async def dynamic_model_router(request: ModelRequest, handler):
@@ -269,7 +272,7 @@ _MAIN_MODEL = ChatOpenRouter(
 graph = create_agent(
     _MAIN_MODEL,
     tools=[ask],
-    system_prompt="\n\n" + BASE_AGENT_PROMPT,
+    system_prompt="",
     middleware=[
         initialize_sandbox,
         main_prompt,
@@ -325,7 +328,44 @@ graph = create_agent(
                 CompiledSubAgent(
                     name="asistente_correo",
                     description="",
-                    runnable=email_coordinator,
+                    runnable=create_deep_agent(
+                        name="asistente_correo",
+                        system_prompt="",
+                        tools=[ask],
+                        model=ChatOpenRouter(
+                            model="google/gemini-3-flash-preview",
+                            api_key=os.getenv("OPENROUTER_API_KEY"),
+                        ),
+                        backend=get_backend,
+                        middleware=[
+                            email_prompt,
+                            OpenRouterContentMiddleware(),
+                        ],
+                        subagents=[
+                            SubAgent(
+                                name="asistente_gmail",
+                                description="agente para gestionar correo de gmail - listar, leer y enviar correos electrónicos",
+                                system_prompt="",
+                                model=ChatOpenRouter(
+                                    model="google/gemini-3-flash-preview",
+                                    api_key=os.getenv("OPENROUTER_API_KEY"),
+                                ),
+                                tools=gmail_tools,
+                                interrupt_on={"GMAIL_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]}}
+                            ),
+                            SubAgent(
+                                name="asistente_outlook",
+                                description="agente para gestionar correo de outlook - listar, leer y enviar correos electrónicos",
+                                system_prompt="",
+                                model=ChatOpenRouter(
+                                    model="google/gemini-3-flash-preview",
+                                    api_key=os.getenv("OPENROUTER_API_KEY"),
+                                ),
+                                tools=outlook_tools,
+                                interrupt_on={"OUTLOOK_SEND_EMAIL": {"allowed_decisions": ["approve", "edit", "reject"]}}
+                            ),
+                        ],
+                    ),
                 ),
                 SubAgent(
                     name="asistente_busqueda_catastro",

@@ -52,32 +52,6 @@ async def build_prompt_template(prompt_id: str, variables: dict) -> str:
     except Exception:
         return _DEFAULT_SOLVEN_MAIN.format(date="", name="", role="", language="español", ticket="")
 
-
-def create_prompt_middleware(
-    prompt_id: str,
-    get_variables: Callable[[ModelRequest], Awaitable[dict]],
-) -> Callable[[ModelRequest], Awaitable[SystemMessage]]:
-    """
-    Returns a @dynamic_prompt middleware that builds the system message for the given prompt_id.
-    The returned function can be passed at runtime (e.g. to create_agent(middleware=[...])).
-    get_variables(request) is called to obtain the format variables; the formatted template
-    is prepended before the existing ``request.system_message`` content_blocks so earlier
-    middleware additions are preserved.
-    """
-    @dynamic_prompt
-    async def middleware(request: ModelRequest) -> SystemMessage:
-        variables = await get_variables(request)
-        initial_prompt = await build_prompt_template(prompt_id, variables)
-        system_prompt = request.system_message
-        prior_blocks = list(system_prompt.content_blocks) if system_prompt is not None else []
-        new_content = [
-            {"type": "text", "text": f"{initial_prompt}\n\n"},
-            *prior_blocks,
-        ]
-        return SystemMessage(content=new_content)
-    return middleware
-
-
 # Marks SystemMessages from this middleware (UI may hide via additional_kwargs.type).
 AUTO_EVALUATION_CHECKPOINT_TYPE = "auto_evaluation_checkpoint"
 
@@ -190,7 +164,6 @@ def _skill_name_from_path(path: str) -> str | None:
         if i + 1 < len(parts):
             return parts[i + 1]
     return parts[-2] if len(parts) >= 2 and parts[-1].upper().startswith("SKILL") else (parts[-1] if parts else None)
-
 
 class SkillsMiddleware(BaseSkillsMiddleware):
     """

@@ -206,12 +206,6 @@ class _BaseS3Backend(BackendProtocol):
                 resolved = f"{s3_prefix}/{relative}" if relative else s3_prefix
                 return resolved
         
-        # Fallback: treat as workspace path if mounts exist
-        if "/workspace" in self.mounts:
-            relative = path.lstrip("/")
-            workspace_prefix = self.mounts["/workspace"]
-            return f"{workspace_prefix}/{relative}" if relative else workspace_prefix
-        
         # No mounts: use legacy prefix behavior
         clean_path = path.lstrip("/")
         if self.prefix:
@@ -252,15 +246,6 @@ class _BaseS3Backend(BackendProtocol):
             elif key == s3_prefix:
                 # Exact match to mount point
                 return mount
-        
-        # Fallback: check if it's under workspace mount
-        if "/workspace" in self.mounts:
-            workspace_prefix = self.mounts["/workspace"]
-            if key.startswith(workspace_prefix + "/"):
-                relative = key[len(workspace_prefix) + 1:]
-                return f"/{relative}"
-            elif key == workspace_prefix:
-                return "/"
         
         # Legacy behavior: remove prefix
         if self.prefix and key.startswith(self.prefix + "/"):
@@ -382,9 +367,8 @@ class _BaseS3Backend(BackendProtocol):
         try:
             result = []
             
-            # If listing root, add mount points as virtual directories
+            # If listing root, add virtual mounts and real workspace content.
             if path == "/":
-                # Add standard mounts (this already includes /skills if user_id is set)
                 for mount in self.mounts.keys():
                     result.append({
                         'path': mount,
@@ -392,7 +376,39 @@ class _BaseS3Backend(BackendProtocol):
                         'size': 0,
                         'modified_at': None
                     })
-                
+
+                # Also list real directories/files under the workspace prefix.
+                if self.prefix:
+                    prefix_key = self.prefix.rstrip("/")
+                    if prefix_key and not prefix_key.endswith("/"):
+                        prefix_key += "/"
+
+                    paginator = self.s3_client.get_paginator('list_objects_v2')
+                    for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix_key, Delimiter='/'):
+                        for common_prefix in page.get('CommonPrefixes', []):
+                            dir_key = common_prefix['Prefix'].rstrip('/')
+                            dir_path = self._path_from_key(dir_key)
+                            if not any(item['path'] == dir_path for item in result):
+                                result.append({
+                                    'path': dir_path,
+                                    'is_dir': True,
+                                    'size': 0,
+                                    'modified_at': None
+                                })
+
+                        for obj in page.get('Contents', []):
+                            key = obj['Key']
+                            if key == prefix_key or key.endswith('/'):
+                                continue
+                            file_path = self._path_from_key(key)
+                            if not any(item['path'] == file_path for item in result):
+                                result.append({
+                                    'path': file_path,
+                                    'is_dir': False,
+                                    'size': obj['Size'],
+                                    'modified_at': obj.get('LastModified')
+                                })
+
                 return sorted(result, key=lambda x: x['path'])
             
             # Special handling for /skills directory - show ALL skills from S3
@@ -1324,22 +1340,22 @@ class SolvenS3Backend(_BaseS3Backend):
                 "Cannot initialize SolvenS3Backend: user company_id (tenant) not found in config"
             )
 
+        company_id = user.company_id
+        workspace_prefix = f"{company_id}/threads/{workspace_id}"
         bucket = os.getenv("S3_BUCKET_NAME", "scriba")
         super().__init__(
             bucket=bucket,
-            prefix="",
+            prefix=workspace_prefix,
             endpoint_url=os.getenv("S3_ENDPOINT_URL"),
             access_key=os.getenv("S3_ACCESS_KEY_ID"),
             secret_key=os.getenv("S3_ACCESS_SECRET") or os.getenv("S3_SECRET_KEY"),
             region=os.getenv("S3_REGION", "us-east-1"),
             scope="write",
             user_id=user.id,
-            thread_id=workspace_id,
-            ticket_id=workspace_id,
+            thread_id=None,
+            ticket_id=None,
         )
-        company_id = user.company_id
-        self.mounts["/workspace"] = f"{company_id}/threads/{workspace_id}"
-        self.mounts["/ticket"] = f"{company_id}/threads/{workspace_id}"
+        self.mounts.clear()
         if user.id:
             self.mounts["/skills"] = f"{user.id}/skills"
 

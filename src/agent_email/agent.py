@@ -37,6 +37,8 @@ from src.agent_email.gmail_tools import gmail_tools
 from src.agent_email.outlook_tools import outlook_tools
 from src.utils.backend import get_backend
 
+
+
 gmail_subagent = SubAgent(
     name="asistente_gmail",
     description="agente para gestionar correo de gmail - listar, leer y enviar correos electrónicos",
@@ -65,4 +67,7 @@ email_coordinator = create_deep_agent(
     ),
     backend=get_backend,
     subagents=[gmail_subagent, outlook_subagent],
+    middleware=[
+
+    ]
 )

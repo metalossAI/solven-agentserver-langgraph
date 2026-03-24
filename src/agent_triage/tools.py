@@ -413,11 +413,13 @@ async def crear_ticket(
             for accion in acciones:
                 action_data = {
                     "ticket_id": ticket_id,
+                    "key": accion.key,
                     "title": accion.title,
                     "description": accion.description,
-                    "status": accion.status,  # Pydantic validates this is a valid Literal value
+                    "status": accion.status,
+                    "order": accion.order,
                     "created_by": "AI",
-                    "metadata": accion.metadata,
+                    "metadata": accion.metadata or {},
                 }
                 actions_to_insert.append(action_data)
             
@@ -425,7 +427,31 @@ async def crear_ticket(
                 try:
                     actions_response = await supabase_async.table("actions").insert(actions_to_insert).execute()
                     print(f"[DEBUG] Created {len(actions_to_insert)} actions successfully", flush=True)
-                    # Set ticket updated_at when actions are added
+
+                    # Insert dependency edges (action_dependencies table)
+                    inserted_actions: list[dict] = actions_response.data or []
+                    key_to_id = {
+                        row["key"]: row["id"]
+                        for row in inserted_actions
+                        if row.get("key") and row.get("id")
+                    }
+                    dep_rows = []
+                    for accion in acciones:
+                        if not accion.depends_on or not accion.key:
+                            continue
+                        action_db_id = key_to_id.get(accion.key)
+                        if not action_db_id:
+                            continue
+                        for dep_key in accion.depends_on:
+                            dep_db_id = key_to_id.get(dep_key)
+                            if dep_db_id:
+                                dep_rows.append({
+                                    "action_id": action_db_id,
+                                    "depends_on_action_id": dep_db_id,
+                                })
+                    if dep_rows:
+                        await supabase_async.table("action_dependencies").insert(dep_rows).execute()
+
                     await supabase_async.table("tickets").update({
                         "updated_at": datetime.now(timezone.utc).isoformat(),
                     }).eq("id", ticket_id).eq("company_id", company_id).execute()
@@ -1247,11 +1273,13 @@ async def gestionar_acciones(
             
             action_data = {
                 "ticket_id": ticket_id,
+                "key": accion.key,
                 "title": accion.title,
                 "description": accion.description,
-                "status": accion.status,  # Pydantic validates this is a valid Literal value
+                "status": accion.status,
+                "order": accion.order,
                 "created_by": created_by,
-                "metadata": accion.metadata,
+                "metadata": accion.metadata or {},
             }
             actions_to_insert.append(action_data)
         
@@ -1274,7 +1302,32 @@ async def gestionar_acciones(
         try:
             actions_response = await supabase_async.table("actions").insert(actions_to_insert).execute()
             print(f"[DEBUG] Created {len(actions_to_insert)} actions successfully in mode '{modo}'", flush=True)
-            
+
+            # Insert dependency edges
+            inserted_actions: list[dict] = actions_response.data or []
+            key_to_id = {
+                row["key"]: row["id"]
+                for row in inserted_actions
+                if row.get("key") and row.get("id")
+            }
+            dep_rows = []
+            for accion in acciones:
+                if not accion.depends_on or not accion.key:
+                    continue
+                action_db_id = key_to_id.get(accion.key)
+                if not action_db_id:
+                    continue
+                for dep_key in accion.depends_on:
+                    dep_db_id = key_to_id.get(dep_key)
+                    if dep_db_id:
+                        dep_rows.append({
+                            "action_id": action_db_id,
+                            "depends_on_action_id": dep_db_id,
+                        })
+            if dep_rows:
+                await supabase_async.table("action_dependencies").insert(dep_rows).execute()
+                print(f"[DEBUG] Created {len(dep_rows)} dependency edge(s)", flush=True)
+
             # Set ticket updated_at when actions are modified for this ticket
             await supabase_async.table("tickets").update({
                 "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -1338,20 +1391,14 @@ from src.agent_email.outlook_tools import (
     outlook_get_message,
     outlook_search_messages,
     outlook_list_attachments,
-    outlook_download_attachment,
-    outlook_get_mail_delta,
 )
 
 gmail_tools_triage = [
     gmail_list_threads,
     gmail_download_attachments_list,
-    gmail_get_attachment,
     gmail_fetch_message_by_message_id,
     gmail_fetch_message_by_thread_id,
     gmail_list_history,
-    gmail_create_email_draft,
-    gmail_list_drafts,
-    gmail_list_labels,
 ]
 
 outlook_tools_triage = [
@@ -1360,6 +1407,4 @@ outlook_tools_triage = [
     outlook_search_messages,
     outlook_list_attachments,
     outlook_download_attachments,
-    outlook_download_attachment,
-    outlook_get_mail_delta,
 ]

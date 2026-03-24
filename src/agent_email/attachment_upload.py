@@ -5,8 +5,27 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
+import unicodedata
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
+
+
+def _ascii_safe_filename_for_storage(name: str) -> str:
+    """Map a display filename to an S3-safe ASCII leaf name; keeps extension when possible."""
+    name = (name or "").strip().lstrip("/") or "attachment"
+    base, ext = os.path.splitext(name)
+    norm = unicodedata.normalize("NFKD", base)
+    ascii_base = norm.encode("ascii", "ignore").decode("ascii")
+    ascii_base = re.sub(r"[^a-zA-Z0-9._-]+", "_", ascii_base).strip("._-") or "attachment"
+    ascii_base = re.sub(r"_+", "_", ascii_base)
+    ext_part = ""
+    if ext:
+        e = ext.lstrip(".").lower()
+        e = re.sub(r"[^a-zA-Z0-9]", "", e)[:12]
+        if e:
+            ext_part = "." + e
+    return f"{ascii_base}{ext_part}"
 
 
 def parse_composio_attachment_response(result: str) -> Tuple[Optional[bytes], Optional[str]]:
@@ -67,7 +86,7 @@ async def upload_attachment_to_backend(
     message_id = metadata.get("message_id", "")
     attachment_id = metadata.get("attachment_id", "")
     name_for_path = (file_name or "").strip().lstrip("/")
-    safe_filename = name_for_path.replace(" ", "_").replace("/", "_") or "attachment"
+    safe_filename = _ascii_safe_filename_for_storage(name_for_path)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     upload_path = f"/adjuntos/{timestamp}_{safe_filename}"
 

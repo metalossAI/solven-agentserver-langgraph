@@ -106,9 +106,14 @@ async def initialize_sandbox(state: AgentState, runtime: Runtime[AppContext]):
 		if thread_id and getattr(runtime, "context", None) is not None:
 			ctx = runtime.context
 			if isinstance(ctx, dict):
-				ctx["workspace_id"] = thread_id
+				existing = ctx.get("workspace_id")
 			else:
-				ctx.workspace_id = thread_id
+				existing = getattr(ctx, "workspace_id", None)
+			if not existing:
+				if isinstance(ctx, dict):
+					ctx["workspace_id"] = thread_id
+				else:
+					ctx.workspace_id = thread_id
 		backend = get_backend(runtime)
 		await asyncio.to_thread(backend.ensure_ready)
 		if not backend.is_available():

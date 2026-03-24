@@ -68,6 +68,7 @@ class SandboxBackend(BaseSandbox):
 
 	def __init__(self, runtime: ToolRuntime[AppContext]):
 		self._runtime = runtime
+		self._writer = runtime.stream_writer
 		self._sandbox: Optional[Sandbox] = None
 
 		from src.utils.config import get_user, get_workspace_id

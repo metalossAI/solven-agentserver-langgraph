@@ -101,6 +101,8 @@ async def initialize_sandbox(state: AgentState, runtime: Runtime[AppContext]):
 	Uses asyncio.to_thread to avoid blocking the async event loop.
 	"""
 	try:
+		# Custom stream (streamMode includes "custom") — visible in the chat UI next to the loader.
+		runtime.stream_writer("Inicializando entorno de trabajo…")
 		from src.utils.config import get_thread_id
 		thread_id = get_thread_id()
 		if thread_id and getattr(runtime, "context", None) is not None:
@@ -114,11 +116,19 @@ async def initialize_sandbox(state: AgentState, runtime: Runtime[AppContext]):
 					ctx["workspace_id"] = thread_id
 				else:
 					ctx.workspace_id = thread_id
+		runtime.stream_writer("Preparando espacio de archivos…")
 		backend = get_backend(runtime)
 		await asyncio.to_thread(backend.ensure_ready)
 		if not backend.is_available():
+			runtime.stream_writer("Sandbox no disponible; se usará el modo limitado.")
 			print("[initialize_sandbox] Sandbox not available after ensure_ready", flush=True)
+		else:
+			runtime.stream_writer("Entorno listo.")
 	except Exception as e:
+		try:
+			runtime.stream_writer(f"Error al inicializar el entorno: {e!s}")
+		except Exception:
+			pass
 		print(f"[initialize_sandbox] ✗ Error initializing sandbox: {e}", flush=True)
 		import traceback
 		print(f"[initialize_sandbox] Traceback:\n{traceback.format_exc()}", flush=True)

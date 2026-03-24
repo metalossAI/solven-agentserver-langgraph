@@ -159,6 +159,7 @@ async def research_event_node(
 
     research_agent = create_deep_agent(
         model=_TRIAGE_MODEL,
+        backend=SolvenS3Backend,
         tools=[buscar_tickets, leer_ticket],
         subagents=[
             SubAgent(

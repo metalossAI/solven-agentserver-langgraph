@@ -33,6 +33,7 @@ dependencies = [
     "modal",
     "smithery",
     "supabase",
+    "compact-middleware>=0.1.0",
 ]
 
 

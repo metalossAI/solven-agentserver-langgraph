@@ -22,7 +22,6 @@ from src.agent_email.outlook_tools import outlook_tools
 from src.agent_email.gmail_tools import gmail_tools
 from src.agent_catastro.tools import buscar_inmueble_localizacion, buscar_inmueble_rc, obtener_municipios, obtener_provincias, obtener_numeros_via, obtener_vias
 from src.common.tools import ask
-from src.agent_email.agent import email_coordinator
 load_dotenv()
 
 from langchain.agents.middleware import AgentMiddleware, ModelFallbackMiddleware, ModelRequest, ModelResponse, wrap_model_call
@@ -41,7 +40,6 @@ from deepagents import CompiledSubAgent, MemoryMiddleware, SubAgent, create_deep
 
 from src.models import AppContext, DeepAgentState
 
-from src.agent_catastro.agent import subagent as catastro_subagent
 from src.common.prompt import create_prompt_middleware
 from src.utils.tickets import get_ticket
 

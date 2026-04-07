@@ -582,9 +582,11 @@ class SandboxBackend(BaseSandbox):
 		try:
 			if self._sandbox.files.exists(marker):
 				self._pull_user_models()
+				# Always pull latest skills on every initialization so sandboxes that resume
+				# from a cached/paused state get up-to-date skill content without a full re-clone.
+				self._ensure_skills_repo()
 				self._workspace_ready = True
 				self._initialized = True
-				self._ensure_workspace_ready()
 				self._log_skills_filesystem_state("init_fast_path_marker_exists")
 				self._maybe_hydrate_from_s3_throttled()
 				return

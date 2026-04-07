@@ -8,6 +8,9 @@ from deepagents.graph import (
     SubAgentMiddleware,
     TodoListMiddleware,
 )
+
+from compact_middleware import CompactionMiddleware
+
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
 from deepagents.middleware.summarization import create_summarization_middleware
@@ -45,7 +48,7 @@ from src.utils.tickets import get_ticket
 from langchain.agents.middleware import before_agent, AgentState
 from typing import Callable, Awaitable
 
-from src.agent.middleware import SkillsMiddleware
+from src.agent.middleware import AutoevaluationMiddleware, SkillsMiddleware
 from src.utils.openrouter import OpenRouterContentMiddleware
 
 
@@ -75,18 +78,6 @@ class ToolEnforcementMiddleware(AgentMiddleware):
 		
 		# After the first tool call, let the model decide naturally
 		return await handler(request)
-
-
-# Max evaluation cycles to avoid infinite loops (e.g. model keeps replying without tool calls but we keep re-asking)
-MAX_EVALUATION_CYCLES = 20
-
-EVALUATION_PROMPT = (
-	"Revisa cuidadosamente los resultados de las herramientas y evalúa si el trabajo está completo "
-	"o si necesitas continuar con pasos adicionales. Responde con más llamadas a herramientas o con tu respuesta final."
-)
-
-# Metadata key used to mark our evaluation SystemMessages (avoids content-based detection)
-EVALUATION_MSG_TYPE = "evaluation"
 
 
 @before_agent
@@ -291,6 +282,12 @@ graph = create_agent(
     middleware=[
         initialize_sandbox,
         main_prompt,
+        CompactionMiddleware(
+            ChatOpenRouter(
+                model="google/gemini-3-flash-preview", api_key=os.getenv("OPENROUTER_API_KEY"),),
+            backend=get_backend,
+        ),
+        AutoevaluationMiddleware(model=_MAIN_MODEL),
         TodoListMiddleware(),
         FilesystemMiddleware(backend=get_backend),
         SubAgentMiddleware(
@@ -304,6 +301,7 @@ graph = create_agent(
                         TodoListMiddleware(),
                         FilesystemMiddleware(backend=get_backend),
                         create_summarization_middleware(_MAIN_MODEL, get_backend),
+                        AutoevaluationMiddleware(model=_MAIN_MODEL),
                         AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
                         PatchToolCallsMiddleware(),
                         SkillsMiddleware(
@@ -330,6 +328,7 @@ graph = create_agent(
                         TodoListMiddleware(),
                         FilesystemMiddleware(backend=get_backend),
                         create_summarization_middleware(_MAIN_MODEL, get_backend),
+                        AutoevaluationMiddleware(model=_MAIN_MODEL),
                         AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
                         PatchToolCallsMiddleware(),
                         SkillsMiddleware(
@@ -399,7 +398,7 @@ graph = create_agent(
                 )
             ],
         ),
-        create_summarization_middleware(_MAIN_MODEL, get_backend),
+        #create_summarization_middleware(_MAIN_MODEL, get_backend),
         AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
         PatchToolCallsMiddleware(),
         ModelFallbackMiddleware(

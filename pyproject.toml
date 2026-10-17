@@ -13,7 +13,7 @@ dependencies = [
     "composio",
     "composio-langchain",
     "copilotkit",
-    "deepagents",
+    "deepagents>=0.5.3",
     "e2b",
     "elasticsearch>=8,<9",
     "langchain",

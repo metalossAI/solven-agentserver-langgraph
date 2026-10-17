@@ -70,25 +70,40 @@ def parse_composio_attachment_response(result: str) -> Tuple[Optional[bytes], Op
     return None, "Attachment data not found in response (expected 'data' or 'file' field)"
 
 
+def _normalize_agent_upload_path(path: str) -> str:
+    """Turn agent-supplied path into a logical backend path (strip ``/workspace`` prefix)."""
+    upload_path = "/" + (path or "").strip().lstrip("/")
+    if upload_path.startswith("/workspace/"):
+        upload_path = upload_path[len("/workspace"):]
+    elif upload_path == "/workspace":
+        upload_path = "/"
+    return upload_path
+
+
 async def upload_attachment_to_backend(
     backend: Any,
     file_name: str,
     content: bytes,
     metadata: Dict[str, Any],
+    path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Upload attachment bytes via ``backend.aupload_files``.
 
-    Uses a single logical path ``/adjuntos/...``; SandboxBackend and SolvenS3Backend resolve it
-    internally (workspace root vs ``/workspace`` mount).
+    When ``path`` is set (from tool args), it is used as the destination; a leading ``/workspace``
+    prefix is stripped so SandboxBackend / SolvenS3Backend resolve under the workspace root.
+    When ``path`` is missing or blank, uses ``/adjuntos/{timestamp}_{safe_filename}``.
 
     metadata is echoed in the result dict (message_id, attachment_id, etc.).
     """
     message_id = metadata.get("message_id", "")
     attachment_id = metadata.get("attachment_id", "")
-    name_for_path = (file_name or "").strip().lstrip("/")
-    safe_filename = _ascii_safe_filename_for_storage(name_for_path)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    upload_path = f"/adjuntos/{timestamp}_{safe_filename}"
+    if path and str(path).strip():
+        upload_path = _normalize_agent_upload_path(str(path).strip())
+    else:
+        name_for_path = (file_name or "").strip().lstrip("/")
+        safe_filename = _ascii_safe_filename_for_storage(name_for_path)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        upload_path = f"/adjuntos/{timestamp}_{safe_filename}"
 
     responses = await backend.aupload_files([(upload_path, content)])
     resp = responses[0] if responses else None

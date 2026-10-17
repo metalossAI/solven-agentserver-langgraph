@@ -14,7 +14,7 @@ Flow:
 import os
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from dotenv import load_dotenv
 from langchain_core.documents import Document
@@ -24,6 +24,7 @@ from langchain_postgres import PGVectorStore
 from langgraph.config import get_config
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
+from langgraph.types import Command
 from supabase import create_async_client
 
 from deepagents import SubAgent, SubAgentMiddleware, create_deep_agent
@@ -148,12 +149,27 @@ async def research_event_node(
     # On retry: inject the ID correction feedback into the human message
     id_validation_error: str | None = _state_get(state, "id_validation_error")
     if id_validation_error:
-        input_message = (
-            f"{event_message}\n\n"
-            f"[CORRECCIÓN REQUERIDA — ticket.id inválido]\n"
-            f"{id_validation_error}\n"
-            "Busca el ticket correcto con `buscar_tickets` y usa su UUID exacto en ticket.id."
+        triage_on_state: TriageDecision | None = _state_get(state, "triage")
+        missing_id = not (
+            triage_on_state and triage_on_state.ticket and triage_on_state.ticket.id
         )
+        if missing_id:
+            input_message = (
+                f"{event_message}\n\n"
+                f"[CORRECCIÓN REQUERIDA — ticket.id ausente en acción patch]\n"
+                "Para acciones `patch` es OBLIGATORIO incluir el UUID del ticket existente "
+                "en el campo ticket.id del objeto ticket.\n"
+                f"{id_validation_error}\n"
+                "Usa `buscar_tickets` para encontrar el ticket correcto y copia su UUID exacto "
+                "en ticket.id antes de responder."
+            )
+        else:
+            input_message = (
+                f"{event_message}\n\n"
+                f"[CORRECCIÓN REQUERIDA — ticket.id inválido]\n"
+                f"{id_validation_error}\n"
+                "Busca el ticket correcto con `buscar_tickets` y usa su UUID exacto en ticket.id."
+            )
     else:
         input_message = event_message
 
@@ -195,24 +211,37 @@ async def research_event_node(
 # For create: generates a server-side UUID (ignores any model-provided id).
 # For patch: validates that ticket.id exists and belongs to this company.
 # For discard: upserts with status=discarded (uses server-side UUID too).
+#
+# Routing is expressed directly via Command so no conditional edge is needed:
+#   id_invalid (retries left)  → research_event
+#   id_invalid (retries gone)  → finalize_output
+#   error                      → finalize_output
+#   success + discard          → finalize_output
+#   success + create/patch     → download_attachments
 # ---------------------------------------------------------------------------
 async def persist_ticket_node(
     state: DeterministicTriageState, runtime: Runtime[TriageContext]
-) -> dict[str, Any]:
+) -> Command[Literal["research_event", "download_attachments", "finalize_output"]]:
     triage: TriageDecision | None = _state_get(state, "triage")
     if triage is None:
-        return {
-            "last_persist_status": "error",
-            "errors": [*(_state_get(state, "errors", []) or []), "TriageDecision ausente en estado."],
-        }
+        return Command(
+            update={
+                "last_persist_status": "error",
+                "errors": [*(_state_get(state, "errors", []) or []), "TriageDecision ausente en estado."],
+            },
+            goto="finalize_output",
+        )
 
     user = get_user()
     company_id = user.company_id
     if not company_id:
-        return {
-            "last_persist_status": "error",
-            "errors": [*(_state_get(state, "errors", []) or []), "Usuario sin compañía asignada."],
-        }
+        return Command(
+            update={
+                "last_persist_status": "error",
+                "errors": [*(_state_get(state, "errors", []) or []), "Usuario sin compañía asignada."],
+            },
+            goto="finalize_output",
+        )
 
     action = triage.action
     ticket: TicketDraft = triage.ticket
@@ -228,22 +257,35 @@ async def persist_ticket_node(
         ticket_id = ticket.id or ""
 
     if action == "patch":
+        retry_goto: Literal["research_event", "finalize_output"] = (
+            "research_event" if retry_count + 1 <= max_retries else "finalize_output"
+        )
+
         if not ticket_id:
-            return {
-                "last_persist_status": "id_invalid",
-                "id_validation_error": "No se proporcionó ticket.id para la acción patch.",
-                "retry_count": retry_count + 1,
-                "errors": [*(_state_get(state, "errors", []) or []), "Patch sin ticket.id."],
-            }
+            return Command(
+                update={
+                    "last_persist_status": "id_invalid",
+                    "id_validation_error": (
+                        "La acción es `patch` pero ticket.id está vacío. "
+                        "Debes incluir el UUID del ticket existente en el campo ticket.id del objeto ticket."
+                    ),
+                    "retry_count": retry_count + 1,
+                    "errors": [*(_state_get(state, "errors", []) or []), "Patch sin ticket.id."],
+                },
+                goto=retry_goto,
+            )
         try:
             uuid.UUID(ticket_id)
         except ValueError:
-            return {
-                "last_persist_status": "id_invalid",
-                "id_validation_error": f"ticket.id '{ticket_id}' no es un UUID válido.",
-                "retry_count": retry_count + 1,
-                "errors": [*(_state_get(state, "errors", []) or []), f"UUID inválido: {ticket_id}"],
-            }
+            return Command(
+                update={
+                    "last_persist_status": "id_invalid",
+                    "id_validation_error": f"ticket.id '{ticket_id}' no es un UUID válido.",
+                    "retry_count": retry_count + 1,
+                    "errors": [*(_state_get(state, "errors", []) or []), f"UUID inválido: {ticket_id}"],
+                },
+                goto=retry_goto,
+            )
         try:
             supabase_async = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
             existing = (
@@ -254,22 +296,28 @@ async def persist_ticket_node(
                 .execute()
             )
             if not existing.data:
-                return {
-                    "last_persist_status": "id_invalid",
-                    "id_validation_error": (
-                        f"ticket.id '{ticket_id}' no existe o no pertenece a company_id '{company_id}'."
-                    ),
-                    "retry_count": retry_count + 1,
-                    "errors": [
-                        *(_state_get(state, "errors", []) or []),
-                        "Ticket objetivo no encontrado para patch.",
-                    ],
-                }
+                return Command(
+                    update={
+                        "last_persist_status": "id_invalid",
+                        "id_validation_error": (
+                            f"ticket.id '{ticket_id}' no existe o no pertenece a company_id '{company_id}'."
+                        ),
+                        "retry_count": retry_count + 1,
+                        "errors": [
+                            *(_state_get(state, "errors", []) or []),
+                            "Ticket objetivo no encontrado para patch.",
+                        ],
+                    },
+                    goto=retry_goto,
+                )
         except Exception as e:
-            return {
-                "last_persist_status": "error",
-                "errors": [*(_state_get(state, "errors", []) or []), f"Error validando ticket.id: {e}"],
-            }
+            return Command(
+                update={
+                    "last_persist_status": "error",
+                    "errors": [*(_state_get(state, "errors", []) or []), f"Error validando ticket.id: {e}"],
+                },
+                goto="finalize_output",
+            )
 
     # --- Document upsert (required by tickets.document_id NOT NULL) ---
     # The document uses the same UUID as the ticket so document_id = ticket_id.
@@ -300,10 +348,13 @@ async def persist_ticket_node(
         )
         await vector_store.aadd_documents([doc])
     except Exception as e:
-        return {
-            "last_persist_status": "error",
-            "errors": [*(_state_get(state, "errors", []) or []), f"Error creando documento: {e}"],
-        }
+        return Command(
+            update={
+                "last_persist_status": "error",
+                "errors": [*(_state_get(state, "errors", []) or []), f"Error creando documento: {e}"],
+            },
+            goto="finalize_output",
+        )
 
     # --- Ticket upsert ---
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -327,10 +378,13 @@ async def persist_ticket_node(
         supabase_async = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
         await supabase_async.table("tickets").upsert(payload, on_conflict="id").execute()
     except Exception as e:
-        return {
-            "last_persist_status": "error",
-            "errors": [*(_state_get(state, "errors", []) or []), f"Error en upsert: {e}"],
-        }
+        return Command(
+            update={
+                "last_persist_status": "error",
+                "errors": [*(_state_get(state, "errors", []) or []), f"Error en upsert: {e}"],
+            },
+            goto="finalize_output",
+        )
 
     # Align runtime context so downstream nodes and backends use the correct workspace.
     if getattr(runtime, "context", None) is not None:
@@ -340,33 +394,23 @@ async def persist_ticket_node(
     # Write the resolved id back into the triage ticket so downstream nodes see it.
     ticket.id = ticket_id
 
-    return {
-        "triage": triage,
-        "persisted_ticket_id": ticket_id,
-        "workspace_id": ticket_id,
-        "last_persist_status": "ok",
-        "id_validation_error": None,
-        "retry_count": 0,
-        "max_retries": max_retries,
-    }
+    next_node: Literal["download_attachments", "finalize_output"] = (
+        "finalize_output" if action == "discard" else "download_attachments"
+    )
+    return Command(
+        update={
+            "triage": triage,
+            "persisted_ticket_id": ticket_id,
+            "workspace_id": ticket_id,
+            "last_persist_status": "ok",
+            "id_validation_error": None,
+            "retry_count": 0,
+            "max_retries": max_retries,
+        },
+        goto=next_node,
+    )
 
 
-# ---------------------------------------------------------------------------
-# Routing after persist
-# ---------------------------------------------------------------------------
-def route_after_persist(state: DeterministicTriageState) -> str:
-    status = _state_get(state, "last_persist_status", "ok")
-    retry_count = int(_state_get(state, "retry_count", 0) or 0)
-    max_retries = int(_state_get(state, "max_retries", 2) or 2)
-
-    if status == "id_invalid" and retry_count <= max_retries:
-        return "research_event"
-
-    triage: TriageDecision | None = _state_get(state, "triage")
-    if triage and triage.action == "discard":
-        return "finalize_output"
-
-    return "download_attachments"
 
 
 # ---------------------------------------------------------------------------
@@ -715,15 +759,7 @@ builder.add_node("finalize_output", finalize_output_node)
 
 builder.add_edge(START, "research_event")
 builder.add_edge("research_event", "persist_ticket")
-builder.add_conditional_edges(
-    "persist_ticket",
-    route_after_persist,
-    {
-        "research_event": "research_event",
-        "download_attachments": "download_attachments",
-        "finalize_output": "finalize_output",
-    },
-)
+# persist_ticket uses Command to route — no conditional edge needed.
 builder.add_edge("download_attachments", "suggest_actions")
 builder.add_edge("suggest_actions", "finalize_output")
 builder.add_edge("finalize_output", END)

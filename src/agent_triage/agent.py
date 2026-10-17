@@ -42,8 +42,6 @@ from src.agent_triage.tools import (
 )
 
 from src.utils.vector_store import search
-from src.backend import SolvenS3Backend
-
 
 class ForceToolCallMiddleware(AgentMiddleware):
 	"""
@@ -177,7 +175,7 @@ graph = create_deep_agent(
 		model="x-ai/grok-4.1-fast",
 		api_key=os.getenv("OPENROUTER_API_KEY"),
 	),
-	backend=SolvenS3Backend,
+	backend=get_backend,
 	tools=[
 		seleccionar_ticket,
 		gmail_download_attachments_list,

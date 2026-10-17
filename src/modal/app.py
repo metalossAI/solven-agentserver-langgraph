@@ -20,7 +20,7 @@ docling_image = (
     )
 )
 
-app = modal.App("solven-docling-converter", image=docling_image)
+app = modal.App("oficialLM-docling-converter", image=docling_image)
 
 
 def _build_converter():

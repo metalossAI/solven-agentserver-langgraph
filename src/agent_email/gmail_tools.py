@@ -26,6 +26,11 @@ class GmailAttachmentSpec(BaseModel):
     message_id: str = Field(description="The ID of the message containing the attachment.")
     attachment_id: str = Field(description="The ID of the attachment to retrieve.")
     file_name: str = Field(description="The name to save the attachment as.")
+    path: Optional[str] = Field(
+        default=None,
+        description="Workspace path where the attachment will be saved "
+        "(e.g. '/adjuntos/invoices/invoice.pdf'). When omitted, a path under /adjuntos/ is generated.",
+    )
     user_id: str = Field(default="me", description="Gmail user ID. Defaults to 'me'.")
 
 
@@ -704,7 +709,9 @@ async def _download_one_attachment(
         "uploaded_at": datetime.now().isoformat(),
     }
     backend = get_backend(runtime)
-    return await upload_attachment_to_backend(backend, file_name, attachment_bytes, metadata)
+    return await upload_attachment_to_backend(
+        backend, file_name, attachment_bytes, metadata, path=spec.path
+    )
 
 
 @tool(
@@ -716,7 +723,8 @@ async def gmail_get_attachment(
 ) -> str:
     """
     Retrieves a specific attachment by ID from a message in a user's Gmail mailbox.
-    Returns the workspace-relative path where the agent can access the file.
+    Pass ``path`` on the attachment spec to choose the workspace save location; otherwise a path
+    under /adjuntos/ is generated. Returns the workspace-relative path where the agent can access the file.
     """
     result = await _download_one_attachment(runtime, attachment)
     return json.dumps(result, indent=2)
@@ -729,8 +737,8 @@ async def gmail_download_attachments_list(
 ) -> str:
     """
     Downloads multiple Gmail attachments at once. Each attachment is fetched and saved to the
-    workspace (S3). Pass a list of attachment specs (message_id, attachment_id, file_name) from
-    get_attachment_list. Returns a JSON summary with success/path or error per file.
+    workspace (S3). Pass a list of attachment specs (message_id, attachment_id, file_name, optional path)
+    from get_attachment_list. Returns a JSON summary with success/path or error per file.
     """
     if not attachments:
         return json.dumps({"success": True, "downloaded": 0, "results": []}, indent=2)
@@ -741,6 +749,7 @@ async def gmail_download_attachments_list(
                 message_id=spec.message_id,
                 attachment_id=spec.attachment_id,
                 file_name=spec.file_name,
+                path=spec.path,
                 user_id=user_id,
             )
         one = await _download_one_attachment(runtime, spec)
